@@ -1,0 +1,74 @@
+{
+  "name": "opencode-ui",
+  "displayName": "opencode-ui",
+  "publisher": "local",
+  "version": "0.0.34",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": ">=1.109.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onView:opencodeUI.sidebar"
+  ],
+  "main": "./out/extension.js",
+  "files": [
+    "out/**",
+    "media/**",
+    "package.json"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "opencodeUI",
+          "title": "opencode-ui",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "opencodeUI": [
+        {
+          "id": "opencodeUI.sidebar",
+          "name": "OpenCode UI",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "opencodeUI.refresh",
+        "title": "OpenCode UI: Refresh"
+      },
+      {
+        "command": "opencodeUI.openSidebar",
+        "title": "OpenCode UI: Open Sidebar"
+      }
+    ]
+  },
+  "scripts": {
+    "clean:webview": "node -e \"const fs=require('fs');const path=require('path');const dir='media';if(fs.existsSync(dir)){for(const name of fs.readdirSync(dir)){if(/^index-.*\\.(js|css)$/.test(name)){fs.rmSync(path.join(dir,name),{force:true});}}}\"",
+    "build:webview": "npm run clean:webview && npm --prefix webview-ui run build",
+    "build": "npm run build:webview && tsc -p .",
+    "watch": "tsc -w -p .",
+    "test": "vitest run",
+    "test:extension": "npm run build && node ./out/test/runTest.js",
+    "package": "vsce package --no-dependencies",
+    "vscode:prepublish": "npm run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.5",
+    "@types/node": "^20.17.30",
+    "@types/vscode": "^1.109.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.6.2",
+    "typescript": "^5.8.2",
+    "vitest": "^2.1.9"
+  }
+}
