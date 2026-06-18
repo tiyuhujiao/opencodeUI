@@ -6,6 +6,14 @@ Language: English | [简体中文](./README.zh-CN.md)
 
 The extension is designed for VS Code and compatible IDEs such as Cursor.
 
+## Preview
+
+![opencode-ui chat sidebar](./docs/images/opencode-ui-chat.png)
+
+| Models and agents | Diagnostics and host support |
+| --- | --- |
+| ![Model and agent picker](./docs/images/opencode-ui-models.png) | ![Diagnostics and supported hosts](./docs/images/opencode-ui-diagnostics.png) |
+
 ## Features
 
 - Sidebar chat UI for OpenCode inside the IDE activity bar.
@@ -133,6 +141,10 @@ GitHub Actions runs the repository preflight and packages a VSIX artifact on pus
 npm run check
 npm run package
 ```
+
+## Feedback
+
+Bug reports, host-specific setup notes, UI ideas, and feature requests are welcome. Please open an issue through [GitHub Issues](https://github.com/tiyuhujiao/opencodeUI/issues), and include your host environment, IDE, `opencode --version`, and any sanitized diagnostics that help reproduce the problem.
 
 ## Troubleshooting
 

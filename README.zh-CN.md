@@ -6,6 +6,14 @@
 
 该扩展面向 VS Code，也适用于 Cursor 等兼容 IDE。
 
+## 预览
+
+![opencode-ui 侧边栏聊天界面](./docs/images/opencode-ui-chat.png)
+
+| 模型与 Agent 选择 | 诊断与宿主支持 |
+| --- | --- |
+| ![模型与 Agent 选择器](./docs/images/opencode-ui-models.png) | ![诊断与支持的宿主环境](./docs/images/opencode-ui-diagnostics.png) |
+
 ## 功能
 
 - 在 IDE Activity Bar 中提供 OpenCode 侧边栏聊天界面。
@@ -133,6 +141,10 @@ GitHub Actions 会在 push 和 pull request 时运行检查并打包 VSIX artifa
 npm run check
 npm run package
 ```
+
+## 反馈与 Issue
+
+欢迎大家提出 bug、宿主环境适配问题、UI 建议和新功能需求。可以通过 [GitHub Issues](https://github.com/tiyuhujiao/opencodeUI/issues) 反馈；如果是问题报告，建议附上宿主环境、IDE、`opencode --version` 和已脱敏的诊断信息，方便复现。
 
 ## 常见问题
 
