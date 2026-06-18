@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+webview-ui/node_modules/
+
+# VS Code extension smoke-test downloads
+.vscode-test/
+
+# Playwright CLI verification artifacts
+.playwright-cli/
+output/
+
+# Local package artifacts
+vsix/
+*.vsix
+downloads/
+
+# Local session exports / diagnostics
+session-*.md
+会话*.md
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# TypeScript incremental caches
+*.tsbuildinfo
+
+# Webview standalone build output
+webview-ui/dist/
+
+# OS/editor noise
+.DS_Store
+.vscode/
+
+# Local agent/project notes
+AGENTS.md
+修改日志.md
+项目总结.md

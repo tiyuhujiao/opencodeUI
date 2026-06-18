@@ -1,0 +1,86 @@
+{
+  "name": "opencode-ui",
+  "displayName": "opencode-ui",
+  "publisher": "local",
+  "version": "0.0.75",
+  "description": "OpenCode sidebar UI for VS Code-compatible IDEs.",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tiyuhujiao/opencodeUI.git"
+  },
+  "homepage": "https://github.com/tiyuhujiao/opencodeUI#readme",
+  "bugs": {
+    "url": "https://github.com/tiyuhujiao/opencodeUI/issues"
+  },
+  "engines": {
+    "vscode": ">=1.105.0",
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "opencodeUI",
+          "title": "opencode-ui",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "opencodeUI": [
+        {
+          "id": "opencodeUI.sidebar",
+          "name": "OpenCode UI",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "opencodeUI.refresh",
+        "title": "OpenCode UI: Refresh"
+      },
+      {
+        "command": "opencodeUI.openSidebar",
+        "title": "OpenCode UI: Open Sidebar"
+      },
+      {
+        "command": "opencodeUI.showDiagnostics",
+        "title": "OpenCode UI: Show Diagnostics"
+      }
+    ]
+  },
+  "scripts": {
+    "clean:webview": "node -e \"const fs=require('fs');const path=require('path');const dir='media';if(fs.existsSync(dir)){for(const name of fs.readdirSync(dir)){if(/^index-.*\\.(js|css)$/.test(name)){fs.rmSync(path.join(dir,name),{force:true});}}}\"",
+    "build:webview": "npm run clean:webview && npm --prefix webview-ui run build",
+    "build": "npm run build:webview && tsc -p .",
+    "typecheck": "tsc -p . --noEmit && npm --prefix webview-ui run typecheck",
+    "lint": "biome lint --diagnostic-level=error src tests webview-ui/src",
+    "check": "npm run lint && npm run build && npm test",
+    "ci": "npm run check && npm run package",
+    "watch": "tsc -w -p .",
+    "test": "vitest run",
+    "test:extension": "npm run build && node ./out/test/runTest.js",
+    "package": "node -e \"require('fs').mkdirSync('vsix',{recursive:true})\" && vsce package --no-dependencies --out vsix",
+    "vscode:prepublish": "npm run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.5",
+    "@types/node": "^20.17.30",
+    "@types/vscode": "^1.105.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.6.2",
+    "typescript": "^5.8.2",
+    "vitest": "^2.1.9"
+  }
+}
