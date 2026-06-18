@@ -1,5 +1,7 @@
 # opencode-ui
 
+Language: English | [简体中文](./README.zh-CN.md)
+
 `opencode-ui` is a VS Code-compatible extension that brings an OpenCode chat interface into the IDE sidebar. It connects the extension host to the local or remote `opencode` CLI, starts `opencode serve` when needed, and renders sessions, streaming replies, tools, permissions, models, agents, todos, and image attachments in a React/Vite webview.
 
 The extension is designed for VS Code and compatible IDEs such as Cursor.
