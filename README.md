@@ -10,9 +10,9 @@ The extension is designed for VS Code and compatible IDEs such as Cursor.
 
 ![opencode-ui chat sidebar](./docs/images/opencode-ui-chat.png)
 
-| Models and agents | Diagnostics and host support |
+| Todo planning | Thinking details |
 | --- | --- |
-| ![Model and agent picker](./docs/images/opencode-ui-models.png) | ![Diagnostics and supported hosts](./docs/images/opencode-ui-diagnostics.png) |
+| ![Todo panel in opencode-ui](./docs/images/opencode-ui-models.png) | ![Thinking details in opencode-ui](./docs/images/opencode-ui-diagnostics.png) |
 
 ## Features
 

@@ -10,9 +10,9 @@
 
 ![opencode-ui 侧边栏聊天界面](./docs/images/opencode-ui-chat.png)
 
-| 模型与 Agent 选择 | 诊断与宿主支持 |
+| Todo 规划面板 | Thinking 详情 |
 | --- | --- |
-| ![模型与 Agent 选择器](./docs/images/opencode-ui-models.png) | ![诊断与支持的宿主环境](./docs/images/opencode-ui-diagnostics.png) |
+| ![opencode-ui Todo 面板](./docs/images/opencode-ui-models.png) | ![opencode-ui Thinking 详情](./docs/images/opencode-ui-diagnostics.png) |
 
 ## 功能
 
