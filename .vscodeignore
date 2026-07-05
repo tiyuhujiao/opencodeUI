@@ -2,6 +2,8 @@ src/**
 tests/**
 webview-ui/**
 .github/**
+docs/**
+github-upload/**
 .vscode-test/**
 .playwright-cli/**
 .vscode/**

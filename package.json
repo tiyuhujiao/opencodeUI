@@ -2,7 +2,7 @@
   "name": "opencode-ui",
   "displayName": "opencode-ui",
   "publisher": "local",
-  "version": "0.0.75",
+  "version": "0.0.76",
   "description": "OpenCode sidebar UI for VS Code-compatible IDEs.",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -72,6 +72,7 @@
     "test": "vitest run",
     "test:extension": "npm run build && node ./out/test/runTest.js",
     "package": "node -e \"require('fs').mkdirSync('vsix',{recursive:true})\" && vsce package --no-dependencies --out vsix",
+    "package:github": "node github-upload/package-github-release.js",
     "vscode:prepublish": "npm run build"
   },
   "devDependencies": {

@@ -10,7 +10,9 @@ webview-ui/node_modules/
 output/
 
 # Local package artifacts
-vsix/
+/vsix/
+github-upload/vsix/*
+!github-upload/vsix/.gitkeep
 *.vsix
 downloads/
 

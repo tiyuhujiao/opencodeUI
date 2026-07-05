@@ -73,7 +73,11 @@ describe('SidebarProvider run stop', () => {
   it('clears backend run state before notifying the webview about terminal events', () => {
     const source = readFileSync(join(process.cwd(), 'src/webview/SidebarProvider.ts'), 'utf8');
 
-    expect(source).toContain("this.clearCurrentRunForRequest(requestId);\n        this.respondRunEvent(webview, requestId, { type: 'stopped' });");
-    expect(source).toContain("this.clearCurrentRunForRequest(requestId);\n      this.respondRunEvent(webview, requestId, { type: 'done' });");
+    expect(source).toMatch(
+      /this\.clearCurrentRunForRequest\(requestId\);\s*this\.respondRunEvent\(webview, requestId, \{ type: ["']stopped["'] \}\);/
+    );
+    expect(source).toMatch(
+      /this\.clearCurrentRunForRequest\(requestId\);\s*this\.respondRunEvent\(webview, requestId, \{ type: ["']done["'] \}\);/
+    );
   });
 });
