@@ -142,7 +142,7 @@ npm run check
 npm run package
 ```
 
-Maintainers can publish the Marketplace package with the manual `Publish Marketplace` workflow after adding repository secrets named `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID`. The workflow signs in with GitHub Actions OIDC and prints the managed identity's Marketplace User Id in the run summary; add that User Id to the Visual Studio Marketplace publisher as a Contributor. The workflow rebuilds and verifies the project, generates the public VSIX from `github-upload/release.json`, uploads the VSIX artifact, and publishes it with `vsce --azure-credential`.
+Maintainers can publish the Marketplace package with the manual `Publish Marketplace` workflow after adding repository secrets named `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID`. The workflow signs in with GitHub Actions OIDC and prints the managed identity's Marketplace User Id in the run log and summary; add that User Id to the Visual Studio Marketplace publisher as a Contributor. The workflow rebuilds and verifies the project, generates the public VSIX from `github-upload/release.json`, uploads the VSIX artifact, and publishes it with `vsce --azure-credential`.
 
 ## Feedback
 

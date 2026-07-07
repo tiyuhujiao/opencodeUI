@@ -56,6 +56,7 @@ jobs:
           )"
 
           echo "marketplace_user_id=$marketplace_user_id" >> "$GITHUB_OUTPUT"
+          echo "Marketplace User Id: $marketplace_user_id"
           {
             echo "### Marketplace managed identity"
             echo
