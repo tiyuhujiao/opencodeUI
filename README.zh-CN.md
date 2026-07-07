@@ -142,7 +142,7 @@ npm run check
 npm run package
 ```
 
-维护者可以在仓库 Secrets 中添加 `AZURE_CLIENT_ID`、`AZURE_TENANT_ID` 和 `AZURE_SUBSCRIPTION_ID`，然后手动运行 `Publish Marketplace` workflow。该流程会先通过 GitHub Actions OIDC 登录 Azure，并在运行日志和摘要里打印托管身份的 Marketplace User Id；把这个 User Id 加入 Visual Studio Marketplace publisher，角色设为 Contributor。流程随后会重新构建并验证项目，根据 `github-upload/release.json` 生成公开 VSIX，上传 artifact，并使用 `vsce --azure-credential` 发布到插件市场。
+维护者可以在仓库 Secrets 中添加 `AZURE_CLIENT_ID` 和 `AZURE_TENANT_ID`，然后手动运行 `Publish Marketplace` workflow。该流程会先通过 GitHub Actions OIDC 登录 Azure，并在运行日志和摘要里打印托管身份的 Marketplace User Id；把这个 User Id 加入 Visual Studio Marketplace publisher，角色设为 Contributor。流程随后会重新构建并验证项目，根据 `github-upload/release.json` 生成公开 VSIX，上传 artifact，并使用 `vsce --azure-credential` 发布到插件市场。
 
 ## 反馈与 Issue
 
