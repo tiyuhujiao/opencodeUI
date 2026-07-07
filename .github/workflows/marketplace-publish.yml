@@ -2,10 +2,22 @@ name: Publish Marketplace
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Marketplace version to publish. Defaults to github-upload/release.json.
+        required: false
+        type: string
+  release:
+    types:
+      - published
 
 permissions:
   contents: read
   id-token: write
+
+concurrency:
+  group: marketplace-publish
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -14,6 +26,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -23,6 +37,87 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             webview-ui/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install webview dependencies
+        run: npm --prefix webview-ui ci
+
+      - name: Check
+        run: npm run check
+
+      - name: Resolve Marketplace version
+        id: marketplace_version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          marketplace_version="$(
+            node <<'NODE'
+          const fs = require("node:fs");
+
+          const release = JSON.parse(
+            fs.readFileSync("github-upload/release.json", "utf8"),
+          );
+          const raw =
+            process.env.RELEASE_TAG ||
+            process.env.INPUT_VERSION ||
+            release.publicVersion;
+          const version = raw.replace(/^v/i, "");
+
+          if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
+            throw new Error(
+              `Marketplace version must be semver, got ${JSON.stringify(raw)}.`,
+            );
+          }
+
+          console.log(version);
+          NODE
+          )"
+
+          echo "version=$marketplace_version" >> "$GITHUB_OUTPUT"
+          echo "Marketplace version: $marketplace_version"
+
+      - name: Build Marketplace VSIX
+        run: npm run package:github
+        env:
+          OPENCODEUI_PUBLIC_VERSION: ${{ steps.marketplace_version.outputs.version }}
+
+      - name: Resolve Marketplace VSIX
+        id: package
+        shell: bash
+        run: |
+          node <<'NODE' >> "$GITHUB_OUTPUT"
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const publicVersion = process.env.OPENCODEUI_PUBLIC_VERSION;
+          const vsixPath = path.join(
+            "github-upload",
+            "vsix",
+            `${pkg.name}-${publicVersion}.vsix`,
+          );
+
+          if (!fs.existsSync(vsixPath)) {
+            throw new Error(`Missing Marketplace VSIX: ${vsixPath}`);
+          }
+
+          console.log(`vsix=${vsixPath.replaceAll("\\", "/")}`);
+          console.log(`extension_id=${pkg.publisher}.${pkg.name}`);
+          console.log(`version=${publicVersion}`);
+          NODE
+        env:
+          OPENCODEUI_PUBLIC_VERSION: ${{ steps.marketplace_version.outputs.version }}
+
+      - name: Upload Marketplace VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: marketplace-vsix
+          path: ${{ steps.package.outputs.vsix }}
+          if-no-files-found: error
 
       - name: Azure login
         uses: azure/login@v2
@@ -57,59 +152,6 @@ jobs:
 
           echo "marketplace_user_id=$marketplace_user_id" >> "$GITHUB_OUTPUT"
           echo "Marketplace User Id: $marketplace_user_id"
-          {
-            echo "### Marketplace managed identity"
-            echo
-            echo "Add this Marketplace User Id to the Visual Studio Marketplace publisher as a Contributor:"
-            echo
-            echo "\`$marketplace_user_id\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Install root dependencies
-        run: npm ci
-
-      - name: Install webview dependencies
-        run: npm --prefix webview-ui ci
-
-      - name: Check
-        run: npm run check
-
-      - name: Build Marketplace VSIX
-        run: npm run package:github
-
-      - name: Resolve Marketplace VSIX
-        id: package
-        shell: bash
-        run: |
-          node <<'NODE' >> "$GITHUB_OUTPUT"
-          const fs = require("node:fs");
-          const path = require("node:path");
-
-          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
-          const release = JSON.parse(
-            fs.readFileSync(path.join("github-upload", "release.json"), "utf8"),
-          );
-          const vsixPath = path.join(
-            "github-upload",
-            "vsix",
-            `${pkg.name}-${release.publicVersion}.vsix`,
-          );
-
-          if (!fs.existsSync(vsixPath)) {
-            throw new Error(`Missing Marketplace VSIX: ${vsixPath}`);
-          }
-
-          console.log(`vsix=${vsixPath.replaceAll("\\", "/")}`);
-          console.log(`extension_id=${pkg.publisher}.${pkg.name}`);
-          console.log(`version=${release.publicVersion}`);
-          NODE
-
-      - name: Upload Marketplace VSIX artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: marketplace-vsix
-          path: ${{ steps.package.outputs.vsix }}
-          if-no-files-found: error
 
       - name: Publish to VS Code Marketplace
         shell: bash

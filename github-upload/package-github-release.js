@@ -30,10 +30,11 @@ function copyIfExists(from, to) {
 
 const config = readJson(configPath);
 const sourcePackage = readJson(packagePath);
-const publicVersion = config.publicVersion;
+const publicVersion =
+	process.env.OPENCODEUI_PUBLIC_VERSION || config.publicVersion;
 const localVersion = sourcePackage.version;
 
-assertVersion(publicVersion, "github-upload/release.json publicVersion");
+assertVersion(publicVersion, "Marketplace public version");
 assertVersion(localVersion, "package.json version");
 
 for (const required of ["out", "media"]) {
