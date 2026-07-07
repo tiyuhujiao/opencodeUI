@@ -84,13 +84,13 @@ npm run package
 安装到 VS Code：
 
 ```bash
-code --install-extension vsix/opencode-ui-0.0.75.vsix --force
+code --install-extension vsix/opencode-ui-vscode-0.0.78.vsix --force
 ```
 
 安装到 Cursor：
 
 ```bash
-cursor --install-extension vsix/opencode-ui-0.0.75.vsix --force
+cursor --install-extension vsix/opencode-ui-vscode-0.0.78.vsix --force
 ```
 
 如果版本号更新，请按当前 `package.json` 版本调整 VSIX 文件名。
@@ -141,6 +141,8 @@ GitHub Actions 会在 push 和 pull request 时运行检查并打包 VSIX artifa
 npm run check
 npm run package
 ```
+
+维护者可以在仓库 Secrets 中添加 `AZURE_CLIENT_ID`、`AZURE_TENANT_ID` 和 `AZURE_SUBSCRIPTION_ID`，并把对应的用户分配托管身份加入 Visual Studio Marketplace publisher，角色设为 Contributor，然后手动运行 `Publish Marketplace` workflow。该流程会重新构建并验证项目，根据 `github-upload/release.json` 生成公开 VSIX，上传 artifact，通过 GitHub Actions OIDC 登录 Azure，并使用 `vsce --azure-credential` 发布到插件市场。
 
 ## 反馈与 Issue
 

@@ -84,13 +84,13 @@ npm run package
 Install the generated package into VS Code:
 
 ```bash
-code --install-extension vsix/opencode-ui-0.0.75.vsix --force
+code --install-extension vsix/opencode-ui-vscode-0.0.78.vsix --force
 ```
 
 Or into Cursor:
 
 ```bash
-cursor --install-extension vsix/opencode-ui-0.0.75.vsix --force
+cursor --install-extension vsix/opencode-ui-vscode-0.0.78.vsix --force
 ```
 
 Adjust the VSIX filename to match the current `package.json` version.
@@ -141,6 +141,8 @@ GitHub Actions runs the repository preflight and packages a VSIX artifact on pus
 npm run check
 npm run package
 ```
+
+Maintainers can publish the Marketplace package with the manual `Publish Marketplace` workflow after adding repository secrets named `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID`. The matching user-assigned managed identity must be added to the Visual Studio Marketplace publisher as a Contributor. The workflow rebuilds and verifies the project, generates the public VSIX from `github-upload/release.json`, uploads the VSIX artifact, signs in with GitHub Actions OIDC, and publishes it with `vsce --azure-credential`.
 
 ## Feedback
 

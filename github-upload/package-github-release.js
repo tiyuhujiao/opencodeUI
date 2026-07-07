@@ -49,7 +49,8 @@ if (!fs.existsSync(vsceBin)) {
 }
 
 fs.mkdirSync(outputDir, { recursive: true });
-const outputPath = path.join(outputDir, `opencode-ui-${publicVersion}.vsix`);
+const outputBaseName = `${sourcePackage.name}-${publicVersion}`;
+const outputPath = path.join(outputDir, `${outputBaseName}.vsix`);
 fs.rmSync(outputPath, { force: true });
 
 const staging = fs.mkdtempSync(
@@ -99,7 +100,7 @@ try {
 		asset: path.relative(root, outputPath).replace(/\\/g, "/"),
 	};
 	fs.writeFileSync(
-		path.join(outputDir, `opencode-ui-${publicVersion}.json`),
+		path.join(outputDir, `${outputBaseName}.json`),
 		`${JSON.stringify(manifest, null, 2)}\n`,
 	);
 	console.log(`GitHub VSIX: ${outputPath}`);
