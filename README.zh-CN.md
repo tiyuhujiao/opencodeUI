@@ -84,13 +84,13 @@ npm run package
 安装到 VS Code：
 
 ```bash
-code --install-extension vsix/opencode-ui-vscode-0.0.88.vsix --force
+code --install-extension vsix/opencode-ui-vscode-0.0.89.vsix --force
 ```
 
 安装到 Cursor：
 
 ```bash
-cursor --install-extension vsix/opencode-ui-vscode-0.0.88.vsix --force
+cursor --install-extension vsix/opencode-ui-vscode-0.0.89.vsix --force
 ```
 
 如果版本号更新，请按当前 `package.json` 版本调整 VSIX 文件名。

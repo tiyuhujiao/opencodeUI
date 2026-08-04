@@ -6,6 +6,7 @@ import { ModelDialog } from './components/dialog/ModelDialog'
 import { SessionDialog } from './components/dialog/SessionDialog'
 import { TimelineDialog } from './components/dialog/TimelineDialog'
 import { ResourceDialog, type ResourceDialogKind } from './components/dialog/ResourceDialog'
+import { ExportDialog, type SessionExportOptions } from './components/dialog/ExportDialog'
 import { resolveSessionSelectionAfterList } from './sessionSelection'
 import {
   applyRunEventToTranscript,
@@ -780,6 +781,9 @@ export default function App() {
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
   const [sessionDialogOpen, setSessionDialogOpen] = useState(false)
   const [timelineDialogOpen, setTimelineDialogOpen] = useState(false)
+  const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  const [exportDialogBusy, setExportDialogBusy] = useState(false)
+  const [exportDialogError, setExportDialogError] = useState<string | null>(null)
   const [timelineItems, setTimelineItems] = useState<SessionTimelineItem[]>([])
   const [timelineLoading, setTimelineLoading] = useState(false)
   const [timelineError, setTimelineError] = useState<string | null>(null)
@@ -797,6 +801,7 @@ export default function App() {
   const readyRequestIdRef = useRef<string>('')
   const sessionsRequestIdsRef = useRef<Map<string, SessionListRequestMeta>>(new Map())
   const exportRequestIdsRef = useRef<Map<string, ExportRequestMeta>>(new Map())
+  const markdownExportRequestIdsRef = useRef<Set<string>>(new Set())
   const subtaskTranscriptRequestIdsRef = useRef<Map<string, string>>(new Map())
   const deleteRequestIdsRef = useRef<Map<string, string>>(new Map())
   const timelineRequestIdsRef = useRef<Map<string, string>>(new Map())
@@ -1040,6 +1045,39 @@ export default function App() {
       requestId,
       payload: {
         sessionId
+      }
+    })
+  }, [pushDebug])
+
+  const requestSessionMarkdownExport = useCallback((options: SessionExportOptions) => {
+    const vscode = getVsCodeApi()
+    const sessionId = selectedSessionIdRef.current
+    if (!vscode || !sessionId) {
+      setExportDialogError(vscode ? 'No session selected' : 'Not running in VS Code')
+      return
+    }
+
+    const requestId = createRequestId()
+    markdownExportRequestIdsRef.current.add(requestId)
+    setExportDialogBusy(true)
+    setExportDialogError(null)
+    pushDebug({
+      at: new Date().toISOString(),
+      kind: 'tx',
+      type: 'session.export.markdown',
+      requestId,
+      detail: `${sessionId} | ${options.openWithoutSaving ? 'open' : options.filename}`
+    })
+    vscode.postMessage({
+      type: 'session.export.markdown',
+      requestId,
+      payload: {
+        sessionId,
+        filename: options.filename,
+        includeThinking: options.includeThinking,
+        includeToolDetails: options.includeToolDetails,
+        includeAssistantMetadata: options.includeAssistantMetadata,
+        openWithoutSaving: options.openWithoutSaving
       }
     })
   }, [pushDebug])
@@ -1909,7 +1947,8 @@ export default function App() {
             setRunStatus('No session selected')
             return
           }
-          requestSessionExport(selectedSessionIdRef.current)
+          setExportDialogError(null)
+          setExportDialogOpen(true)
         }
       },
       {
@@ -2056,7 +2095,7 @@ export default function App() {
     }
 
     return cmds
-  }, [agents, composerCommands, composerMcpServers, composerSkills, deleteArmed, handleDeleteSession, openModelDialog, requestSessionExport, requestSessionRedo, requestSessions, requestSessionTimeline, requestSessionUndo, selectSession, selectThinkingOption, thinkingOptions])
+  }, [agents, composerCommands, composerMcpServers, composerSkills, deleteArmed, handleDeleteSession, openModelDialog, requestSessionRedo, requestSessions, requestSessionTimeline, requestSessionUndo, selectSession, selectThinkingOption, thinkingOptions])
 
   const commandState = useMemo(() => {
     const raw = composerValue
@@ -2164,6 +2203,15 @@ export default function App() {
     },
     [commands]
   )
+
+  const submitComposer = useCallback(() => {
+    if (commandState.open) {
+      const selected = filteredCommands[commandIndex]
+      runCommand(selected?.name ?? commandState.query, commandState.args)
+      return
+    }
+    startRun()
+  }, [commandIndex, commandState, filteredCommands, runCommand, startRun])
 
   const stopRun = useCallback(() => {
     const vscode = getVsCodeApi()
@@ -2416,6 +2464,18 @@ export default function App() {
         }
         setTranscriptError(null)
         setLoadingTranscript(hasBlockingExportRequests(exportRequestIdsRef.current))
+        return
+      }
+
+      if (message.type === 'session.export.markdown.response' && message.ok) {
+        if (!markdownExportRequestIdsRef.current.has(message.requestId)) {
+          return
+        }
+        markdownExportRequestIdsRef.current.delete(message.requestId)
+        setExportDialogBusy(markdownExportRequestIdsRef.current.size > 0)
+        setExportDialogError(null)
+        setExportDialogOpen(false)
+        setRunStatus(message.payload.filePath ? `Exported to ${message.payload.filePath}` : 'Session opened as Markdown')
         return
       }
 
@@ -2901,6 +2961,13 @@ export default function App() {
         })
         if (message.requestId === readyRequestIdRef.current) {
           setStatus(`Connection failed: ${message.error}`)
+          return
+        }
+
+        if (markdownExportRequestIdsRef.current.has(message.requestId)) {
+          markdownExportRequestIdsRef.current.delete(message.requestId)
+          setExportDialogBusy(markdownExportRequestIdsRef.current.size > 0)
+          setExportDialogError(message.error)
           return
         }
 
@@ -3810,8 +3877,8 @@ export default function App() {
           <button
             type="button"
             className={`composer-stack__send${isRunning ? ' composer-stack__send--running' : ''}`}
-            onClick={isRunning ? stopRun : startRun}
-            disabled={!isRunning && (!selectedModel || !selectedAgent || composerValue.trim().length === 0)}
+            onClick={isRunning ? stopRun : submitComposer}
+            disabled={!isRunning && (composerValue.trim().length === 0 || (!commandState.open && (!selectedModel || !selectedAgent)))}
             aria-label={isRunning ? 'stop' : 'send'}
             title={isRunning ? 'Stop' : 'Send'}
           >
@@ -3850,6 +3917,20 @@ export default function App() {
         loading={timelineLoading}
         error={timelineError}
         onClose={() => setTimelineDialogOpen(false)}
+      />
+
+      <ExportDialog
+        open={exportDialogOpen}
+        defaultFilename={`session-${(selectedSessionId ?? 'session').slice(0, 8)}.md`}
+        busy={exportDialogBusy}
+        error={exportDialogError}
+        onClose={() => {
+          if (!exportDialogBusy) {
+            setExportDialogOpen(false)
+            setExportDialogError(null)
+          }
+        }}
+        onConfirm={requestSessionMarkdownExport}
       />
 
       <ResourceDialog

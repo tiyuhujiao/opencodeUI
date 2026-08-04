@@ -9,6 +9,7 @@ exports.WEBVIEW_REQUEST_WHITELIST = [
     'webview.ready',
     'sessions.list',
     'session.export',
+    'session.export.markdown',
     'subtask.transcript',
     'session.timeline',
     'session.undo',
@@ -38,6 +39,7 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set([
     'webview.ready.ack',
     'sessions.list.response',
     'session.export.response',
+    'session.export.markdown.response',
     'subtask.transcript.response',
     'session.timeline.response',
     'session.undo.response',
@@ -121,6 +123,20 @@ function isWebviewRequestMessage(message) {
             return false;
         }
         if (typeof message.payload.sessionId !== 'string' || message.payload.sessionId.trim().length === 0) {
+            return false;
+        }
+    }
+    if (message.type === 'session.export.markdown') {
+        if (!isObject(message.payload)) {
+            return false;
+        }
+        if (!isNonEmptyString(message.payload.sessionId) || !isNonEmptyString(message.payload.filename)) {
+            return false;
+        }
+        if (typeof message.payload.includeThinking !== 'boolean'
+            || typeof message.payload.includeToolDetails !== 'boolean'
+            || typeof message.payload.includeAssistantMetadata !== 'boolean'
+            || typeof message.payload.openWithoutSaving !== 'boolean') {
             return false;
         }
     }

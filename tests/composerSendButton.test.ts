@@ -9,8 +9,10 @@ describe('composer send button', () => {
     const source = readFileSync(join(root, 'webview-ui/src/App.tsx'), 'utf8');
 
     expect(source).toContain("className={`composer-stack__send${isRunning ? ' composer-stack__send--running' : ''}`}");
-    expect(source).toContain('onClick={isRunning ? stopRun : startRun}');
-    expect(source).toContain('disabled={!isRunning && (!selectedModel || !selectedAgent || composerValue.trim().length === 0)}');
+    expect(source).toContain('onClick={isRunning ? stopRun : submitComposer}');
+    expect(source).toContain("if (commandState.open) {");
+    expect(source).toContain('runCommand(selected?.name ?? commandState.query, commandState.args)');
+    expect(source).toContain('disabled={!isRunning && (composerValue.trim().length === 0 || (!commandState.open && (!selectedModel || !selectedAgent)))}');
     expect(source).toContain("aria-label={isRunning ? 'stop' : 'send'}");
     expect(source).toContain('className="composer-stack__send-arrow"');
     expect(source).toContain('className="composer-stack__stop-icon"');

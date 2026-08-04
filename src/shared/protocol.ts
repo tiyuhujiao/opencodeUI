@@ -2,6 +2,7 @@ export const WEBVIEW_REQUEST_WHITELIST = [
   'webview.ready',
   'sessions.list',
   'session.export',
+  'session.export.markdown',
   'subtask.transcript',
   'session.timeline',
   'session.undo',
@@ -44,6 +45,19 @@ export type SessionExportRequest = {
   requestId: string;
   payload: {
     sessionId: string;
+  };
+};
+
+export type SessionMarkdownExportRequest = {
+  type: 'session.export.markdown';
+  requestId: string;
+  payload: {
+    sessionId: string;
+    filename: string;
+    includeThinking: boolean;
+    includeToolDetails: boolean;
+    includeAssistantMetadata: boolean;
+    openWithoutSaving: boolean;
   };
 };
 
@@ -190,6 +204,7 @@ export type WebviewRequestMessage =
   | WebviewReadyRequest
   | SessionsListRequest
   | SessionExportRequest
+  | SessionMarkdownExportRequest
   | SubtaskTranscriptRequest
   | SessionTimelineRequest
   | SessionUndoRequest
@@ -316,6 +331,16 @@ export type SessionExportResponseMessage = {
   ok: true;
   payload: {
     messages: TranscriptMessage[];
+  };
+};
+
+export type SessionMarkdownExportResponseMessage = {
+  type: 'session.export.markdown.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    opened: true;
+    filePath?: string;
   };
 };
 
@@ -727,6 +752,7 @@ export type ExtensionResponseMessage =
   | WebviewReadyAckMessage
   | SessionsListResponseMessage
   | SessionExportResponseMessage
+  | SessionMarkdownExportResponseMessage
   | SubtaskTranscriptResponseMessage
   | SessionTimelineResponseMessage
   | SessionUndoResponseMessage
@@ -760,6 +786,7 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set<string>([
   'webview.ready.ack',
   'sessions.list.response',
   'session.export.response',
+  'session.export.markdown.response',
   'subtask.transcript.response',
   'session.timeline.response',
   'session.undo.response',
@@ -861,6 +888,25 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
     }
 
     if (typeof message.payload.sessionId !== 'string' || message.payload.sessionId.trim().length === 0) {
+      return false;
+    }
+  }
+
+  if (message.type === 'session.export.markdown') {
+    if (!isObject(message.payload)) {
+      return false;
+    }
+
+    if (!isNonEmptyString(message.payload.sessionId) || !isNonEmptyString(message.payload.filename)) {
+      return false;
+    }
+
+    if (
+      typeof message.payload.includeThinking !== 'boolean'
+      || typeof message.payload.includeToolDetails !== 'boolean'
+      || typeof message.payload.includeAssistantMetadata !== 'boolean'
+      || typeof message.payload.openWithoutSaving !== 'boolean'
+    ) {
       return false;
     }
   }

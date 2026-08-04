@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { renderMarkdown } from '../markdown/renderMarkdown'
+import { computeAnchoredScrollTop } from '../transcriptScroll'
 import type { TranscriptMessage, TranscriptPart, TranscriptPartTool } from '../../../src/shared/protocol'
 
 type TranscriptProps = {
@@ -14,6 +15,7 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
   const containerRef = useRef<HTMLDivElement | null>(null)
   const autoScrollPausedRef = useRef(false)
   const scrollLockRef = useRef<{ top: number; until: number } | null>(null)
+  const turnAnchorRef = useRef<HTMLElement | null>(null)
 
   const pauseAutoScrollForUserAction = useCallback(() => {
     const el = containerRef.current
@@ -38,6 +40,12 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
       return
     }
 
+    const contentBottom = () => {
+      const rows = el.querySelectorAll<HTMLElement>(':scope > .msg-row, :scope > .tool-group')
+      const last = rows.item(rows.length - 1)
+      return last ? last.offsetTop + last.offsetHeight : 0
+    }
+
     const scrollIfNeeded = () => {
       const lock = scrollLockRef.current
       if (lock) {
@@ -53,7 +61,17 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
       }
 
       if (isRunning) {
-        el.scrollTop = el.scrollHeight
+        const anchor = turnAnchorRef.current
+        if (!anchor || !el.contains(anchor)) {
+          el.scrollTop = el.scrollHeight
+          return
+        }
+        el.scrollTop = computeAnchoredScrollTop({
+          anchorTop: anchor.offsetTop,
+          contentBottom: contentBottom(),
+          clientHeight: el.clientHeight,
+          maxScrollTop: Math.max(0, el.scrollHeight - el.clientHeight)
+        })
         return
       }
 
@@ -63,8 +81,18 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
       }
     }
 
-    // Initial sync.
-    scrollIfNeeded()
+    if (isRunning) {
+      window.requestAnimationFrame(() => {
+        const userRows = el.querySelectorAll<HTMLElement>(':scope > .msg-row--user')
+        turnAnchorRef.current = userRows.item(userRows.length - 1)
+        autoScrollPausedRef.current = false
+        scrollLockRef.current = null
+        scrollIfNeeded()
+      })
+    } else {
+      turnAnchorRef.current = null
+      scrollIfNeeded()
+    }
 
     // Observe DOM changes so we scroll on streaming updates without depending on `messages`.
     const observer = new MutationObserver(() => {
@@ -81,7 +109,7 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
         return
       }
 
-      const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+      const distanceToBottom = contentBottom() - el.scrollTop - el.clientHeight
       if (distanceToBottom < 80) {
         autoScrollPausedRef.current = false
         scrollLockRef.current = null
@@ -104,6 +132,14 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
       role="log"
       aria-live="polite"
       ref={containerRef}
+      onWheel={() => {
+        autoScrollPausedRef.current = true
+        scrollLockRef.current = null
+      }}
+      onTouchStart={() => {
+        autoScrollPausedRef.current = true
+        scrollLockRef.current = null
+      }}
       onClick={(event) => {
         const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-file-path]') : null
         const filePath = target?.dataset.filePath
@@ -181,6 +217,7 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
           </div>
         )
       })}
+      {isRunning ? <div className="transcript__run-spacer" aria-hidden="true" /> : null}
     </div>
   )
 }

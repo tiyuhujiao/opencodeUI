@@ -73,6 +73,10 @@ import {
 	type InlineDiffRun,
 	type InlineDiffSnapshot,
 } from "../inlineDiff";
+import {
+	formatSessionMarkdown,
+	resolveSessionExportPath,
+} from "../sessionMarkdown";
 
 const SESSION_EXPORT_CACHE_TTL_MS = 8_000;
 const EMPTY_SESSION_EXPORT_CACHE_TTL_MS = 750;
@@ -336,6 +340,13 @@ export class SidebarProvider
 						webview,
 						message.requestId,
 						message.payload.sessionId,
+					);
+					return;
+				case "session.export.markdown":
+					void this.handleSessionMarkdownExportRequest(
+						webview,
+						message.requestId,
+						message.payload,
 					);
 					return;
 				case "subtask.transcript":
@@ -631,6 +642,75 @@ export class SidebarProvider
 				requestId,
 				error,
 				"获取 session export 失败。",
+			);
+		}
+	}
+
+	private async handleSessionMarkdownExportRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		payload: {
+			sessionId: string;
+			filename: string;
+			includeThinking: boolean;
+			includeToolDetails: boolean;
+			includeAssistantMetadata: boolean;
+			openWithoutSaving: boolean;
+		},
+	): Promise<void> {
+		try {
+			const [cachedExport, sessionInfo] = await Promise.all([
+				this.getSessionExportData(payload.sessionId),
+				this.getSessionInfoForRead(payload.sessionId),
+			]);
+			const markdown = formatSessionMarkdown({
+				sessionId: payload.sessionId,
+				sessionInfo,
+				exportPayload: cachedExport.data,
+				options: {
+					includeThinking: payload.includeThinking,
+					includeToolDetails: payload.includeToolDetails,
+					includeAssistantMetadata: payload.includeAssistantMetadata,
+				},
+			});
+
+			let document: vscode.TextDocument;
+			let filePath: string | undefined;
+			if (payload.openWithoutSaving) {
+				document = await vscode.workspace.openTextDocument({
+					language: "markdown",
+					content: markdown,
+				});
+			} else {
+				const workspaceRoot = this.getDefaultCwd();
+				if (!workspaceRoot) {
+					throw new Error("当前没有打开工作区，无法保存导出文件。可选择仅打开而不保存。");
+				}
+				filePath = resolveSessionExportPath(workspaceRoot, payload.filename);
+				await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+				await fs.promises.writeFile(filePath, markdown, "utf8");
+				document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+			}
+
+			await vscode.window.showTextDocument(document, {
+				preview: false,
+				preserveFocus: false,
+			});
+			this.respond(webview, {
+				type: "session.export.markdown.response",
+				requestId,
+				ok: true,
+				payload: {
+					opened: true,
+					...(filePath ? { filePath } : {}),
+				},
+			});
+		} catch (error) {
+			this.respondError(
+				webview,
+				requestId,
+				error,
+				"导出 session Markdown 失败。",
 			);
 		}
 	}
@@ -2609,6 +2689,12 @@ function createInactiveInlineDiffController(): InlineDiffController {
 }
 
 type SessionInfoResponse = {
+	id?: string;
+	title?: string;
+	time?: {
+		created?: number;
+		updated?: number;
+	};
 	revert?: {
 		messageID?: string;
 		partID?: string;

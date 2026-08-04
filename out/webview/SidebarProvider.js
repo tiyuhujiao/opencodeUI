@@ -52,6 +52,7 @@ const diagnostics_1 = require("../diagnostics");
 const parsers_1 = require("../bridge/parsers");
 const protocol_1 = require("../shared/protocol");
 const runLifecycle_1 = require("./runLifecycle");
+const sessionMarkdown_1 = require("../sessionMarkdown");
 const SESSION_EXPORT_CACHE_TTL_MS = 8000;
 const EMPTY_SESSION_EXPORT_CACHE_TTL_MS = 750;
 const MODELS_CACHE_TTL_MS = 15 * 60000;
@@ -232,6 +233,9 @@ class SidebarProvider {
                 case "session.export":
                     void this.handleSessionExportRequest(webview, message.requestId, message.payload.sessionId);
                     return;
+                case "session.export.markdown":
+                    void this.handleSessionMarkdownExportRequest(webview, message.requestId, message.payload);
+                    return;
                 case "subtask.transcript":
                     void this.handleSubtaskTranscriptRequest(webview, message.requestId, message.payload.sessionId);
                     return;
@@ -405,6 +409,58 @@ class SidebarProvider {
         }
         catch (error) {
             this.respondError(webview, requestId, error, "获取 session export 失败。");
+        }
+    }
+    async handleSessionMarkdownExportRequest(webview, requestId, payload) {
+        try {
+            const [cachedExport, sessionInfo] = await Promise.all([
+                this.getSessionExportData(payload.sessionId),
+                this.getSessionInfoForRead(payload.sessionId),
+            ]);
+            const markdown = (0, sessionMarkdown_1.formatSessionMarkdown)({
+                sessionId: payload.sessionId,
+                sessionInfo,
+                exportPayload: cachedExport.data,
+                options: {
+                    includeThinking: payload.includeThinking,
+                    includeToolDetails: payload.includeToolDetails,
+                    includeAssistantMetadata: payload.includeAssistantMetadata,
+                },
+            });
+            let document;
+            let filePath;
+            if (payload.openWithoutSaving) {
+                document = await vscode.workspace.openTextDocument({
+                    language: "markdown",
+                    content: markdown,
+                });
+            }
+            else {
+                const workspaceRoot = this.getDefaultCwd();
+                if (!workspaceRoot) {
+                    throw new Error("当前没有打开工作区，无法保存导出文件。可选择仅打开而不保存。");
+                }
+                filePath = (0, sessionMarkdown_1.resolveSessionExportPath)(workspaceRoot, payload.filename);
+                await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+                await fs.promises.writeFile(filePath, markdown, "utf8");
+                document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+            }
+            await vscode.window.showTextDocument(document, {
+                preview: false,
+                preserveFocus: false,
+            });
+            this.respond(webview, {
+                type: "session.export.markdown.response",
+                requestId,
+                ok: true,
+                payload: {
+                    opened: true,
+                    ...(filePath ? { filePath } : {}),
+                },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "导出 session Markdown 失败。");
         }
     }
     async handleSubtaskTranscriptRequest(webview, requestId, sessionId) {
