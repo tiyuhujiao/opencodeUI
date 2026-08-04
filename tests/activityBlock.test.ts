@@ -58,7 +58,9 @@ describe('transcript activity block', () => {
     const source = readFileSync(join(root, 'webview-ui/src/components/Transcript.tsx'), 'utf8');
 
     expect(source).toContain("if (part.toolName === '__tool_group__') {");
-    expect(source).toContain('return <ToolGroupBlock items={group} onUserToggle={onUserToggle} defaultExpanded={false} autoOpenActive={false} />');
+    expect(source).toContain('onOpenSubtask={onOpenSubtask}');
+    expect(source).toContain('defaultExpanded={false}');
+    expect(source).toContain('autoOpenActive={false}');
     expect(source).toContain('autoOpenActive = false');
     expect(source).toContain('const [expanded, setExpanded] = useState(defaultExpanded || (autoOpenActive && hasActiveSubtasks))');
   });
@@ -78,6 +80,10 @@ describe('transcript activity block', () => {
     expect(styles).toContain('.prefinal-work__text');
     expect(styles).toContain('.activity-block__summary::after');
     expect(styles).toContain('.activity-block--active .activity-block__summary::after');
+    expect(styles).toContain('.msg--assistant.is-streaming');
+    expect(styles).toContain('.activity-block__summary:focus-visible');
+    expect(styles).toContain('outline: 0;');
+    expect(styles).toContain('box-shadow: none;');
     expect(styles).toContain('animation: activity-sheen 2.2s ease-in-out infinite;');
     expect(styles).toContain('@keyframes activity-sheen');
     expect(styles).toContain('transform: translateX(-145%);');
@@ -86,8 +92,23 @@ describe('transcript activity block', () => {
     expect(styles).toContain('.activity-thinking__body');
     expect(styles).toContain('.md-body--final-answer');
     expect(styles).toContain('.activity-block__body');
-    expect(styles).toContain('max-height: min(48vh, 32rem);');
-    expect(styles).toContain('overflow: auto;');
+    const nestedWorkStyles = [
+      styles.slice(styles.indexOf('.prefinal-work__body {'), styles.indexOf('.prefinal-work__text {')),
+      styles.slice(styles.indexOf('.activity-block__body {'), styles.indexOf('.activity-entry {')),
+      styles.slice(styles.indexOf('.activity-thinking__body {'), styles.indexOf('.md-body--final-answer {'))
+    ]
+    for (const block of nestedWorkStyles) {
+      expect(block).toContain('max-height: none;')
+      expect(block).toContain('overflow: visible;')
+      expect(block).not.toContain('overflow: auto;')
+    }
+    const toolPreviewStyles = styles.slice(
+      styles.indexOf('.tool-group__preview {'),
+      styles.indexOf('.tool-group__line {')
+    )
+    expect(toolPreviewStyles).toContain('overflow-y: hidden;')
+    expect(toolPreviewStyles).not.toContain('overflow-y: auto;')
+    expect(toolPreviewStyles).not.toContain('scrollbar-width:')
     expect(styles).toContain('@media (prefers-reduced-motion: reduce)');
     expect(styles).toContain('@media (max-width: 420px)');
     expect(styles).not.toContain('.log-block');

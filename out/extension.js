@@ -40,12 +40,27 @@ exports.buildLastPortKey = buildLastPortKey;
 const vscode = __importStar(require("vscode"));
 const serveManager_1 = require("./bridge/serveManager");
 const diagnostics_1 = require("./diagnostics");
+const inlineDiff_1 = require("./inlineDiff");
 const SidebarProvider_1 = require("./webview/SidebarProvider");
 const LAST_PORT_KEY_PREFIX = 'opencodeUI.serve.lastPort';
 function activate(context) {
     (0, diagnostics_1.initializeDiagnostics)(context);
     const hostKind = resolveHostKind(vscode.env.remoteName, process.platform);
-    const sidebarProvider = new SidebarProvider_1.SidebarProvider(context.extensionUri, context.workspaceState, hostKind, vscode.env.remoteName);
+    const inlineDiff = (0, inlineDiff_1.createInlineDiffController)({
+        requestServeJson: (pathname) => (0, serveManager_1.requestServeJson)(pathname, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath),
+        log: (level, message) => {
+            if (level === 'error') {
+                (0, diagnostics_1.logError)(message);
+                return;
+            }
+            if (level === 'warn') {
+                (0, diagnostics_1.logWarn)(message);
+                return;
+            }
+            (0, diagnostics_1.logInfo)(message);
+        }
+    });
+    const sidebarProvider = new SidebarProvider_1.SidebarProvider(context.extensionUri, context.workspaceState, hostKind, vscode.env.remoteName, inlineDiff);
     const lastPortKey = buildLastPortKey(hostKind, vscode.env.remoteName);
     (0, serveManager_1.configureServePortStorage)({
         getLastPort: () => context.globalState.get(lastPortKey),
@@ -64,7 +79,7 @@ function activate(context) {
             void vscode.window.showWarningMessage(`OpenCode serve 启动失败：${message}`);
         });
     }
-    context.subscriptions.push(vscode.window.registerWebviewViewProvider('opencodeUI.sidebar', sidebarProvider), vscode.commands.registerCommand('opencodeUI.refresh', () => {
+    context.subscriptions.push(sidebarProvider, vscode.window.registerWebviewViewProvider('opencodeUI.sidebar', sidebarProvider), vscode.commands.registerCommand('opencodeUI.refresh', () => {
         sidebarProvider.refresh();
     }), vscode.commands.registerCommand('opencodeUI.openSidebar', async () => {
         await vscode.commands.executeCommand('workbench.view.extension.opencodeUI');

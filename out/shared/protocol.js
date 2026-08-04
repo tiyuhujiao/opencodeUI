@@ -9,6 +9,7 @@ exports.WEBVIEW_REQUEST_WHITELIST = [
     'webview.ready',
     'sessions.list',
     'session.export',
+    'subtask.transcript',
     'session.timeline',
     'session.undo',
     'session.redo',
@@ -17,11 +18,17 @@ exports.WEBVIEW_REQUEST_WHITELIST = [
     'question.reply',
     'question.reject',
     'file.open',
+    'inlineDiff.open',
+    'inlineDiff.dismiss',
     'tempfile.write',
     'providers.list',
     'models.list',
     'models.list.byProvider',
     'agents.list',
+    'composer.resources.list',
+    'mcp.setEnabled',
+    'workspace.resources.search',
+    'workspace.resources.resolve',
     'selfcheck.run',
     'run.start',
     'run.stop'
@@ -31,15 +38,23 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set([
     'webview.ready.ack',
     'sessions.list.response',
     'session.export.response',
+    'subtask.transcript.response',
     'session.timeline.response',
     'session.undo.response',
     'session.redo.response',
     'session.delete.response',
     'file.open.response',
+    'inlineDiff.open.response',
+    'inlineDiff.dismiss.response',
+    'inlineDiff.state',
     'tempfile.write.response',
     'providers.list.response',
     'models.list.response',
     'agents.list.response',
+    'composer.resources.list.response',
+    'mcp.setEnabled.response',
+    'workspace.resources.search.response',
+    'workspace.resources.resolve.response',
     'run.start.response',
     'run.stop.response',
     'permission.reply.response',
@@ -74,6 +89,21 @@ function isExtensionResponseMessage(message) {
     if (typeof message.ok !== 'boolean') {
         return false;
     }
+    if (message.type === 'subtask.transcript.response') {
+        return message.ok === true
+            && isObject(message.payload)
+            && isNonEmptyString(message.payload.sessionId)
+            && Array.isArray(message.payload.messages);
+    }
+    if (message.type === 'inlineDiff.open.response' || message.type === 'inlineDiff.dismiss.response') {
+        return message.ok === true && isObject(message.payload) && isNonEmptyString(message.payload.fileId);
+    }
+    if (message.type === 'inlineDiff.state') {
+        if (message.ok !== true || !isObject(message.payload) || !isNonNegativeInteger(message.payload.revision) || !Array.isArray(message.payload.files)) {
+            return false;
+        }
+        return message.payload.files.every(isInlineDiffFileSummary);
+    }
     return true;
 }
 function isWebviewRequestMessage(message) {
@@ -86,7 +116,7 @@ function isWebviewRequestMessage(message) {
     if (typeof message.requestId !== 'string' || message.requestId.length === 0) {
         return false;
     }
-    if (message.type === 'session.export') {
+    if (message.type === 'session.export' || message.type === 'subtask.transcript') {
         if (!isObject(message.payload)) {
             return false;
         }
@@ -153,6 +183,35 @@ function isWebviewRequestMessage(message) {
         if (typeof message.payload.path !== 'string' || message.payload.path.trim().length === 0) {
             return false;
         }
+        for (const key of ['line', 'column']) {
+            const value = message.payload[key];
+            if (typeof value !== 'undefined' && (typeof value !== 'number' || !Number.isInteger(value) || value < 1)) {
+                return false;
+            }
+        }
+    }
+    if (message.type === 'mcp.setEnabled') {
+        if (!isObject(message.payload) || !isNonEmptyString(message.payload.name) || typeof message.payload.enabled !== 'boolean') {
+            return false;
+        }
+    }
+    if (message.type === 'workspace.resources.search') {
+        if (!isObject(message.payload) || typeof message.payload.query !== 'string' || message.payload.query.length > 256) {
+            return false;
+        }
+    }
+    if (message.type === 'workspace.resources.resolve') {
+        if (!isObject(message.payload) || !Array.isArray(message.payload.values) || message.payload.values.length > 32) {
+            return false;
+        }
+        if (!message.payload.values.every((value) => typeof value === 'string' && value.trim().length > 0 && value.length <= 4096)) {
+            return false;
+        }
+    }
+    if (message.type === 'inlineDiff.open' || message.type === 'inlineDiff.dismiss') {
+        if (!isObject(message.payload) || !isNonEmptyString(message.payload.fileId)) {
+            return false;
+        }
     }
     if (message.type === 'tempfile.write') {
         if (!isObject(message.payload)) {
@@ -187,6 +246,14 @@ function isWebviewRequestMessage(message) {
                 if (typeof file !== 'string' || file.trim().length === 0) {
                     return false;
                 }
+            }
+        }
+        if (typeof message.payload.command !== 'undefined') {
+            if (!isObject(message.payload.command)) {
+                return false;
+            }
+            if (!isNonEmptyString(message.payload.command.name) || typeof message.payload.command.arguments !== 'string') {
+                return false;
             }
         }
     }
@@ -236,5 +303,24 @@ function isWebviewRequestMessage(message) {
         }
     }
     return true;
+}
+function isNonEmptyString(value) {
+    return typeof value === 'string' && value.trim().length > 0;
+}
+function isNonNegativeInteger(value) {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+function isInlineDiffFileSummary(value) {
+    if (!isObject(value)) {
+        return false;
+    }
+    return isNonEmptyString(value.fileId)
+        && isNonEmptyString(value.path)
+        && isNonEmptyString(value.displayPath)
+        && isNonNegativeInteger(value.additions)
+        && isNonNegativeInteger(value.deletions)
+        && isNonNegativeInteger(value.hunks)
+        && ['pending', 'stale', 'unavailable'].includes(String(value.status))
+        && (typeof value.reason === 'undefined' || typeof value.reason === 'string');
 }
 //# sourceMappingURL=protocol.js.map

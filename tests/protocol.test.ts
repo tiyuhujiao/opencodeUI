@@ -42,6 +42,48 @@ describe('webview request protocol guards', () => {
     })).toBe(true);
   });
 
+  it('允许 composer 资源请求和带原生命令的 run.start', () => {
+    expect(isWebviewRequestMessage({
+      type: 'composer.resources.list',
+      requestId: 'resources-1'
+    })).toBe(true);
+
+    expect(isWebviewRequestMessage({
+      type: 'run.start',
+      requestId: 'run-command-1',
+      payload: {
+        message: '/review src/app.ts',
+        model: 'cpa/gpt-5',
+        agent: 'build',
+        command: { name: 'review', arguments: 'src/app.ts' }
+      }
+    })).toBe(true);
+
+    expect(isWebviewRequestMessage({
+      type: 'run.start',
+      requestId: 'run-command-invalid',
+      payload: {
+        message: '/review',
+        model: 'cpa/gpt-5',
+        agent: 'build',
+        command: { name: '', arguments: [] }
+      }
+    })).toBe(false);
+  });
+
+  it('允许扩展返回 composer 资源清单', () => {
+    expect(isExtensionResponseMessage({
+      type: 'composer.resources.list.response',
+      requestId: 'resources-1',
+      ok: true,
+      payload: {
+        commands: [],
+        skills: [],
+        mcpServers: []
+      }
+    })).toBe(true);
+  });
+
   it('允许文件打开请求携带目标路径', () => {
     expect(isWebviewRequestMessage({
       type: 'file.open',
@@ -51,8 +93,91 @@ describe('webview request protocol guards', () => {
 
     expect(isWebviewRequestMessage({
       type: 'file.open',
+      requestId: 'file-location-1',
+      payload: { path: 'webview-ui/src/App.tsx', line: 120, column: 4 }
+    })).toBe(true);
+
+    expect(isWebviewRequestMessage({
+      type: 'file.open',
+      requestId: 'file-location-invalid',
+      payload: { path: 'webview-ui/src/App.tsx', line: 0 }
+    })).toBe(false);
+
+    expect(isWebviewRequestMessage({
+      type: 'file.open',
       requestId: 'file-2',
       payload: { path: '' }
+    })).toBe(false);
+  });
+
+  it('校验 MCP 开关、工作区搜索和拖拽解析请求', () => {
+    expect(isWebviewRequestMessage({
+      type: 'mcp.setEnabled',
+      requestId: 'mcp-1',
+      payload: { name: 'browser', enabled: true }
+    })).toBe(true);
+    expect(isWebviewRequestMessage({
+      type: 'mcp.setEnabled',
+      requestId: 'mcp-2',
+      payload: { name: '', enabled: true }
+    })).toBe(false);
+    expect(isWebviewRequestMessage({
+      type: 'workspace.resources.search',
+      requestId: 'search-1',
+      payload: { query: 'App' }
+    })).toBe(true);
+    expect(isWebviewRequestMessage({
+      type: 'workspace.resources.resolve',
+      requestId: 'drop-1',
+      payload: { values: ['file:///workspace/src/App.tsx'] }
+    })).toBe(true);
+  });
+
+  it('允许打开与忽略 inline diff review', () => {
+    expect(isWebviewRequestMessage({
+      type: 'inlineDiff.open',
+      requestId: 'inline-open-1',
+      payload: { fileId: 'file-1' }
+    })).toBe(true);
+
+    expect(isWebviewRequestMessage({
+      type: 'inlineDiff.dismiss',
+      requestId: 'inline-dismiss-1',
+      payload: { fileId: 'file-1' }
+    })).toBe(true);
+
+    expect(isWebviewRequestMessage({
+      type: 'inlineDiff.open',
+      requestId: 'inline-open-2',
+      payload: { fileId: '' }
+    })).toBe(false);
+  });
+
+  it('允许读取子任务 transcript 并校验响应 session', () => {
+    expect(isWebviewRequestMessage({
+      type: 'subtask.transcript',
+      requestId: 'subtask-1',
+      payload: { sessionId: 'ses_child' }
+    })).toBe(true);
+
+    expect(isWebviewRequestMessage({
+      type: 'subtask.transcript',
+      requestId: 'subtask-2',
+      payload: { sessionId: '' }
+    })).toBe(false);
+
+    expect(isExtensionResponseMessage({
+      type: 'subtask.transcript.response',
+      requestId: 'subtask-1',
+      ok: true,
+      payload: { sessionId: 'ses_child', messages: [] }
+    })).toBe(true);
+
+    expect(isExtensionResponseMessage({
+      type: 'subtask.transcript.response',
+      requestId: 'subtask-1',
+      ok: true,
+      payload: { sessionId: '', messages: [] }
     })).toBe(false);
   });
 
@@ -91,6 +216,50 @@ describe('webview request protocol guards', () => {
       ok: true,
       payload: { path: 'webview-ui/src/App.tsx' }
     })).toBe(true);
+  });
+
+  it('允许扩展推送权威 inline diff 状态并返回 review 操作响应', () => {
+    expect(isExtensionResponseMessage({
+      type: 'inlineDiff.state',
+      requestId: 'inline-state-3',
+      ok: true,
+      payload: {
+        revision: 3,
+        files: [{
+          fileId: 'file-1',
+          path: 'webview-ui/src/App.tsx',
+          displayPath: 'webview-ui/src/App.tsx',
+          additions: 12,
+          deletions: 4,
+          hunks: 2,
+          status: 'pending'
+        }]
+      }
+    })).toBe(true);
+
+    expect(isExtensionResponseMessage({
+      type: 'inlineDiff.open.response',
+      requestId: 'inline-open-1',
+      ok: true,
+      payload: { fileId: 'file-1' }
+    })).toBe(true);
+
+    expect(isExtensionResponseMessage({
+      type: 'inlineDiff.dismiss.response',
+      requestId: 'inline-dismiss-1',
+      ok: true,
+      payload: { fileId: 'file-1' }
+    })).toBe(true);
+
+    expect(isExtensionResponseMessage({
+      type: 'inlineDiff.state',
+      requestId: 'inline-state-invalid',
+      ok: true,
+      payload: {
+        revision: -1,
+        files: []
+      }
+    })).toBe(false);
   });
 
   it('允许扩展返回问题处理响应', () => {

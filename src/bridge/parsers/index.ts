@@ -17,6 +17,7 @@ export {
 
 export {
   exportToTranscript,
+  liveMessagesToTranscript,
   type TranscriptMessage,
   type TranscriptPart,
   type TranscriptPartReasoning,
@@ -39,6 +40,12 @@ export {
   type ModelsVerboseEntry,
   type ModelsVerboseParseErrorCode
 } from './modelsVerbose';
+
+export {
+  extractConfiguredModelMetadata,
+  extractModelDefinitionMetadata,
+  type ConfiguredModelMetadata
+} from './modelConfig';
 
 export {
   parseAgentList,

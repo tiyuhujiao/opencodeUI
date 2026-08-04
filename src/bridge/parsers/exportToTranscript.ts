@@ -1,4 +1,4 @@
-import type { ExportPayload } from './exportJson';
+import { ExportJsonParseError, type ExportMessage, type ExportPayload } from './exportJson';
 
 export type TranscriptRole = 'user' | 'assistant' | 'unknown';
 
@@ -30,13 +30,42 @@ export type TranscriptPart = TranscriptPartText | TranscriptPartReasoning | Tran
 export type TranscriptMessage = {
   role: TranscriptRole;
   parts: TranscriptPart[];
+  contextUsage?: {
+    usedTokens: number;
+    model?: string;
+  };
 };
 
 export function exportToTranscript(payload: ExportPayload): TranscriptMessage[] {
-  return payload.messages.map((message) => ({
-    role: resolveRole(message.info),
-    parts: message.parts.map(mapPart)
-  }));
+  return payload.messages.map((message) => {
+    const contextUsage = resolveContextUsage(message.info);
+    return {
+      role: resolveRole(message.info),
+      parts: message.parts.map(mapPart),
+      ...(contextUsage ? { contextUsage } : {})
+    };
+  });
+}
+
+export function liveMessagesToTranscript(value: unknown): TranscriptMessage[] {
+  if (!Array.isArray(value)) {
+    throw new ExportJsonParseError('INVALID_SHAPE', 'OpenCode session messages must be an array.');
+  }
+
+  const messages = value.map((message, index): ExportMessage => {
+    if (!isRecord(message) || !Array.isArray(message.parts)) {
+      throw new ExportJsonParseError(
+        'INVALID_SHAPE',
+        `OpenCode session messages[${String(index)}] must include a parts array.`
+      );
+    }
+    return {
+      info: message.info,
+      parts: message.parts
+    };
+  });
+
+  return exportToTranscript({ info: undefined, messages });
 }
 
 function resolveRole(info: unknown): TranscriptRole {
@@ -45,6 +74,31 @@ function resolveRole(info: unknown): TranscriptRole {
     return role;
   }
   return 'unknown';
+}
+
+function resolveContextUsage(info: unknown): TranscriptMessage['contextUsage'] {
+  if (!isRecord(info)) {
+    return undefined;
+  }
+  const metadata = isRecord(info.metadata) ? info.metadata : undefined;
+  const assistant = isRecord(metadata?.assistant) ? metadata.assistant : info;
+  const tokens = isRecord(assistant.tokens) ? assistant.tokens : undefined;
+  if (!tokens) {
+    return undefined;
+  }
+  const cache = isRecord(tokens.cache) ? tokens.cache : undefined;
+  const input = toNonNegativeFiniteNumber(tokens.input);
+  const cacheRead = toNonNegativeFiniteNumber(cache?.read);
+  if (input === undefined && cacheRead === undefined) {
+    return undefined;
+  }
+
+  const providerId = getStringFromRecord(assistant, 'providerID');
+  const modelId = getStringFromRecord(assistant, 'modelID');
+  return {
+    usedTokens: (input ?? 0) + (cacheRead ?? 0),
+    ...(providerId && modelId ? { model: `${providerId}/${modelId}` } : {})
+  };
 }
 
 function mapPart(part: unknown): TranscriptPart {
@@ -113,6 +167,10 @@ function getNestedStringFromRecord(value: unknown, outer: string, inner: string)
   }
 
   return getStringFromRecord(value[outer], inner);
+}
+
+function toNonNegativeFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

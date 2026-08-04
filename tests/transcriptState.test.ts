@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { RunStreamEvent, SessionSummary, TranscriptMessage } from '../src/shared/protocol';
-import { applyRunEventToTranscript, mergeLocalImageParts, upsertPendingSessionSummary } from '../webview-ui/src/transcriptState';
+import {
+  applyRunEventToTranscript,
+  mergeLocalImageParts,
+  preserveContextUsage,
+  upsertPendingSessionSummary
+} from '../webview-ui/src/transcriptState';
 
 describe('webview transcript state helpers', () => {
   it('keeps an existing session title when a new prompt starts inside that session', () => {
@@ -130,5 +135,43 @@ describe('webview transcript state helpers', () => {
       toolName: 'task',
       status: 'completed'
     });
+  });
+
+  it('把实时 context 用量写入当前 assistant 消息且不改变正文', () => {
+    const base: TranscriptMessage[] = [
+      { role: 'user', parts: [{ type: 'text', text: 'hello' }] },
+      { role: 'assistant', parts: [{ type: 'text', text: 'world' }] }
+    ];
+
+    const updated = applyRunEventToTranscript(base, {
+      type: 'context.usage',
+      usage: { usedTokens: 4096, model: 'cpa/gpt-5' }
+    }, 1);
+
+    expect(updated[1]).toEqual({
+      role: 'assistant',
+      parts: [{ type: 'text', text: 'world' }],
+      contextUsage: { usedTokens: 4096, model: 'cpa/gpt-5' }
+    });
+  });
+
+  it('新一轮的临时零值不会覆盖上一轮有效 context 用量', () => {
+    const base: TranscriptMessage[] = [
+      { role: 'assistant', parts: [], contextUsage: { usedTokens: 4096, model: 'cpa/gpt-5' } },
+      { role: 'user', parts: [{ type: 'text', text: 'continue' }] },
+      { role: 'assistant', parts: [] }
+    ];
+
+    const updated = applyRunEventToTranscript(base, {
+      type: 'context.usage',
+      usage: { usedTokens: 0, model: 'cpa/gpt-5' }
+    }, 2);
+
+    expect(updated[2]?.contextUsage).toEqual({ usedTokens: 4096, model: 'cpa/gpt-5' });
+  });
+
+  it('空会话仍允许以零值初始化 context 圆环', () => {
+    expect(preserveContextUsage(undefined, { usedTokens: 0, model: 'cpa/gpt-5' }))
+      .toEqual({ usedTokens: 0, model: 'cpa/gpt-5' });
   });
 });

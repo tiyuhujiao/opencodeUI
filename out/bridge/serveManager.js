@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.configureServePortStorage = configureServePortStorage;
 exports.ensureServeRunning = ensureServeRunning;
+exports.requestServeJson = requestServeJson;
 exports.probeHealth = probeHealth;
 const node_child_process_1 = require("node:child_process");
 const http = __importStar(require("node:http"));
@@ -60,6 +61,23 @@ async function ensureServeRunning() {
         ensurePromise = undefined;
     });
     return ensurePromise;
+}
+async function requestServeJson(pathname, cwd) {
+    const runtime = await ensureServeRunning();
+    const headers = {
+        'Content-Type': 'application/json'
+    };
+    if (cwd) {
+        headers['x-opencode-directory'] = cwd;
+    }
+    const response = await fetch(`${runtime.baseUrl}${pathname}`, { headers });
+    if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(text.trim().length > 0
+            ? text.trim()
+            : `OpenCode serve 请求失败（${String(response.status)}）。`);
+    }
+    return (await response.json());
 }
 async function ensureServeRunningInternal() {
     if (currentPort && (await probeHealth(currentPort))) {

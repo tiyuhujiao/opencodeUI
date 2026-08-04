@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SidebarProvider = void 0;
 exports.summarizeSessionTitle = summarizeSessionTitle;
+exports.buildWorkspaceSearchGlobs = buildWorkspaceSearchGlobs;
 exports.buildPromptParts = buildPromptParts;
 exports.normalizePromptFilePath = normalizePromptFilePath;
 exports.detectImageMimeType = detectImageMimeType;
@@ -57,8 +58,9 @@ const MODELS_CACHE_TTL_MS = 15 * 60000;
 const TEMPFILE_MAX_BYTES = 10 * 1024 * 1024;
 const TEMPFILE_MAX_BASE64_CHARS = Math.ceil(TEMPFILE_MAX_BYTES / 3) * 4 + 4;
 const TEMPFILE_TTL_MS = 30 * 60000;
+const MCP_TRANSITION_POLL_DELAYS_MS = [0, 250, 500, 750, 1000, 1500, 2000, 2500, 3000];
 class SidebarProvider {
-    constructor(extensionUri, workspaceState, hostKind, remoteName) {
+    constructor(extensionUri, workspaceState, hostKind, remoteName, inlineDiff) {
         this.extensionUri = extensionUri;
         this.workspaceState = workspaceState;
         this.hostKind = hostKind;
@@ -68,6 +70,13 @@ class SidebarProvider {
         this.modelsCache = new Map();
         this.modelsInFlight = new Map();
         this.tempFiles = new Map();
+        this.inlineDiff = inlineDiff ?? createInactiveInlineDiffController();
+        this.inlineDiffStateSubscription = this.inlineDiff.onDidChange((snapshot) => this.postInlineDiffState(snapshot));
+    }
+    dispose() {
+        this.inlineDiffStateSubscription.dispose();
+        this.inlineDiff.dispose();
+        this.cleanupAllTempFiles();
     }
     isSupportedHost() {
         return this.hostKind !== "unsupported";
@@ -85,16 +94,67 @@ class SidebarProvider {
         if (!trimmed) {
             throw new Error("文件路径为空。");
         }
-        if (path.isAbsolute(trimmed) ||
-            path.win32.isAbsolute(trimmed) ||
-            path.posix.isAbsolute(trimmed)) {
-            return trimmed;
-        }
-        const cwd = this.getDefaultCwd();
-        if (!cwd) {
+        const folders = vscode.workspace.workspaceFolders ?? [];
+        if (folders.length === 0) {
             throw new Error("当前没有打开的工作区，无法解析相对文件路径。");
         }
-        return path.join(cwd, trimmed);
+        const isAbsolute = path.isAbsolute(trimmed) ||
+            path.win32.isAbsolute(trimmed) ||
+            path.posix.isAbsolute(trimmed);
+        const candidates = isAbsolute
+            ? [trimmed]
+            : folders.flatMap((folder) => {
+                const relative = this.stripWorkspaceFolderPrefix(trimmed, folder);
+                return [path.resolve(folder.uri.fsPath, relative)];
+            });
+        const resolved = candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[0];
+        if (!resolved || !this.isWorkspacePath(resolved)) {
+            throw new Error("只能打开当前 VS Code 工作区内的文件。");
+        }
+        return resolved;
+    }
+    async resolveWorkspaceFileReference(filePath) {
+        const directPath = this.resolveWorkspaceFilePath(filePath);
+        if (fs.existsSync(directPath)) {
+            return directPath;
+        }
+        const trimmed = filePath.trim();
+        if (!isBareWorkspaceFilename(trimmed)) {
+            return directPath;
+        }
+        const matches = await vscode.workspace.findFiles(`**/${escapeGlobSegment(trimmed)}`, undefined, 21);
+        const workspaceMatches = matches.filter((uri) => vscode.workspace.getWorkspaceFolder(uri));
+        if (workspaceMatches.length === 0) {
+            throw new Error(`工作区中找不到文件：${trimmed}`);
+        }
+        if (workspaceMatches.length === 1) {
+            return workspaceMatches[0].fsPath;
+        }
+        const selected = await vscode.window.showQuickPick(workspaceMatches.map((uri) => ({
+            label: vscode.workspace.asRelativePath(uri, false),
+            description: vscode.workspace.getWorkspaceFolder(uri)?.name,
+            uri,
+        })), {
+            title: `打开 ${trimmed}`,
+            placeHolder: "工作区中有多个同名文件，请选择要打开的路径",
+        });
+        if (!selected) {
+            throw new Error(`未选择要打开的文件：${trimmed}`);
+        }
+        return selected.uri.fsPath;
+    }
+    stripWorkspaceFolderPrefix(value, folder) {
+        const normalized = value.replace(/\\/g, "/");
+        const prefix = `${folder.name}/`;
+        return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : value;
+    }
+    isWorkspacePath(filePath) {
+        const candidate = path.resolve(filePath);
+        return (vscode.workspace.workspaceFolders ?? []).some((folder) => {
+            const root = path.resolve(folder.uri.fsPath);
+            const relative = path.relative(root, candidate);
+            return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+        });
     }
     resolveWebviewView(webviewView) {
         this.view = webviewView;
@@ -172,6 +232,9 @@ class SidebarProvider {
                 case "session.export":
                     void this.handleSessionExportRequest(webview, message.requestId, message.payload.sessionId);
                     return;
+                case "subtask.transcript":
+                    void this.handleSubtaskTranscriptRequest(webview, message.requestId, message.payload.sessionId);
+                    return;
                 case "session.timeline":
                     void this.handleSessionTimelineRequest(webview, message.requestId, message.payload.sessionId);
                     return;
@@ -194,7 +257,13 @@ class SidebarProvider {
                     void this.handleQuestionRejectRequest(webview, message.requestId, message.payload.questionId);
                     return;
                 case "file.open":
-                    void this.handleFileOpenRequest(webview, message.requestId, message.payload.path);
+                    void this.handleFileOpenRequest(webview, message.requestId, message.payload.path, message.payload.line, message.payload.column);
+                    return;
+                case "inlineDiff.open":
+                    void this.handleInlineDiffOpenRequest(webview, message.requestId, message.payload.fileId);
+                    return;
+                case "inlineDiff.dismiss":
+                    this.handleInlineDiffDismissRequest(webview, message.requestId, message.payload.fileId);
                     return;
                 case "tempfile.write":
                     void this.handleTempfileWriteRequest(webview, message.requestId, message.payload.fileName, message.payload.bytesBase64, message.payload.mimeType);
@@ -210,6 +279,18 @@ class SidebarProvider {
                     return;
                 case "agents.list":
                     void this.handleAgentsListRequest(webview, message.requestId);
+                    return;
+                case "composer.resources.list":
+                    void this.handleComposerResourcesListRequest(webview, message.requestId);
+                    return;
+                case "mcp.setEnabled":
+                    void this.handleMcpSetEnabledRequest(webview, message.requestId, message.payload.name, message.payload.enabled);
+                    return;
+                case "workspace.resources.search":
+                    void this.handleWorkspaceResourcesSearchRequest(webview, message.requestId, message.payload.query);
+                    return;
+                case "workspace.resources.resolve":
+                    void this.handleWorkspaceResourcesResolveRequest(webview, message.requestId, message.payload.values);
                     return;
                 case "selfcheck.run":
                     void this.handleSelfcheckRunRequest(webview, message.requestId);
@@ -256,6 +337,7 @@ class SidebarProvider {
                 opencode,
             },
         });
+        this.postInlineDiffState(this.inlineDiff.getSnapshot(), webview);
     }
     async handleSessionsListRequest(webview, requestId) {
         try {
@@ -325,6 +407,21 @@ class SidebarProvider {
             this.respondError(webview, requestId, error, "获取 session export 失败。");
         }
     }
+    async handleSubtaskTranscriptRequest(webview, requestId, sessionId) {
+        try {
+            const rawMessages = await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}/message`);
+            const messages = (0, parsers_1.liveMessagesToTranscript)(rawMessages);
+            this.respond(webview, {
+                type: "subtask.transcript.response",
+                requestId,
+                ok: true,
+                payload: { sessionId, messages },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "Unable to load subtask transcript.");
+        }
+    }
     async handleSessionDeleteRequest(webview, requestId, sessionId) {
         try {
             await (0, opencodeCli_1.sessionDelete)(sessionId, { timeoutMs: 60000 });
@@ -384,6 +481,7 @@ class SidebarProvider {
                 method: "POST",
                 body: JSON.stringify({ messageID: payload.messageId }),
             });
+            this.inlineDiff.invalidateAll("Session history changed; the previous inline diff is no longer current.");
             this.respond(webview, {
                 type: "session.undo.response",
                 requestId,
@@ -424,6 +522,7 @@ class SidebarProvider {
                 }),
                 this.computeRedoComposerText(sessionId),
             ]);
+            this.inlineDiff.invalidateAll("Session history changed; the previous inline diff is no longer current.");
             this.respond(webview, {
                 type: "session.redo.response",
                 requestId,
@@ -468,23 +567,82 @@ class SidebarProvider {
             this.respondError(webview, requestId, error, "写入临时图片失败。");
         }
     }
-    async handleFileOpenRequest(webview, requestId, filePath) {
+    async handleFileOpenRequest(webview, requestId, filePath, line, column) {
         try {
-            const resolvedPath = this.resolveWorkspaceFilePath(filePath);
+            const resolvedPath = await this.resolveWorkspaceFileReference(filePath);
             const document = await vscode.workspace.openTextDocument(vscode.Uri.file(resolvedPath));
-            await vscode.window.showTextDocument(document, { preview: true });
+            const editor = await vscode.window.showTextDocument(document, { preview: true });
+            if (line) {
+                const lineIndex = Math.min(Math.max(0, line - 1), Math.max(0, document.lineCount - 1));
+                const lineLength = document.lineAt(lineIndex).text.length;
+                const columnIndex = Math.min(Math.max(0, (column ?? 1) - 1), lineLength);
+                const position = new vscode.Position(lineIndex, columnIndex);
+                editor.selection = new vscode.Selection(position, position);
+                editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+            }
             this.respond(webview, {
                 type: "file.open.response",
                 requestId,
                 ok: true,
                 payload: {
                     path: resolvedPath,
+                    line,
+                    column,
                 },
             });
         }
         catch (error) {
             this.respondError(webview, requestId, error, "打开文件失败。");
         }
+    }
+    async handleInlineDiffOpenRequest(webview, requestId, fileId) {
+        try {
+            const result = await this.inlineDiff.open(fileId);
+            if (!result.ok) {
+                throw new Error(result.message);
+            }
+            this.respond(webview, {
+                type: "inlineDiff.open.response",
+                requestId,
+                ok: true,
+                payload: { fileId },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "打开 Inline Diff 失败。");
+        }
+    }
+    handleInlineDiffDismissRequest(webview, requestId, fileId) {
+        this.inlineDiff.dismiss(fileId);
+        this.respond(webview, {
+            type: "inlineDiff.dismiss.response",
+            requestId,
+            ok: true,
+            payload: { fileId },
+        });
+    }
+    postInlineDiffState(snapshot, webview = this.view?.webview) {
+        if (!webview) {
+            return;
+        }
+        this.respond(webview, {
+            type: "inlineDiff.state",
+            requestId: `inline-diff-state-${String(snapshot.revision)}`,
+            ok: true,
+            payload: {
+                revision: snapshot.revision,
+                files: snapshot.files.map((file) => ({
+                    fileId: file.fileId,
+                    path: file.path,
+                    displayPath: file.displayPath,
+                    additions: file.additions,
+                    deletions: file.deletions,
+                    hunks: file.hunkCount,
+                    status: file.status,
+                    reason: file.reason,
+                })),
+            },
+        });
     }
     async handlePermissionReplyRequest(webview, requestId, permissionId, reply, message) {
         try {
@@ -634,26 +792,226 @@ class SidebarProvider {
             this.respondError(webview, requestId, error, "获取 agents 失败。");
         }
     }
+    async handleComposerResourcesListRequest(webview, requestId) {
+        const [commandsResult, skillsResult, mcpResult] = await Promise.allSettled([
+            this.requestServeJson("/command"),
+            this.requestServeJson("/skill"),
+            this.requestServeJson("/mcp"),
+        ]);
+        this.respond(webview, {
+            type: "composer.resources.list.response",
+            requestId,
+            ok: true,
+            payload: {
+                commands: commandsResult.status === "fulfilled"
+                    ? normalizeComposerCommands(commandsResult.value)
+                    : [],
+                skills: skillsResult.status === "fulfilled"
+                    ? normalizeComposerSkills(skillsResult.value)
+                    : [],
+                mcpServers: mcpResult.status === "fulfilled"
+                    ? normalizeComposerMcpServers(mcpResult.value)
+                    : [],
+                ...(mcpResult.status === "rejected"
+                    ? {
+                        mcpError: mcpResult.reason instanceof Error && mcpResult.reason.message.trim()
+                            ? mcpResult.reason.message.trim()
+                            : "获取 MCP server 状态失败。",
+                    }
+                    : {}),
+            },
+        });
+    }
+    async handleMcpSetEnabledRequest(webview, requestId, name, enabled) {
+        try {
+            const encodedName = encodeURIComponent(name.trim());
+            await this.requestServeNoContent(`/mcp/${encodedName}/${enabled ? "connect" : "disconnect"}`, { method: "POST" });
+            const server = await this.waitForMcpServerTransition(name, enabled);
+            this.respond(webview, {
+                type: "mcp.setEnabled.response",
+                requestId,
+                ok: true,
+                payload: { server },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "切换 MCP server 失败。");
+        }
+    }
+    async waitForMcpServerTransition(name, enabled) {
+        let lastServer;
+        let lastReadError;
+        for (const waitMs of MCP_TRANSITION_POLL_DELAYS_MS) {
+            if (waitMs > 0) {
+                await (0, runLifecycle_1.delay)(waitMs);
+            }
+            let status;
+            try {
+                status = await this.requestServeJson("/mcp");
+                lastReadError = undefined;
+            }
+            catch (error) {
+                lastReadError = error instanceof Error ? error.message : String(error);
+                continue;
+            }
+            const server = normalizeComposerMcpServers(status).find((entry) => entry.name === name);
+            if (!server) {
+                continue;
+            }
+            lastServer = server;
+            const normalizedStatus = server.status.trim().toLowerCase();
+            if (server.error || ["error", "failed"].includes(normalizedStatus)) {
+                throw new Error(server.error || `MCP server ${name} 状态为 ${server.status}。`);
+            }
+            if (server.enabled === enabled) {
+                return server;
+            }
+        }
+        const target = enabled ? "连接" : "断开";
+        const detail = lastReadError
+            ? `，最后一次状态读取失败：${lastReadError}`
+            : lastServer
+                ? `，当前状态为 ${lastServer.status}`
+                : "";
+        throw new Error(`MCP server ${name} 未能在等待时间内${target}${detail}。`);
+    }
+    async handleWorkspaceResourcesSearchRequest(webview, requestId, query) {
+        try {
+            const resources = await this.searchWorkspaceResources(query);
+            this.respond(webview, {
+                type: "workspace.resources.search.response",
+                requestId,
+                ok: true,
+                payload: { query, resources },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "搜索工作区文件失败。");
+        }
+    }
+    async handleWorkspaceResourcesResolveRequest(webview, requestId, values) {
+        try {
+            const resolved = await Promise.all(values.flatMap((value) => value
+                .split(/\r?\n/)
+                .map((entry) => entry.trim())
+                .filter((entry) => entry.length > 0 && !entry.startsWith("#"))
+                .map((entry) => this.resolveDroppedWorkspaceResource(entry))));
+            const resources = uniqueWorkspaceResources(resolved.filter((entry) => Boolean(entry)));
+            this.respond(webview, {
+                type: "workspace.resources.resolve.response",
+                requestId,
+                ok: true,
+                payload: { resources },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "解析拖入的工作区资源失败。");
+        }
+    }
+    async searchWorkspaceResources(query) {
+        const folders = vscode.workspace.workspaceFolders ?? [];
+        if (folders.length === 0) {
+            return [];
+        }
+        const searchGlobs = buildWorkspaceSearchGlobs(query);
+        const fileGroups = await Promise.all(searchGlobs.map((glob, index) => vscode.workspace.findFiles(glob, undefined, index === 0 ? 1600 : 1000)));
+        const files = [
+            ...new Map(fileGroups.flat().map((uri) => [uri.toString(), uri])).values(),
+        ];
+        const candidates = new Map();
+        for (const file of files) {
+            const summary = this.toWorkspaceResource(file, "file");
+            if (!summary) {
+                continue;
+            }
+            candidates.set(`file:${summary.absolutePath}`, summary);
+            const folder = vscode.workspace.getWorkspaceFolder(file);
+            if (!folder) {
+                continue;
+            }
+            let parentPath = path.posix.dirname(file.path);
+            while (parentPath.length >= folder.uri.path.length && parentPath !== folder.uri.path) {
+                const parent = file.with({ path: parentPath });
+                const parentSummary = this.toWorkspaceResource(parent, "folder");
+                if (parentSummary) {
+                    candidates.set(`folder:${parentSummary.absolutePath}`, parentSummary);
+                }
+                const next = path.posix.dirname(parentPath);
+                if (next === parentPath) {
+                    break;
+                }
+                parentPath = next;
+            }
+        }
+        return [...candidates.values()]
+            .map((resource) => ({ resource, score: scoreWorkspaceResource(resource, query) }))
+            .filter((entry) => entry.score < Number.POSITIVE_INFINITY)
+            .sort((left, right) => left.score - right.score || left.resource.path.localeCompare(right.resource.path))
+            .slice(0, 60)
+            .map((entry) => entry.resource);
+    }
+    async resolveDroppedWorkspaceResource(value) {
+        const unquoted = value.replace(/^['"]|['"]$/g, "");
+        let uri;
+        try {
+            const parsed = vscode.Uri.parse(unquoted, true);
+            if (parsed.scheme && parsed.scheme !== "untitled") {
+                uri = parsed;
+            }
+        }
+        catch {
+            uri = undefined;
+        }
+        if (!uri || !vscode.workspace.getWorkspaceFolder(uri)) {
+            try {
+                uri = vscode.Uri.file(this.resolveWorkspaceFilePath(decodeURIComponent(unquoted)));
+            }
+            catch {
+                return null;
+            }
+        }
+        if (!vscode.workspace.getWorkspaceFolder(uri)) {
+            return null;
+        }
+        const stat = await vscode.workspace.fs.stat(uri);
+        const kind = (stat.type & vscode.FileType.Directory) !== 0 ? "folder" : "file";
+        return this.toWorkspaceResource(uri, kind);
+    }
+    toWorkspaceResource(uri, kind) {
+        if (!vscode.workspace.getWorkspaceFolder(uri)) {
+            return null;
+        }
+        const includeWorkspaceFolder = (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
+        const relativePath = vscode.workspace.asRelativePath(uri, includeWorkspaceFolder).replace(/\\/g, "/");
+        return {
+            kind,
+            path: kind === "folder" ? `${relativePath.replace(/\/$/, "")}/` : relativePath,
+            absolutePath: uri.fsPath,
+        };
+    }
     async handleSelfcheckRunRequest(webview, requestId) {
         const env = (0, opencodeEnv_1.withOpencodeBinInPath)();
         const cwd = this.getDefaultCwd();
-        const opencode = await this.getOpencodeCompatibility(env, cwd);
+        const [opencode, health, sessions, models, agents] = await Promise.all([
+            this.getOpencodeCompatibility(env, cwd),
+            this.checkServeHealth(),
+            this.safeCount(async () => {
+                const result = await (0, opencodeCli_1.sessionListJson)({ env, cwd });
+                const parsed = (0, parsers_1.parseSessionListJson)(result.stdout);
+                return parsed.length;
+            }),
+            this.safeCount(async () => {
+                const result = await (0, opencodeCli_1.modelsList)({ env, cwd });
+                const parsed = (0, parsers_1.parseModelsList)(result.stdout);
+                return parsed.length;
+            }),
+            this.safeCount(async () => {
+                const result = await (0, opencodeCli_1.agentList)({ env, cwd });
+                const parsed = (0, parsers_1.parseAgentList)(result.stdout);
+                return parsed.length;
+            }),
+        ]);
         const opencodeBinary = opencode.binary;
-        const sessions = await this.safeCount(async () => {
-            const result = await (0, opencodeCli_1.sessionListJson)({ env, cwd });
-            const parsed = (0, parsers_1.parseSessionListJson)(result.stdout);
-            return parsed.length;
-        });
-        const models = await this.safeCount(async () => {
-            const result = await (0, opencodeCli_1.modelsList)({ env, cwd });
-            const parsed = (0, parsers_1.parseModelsList)(result.stdout);
-            return parsed.length;
-        });
-        const agents = await this.safeCount(async () => {
-            const result = await (0, opencodeCli_1.agentList)({ env, cwd });
-            const parsed = (0, parsers_1.parseAgentList)(result.stdout);
-            return parsed.length;
-        });
         this.respond(webview, {
             type: "selfcheck.response",
             requestId,
@@ -664,11 +1022,31 @@ class SidebarProvider {
                 remoteName: this.remoteName,
                 opencodeBinary,
                 opencode,
+                health,
                 sessions,
                 models,
                 agents,
             },
         });
+    }
+    async checkServeHealth() {
+        let lastError = "OpenCode serve 健康检查失败。";
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+                const result = await this.requestServeJson("/global/health", { includeCwd: false });
+                if (result.healthy === true) {
+                    return { ok: true, version: result.version };
+                }
+                lastError = "OpenCode serve 返回了非健康状态。";
+            }
+            catch (error) {
+                lastError = error instanceof Error ? error.message : String(error);
+            }
+            if (attempt === 0) {
+                await (0, runLifecycle_1.delay)(400);
+            }
+        }
+        return { ok: false, error: lastError };
     }
     async getOpencodeCompatibility(env = (0, opencodeEnv_1.withOpencodeBinInPath)(), cwd = this.getDefaultCwd()) {
         const binary = (0, opencodeEnv_1.resolveOpencodeBinary)(env);
@@ -727,6 +1105,17 @@ class SidebarProvider {
         this.currentRun = { requestId, controller, eventAbort };
         this.respond(webview, { type: "run.start.response", requestId, ok: true });
         let watchdog;
+        let inlineDiffRun;
+        let inlineDiffFinished = false;
+        const finishInlineDiff = (outcome) => {
+            if (!inlineDiffRun || inlineDiffFinished) {
+                return;
+            }
+            inlineDiffFinished = true;
+            void inlineDiffRun.finish(outcome).catch((error) => {
+                (0, diagnostics_1.logError)(`inline diff finish failed: ${String(error)}`);
+            });
+        };
         try {
             const runtime = await (0, serveManager_1.ensureServeRunning)();
             const sessionId = await this.ensureSessionForPrompt(payload, runtime.baseUrl);
@@ -736,22 +1125,20 @@ class SidebarProvider {
             this.invalidateSessionExportCache(sessionId);
             this.currentRun.sessionId = sessionId;
             this.respondRunEvent(webview, requestId, { type: "session", sessionId });
+            inlineDiffRun = this.inlineDiff.beginRun({
+                runId: requestId,
+                sessionId,
+                cwd: this.getDefaultCwd() ?? process.cwd(),
+                startedAt: Date.now(),
+                promptText: payload.message,
+            });
+            this.currentRun.inlineDiffRun = inlineDiffRun;
             const streamState = (0, runLifecycle_1.createServeStreamState)();
             const eventTask = this.consumeServeEvents(webview, requestId, sessionId, runtime.baseUrl, eventAbort.signal, streamState);
             const blockerPoll = this.startBlockerPoll(webview, requestId, sessionId, streamState);
             if (this.currentRun?.requestId === requestId) {
                 this.currentRun.blockerPoll = blockerPoll;
             }
-            await this.requestServeNoContent(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
-                method: "POST",
-                signal: controller.signal,
-                body: JSON.stringify({
-                    agent: payload.agent,
-                    model: splitModel(payload.model),
-                    variant: payload.variant || undefined,
-                    parts: buildPromptParts(payload.message, payload.files, this.hostKind),
-                }),
-            });
             const startedAt = Date.now();
             watchdog = setTimeout(() => {
                 if (!this.currentRun || this.currentRun.requestId !== requestId) {
@@ -770,6 +1157,33 @@ class SidebarProvider {
                     },
                 });
             }, 8000);
+            if (payload.command) {
+                const parts = buildPromptParts("", payload.files, this.hostKind).filter((part) => part.type === "file");
+                await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}/command`, {
+                    method: "POST",
+                    signal: controller.signal,
+                    body: JSON.stringify({
+                        agent: payload.agent,
+                        model: payload.model,
+                        variant: payload.variant || undefined,
+                        command: payload.command.name,
+                        arguments: payload.command.arguments,
+                        ...(parts.length > 0 ? { parts } : {}),
+                    }),
+                });
+            }
+            else {
+                await this.requestServeNoContent(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
+                    method: "POST",
+                    signal: controller.signal,
+                    body: JSON.stringify({
+                        agent: payload.agent,
+                        model: splitModel(payload.model),
+                        variant: payload.variant || undefined,
+                        parts: buildPromptParts(payload.message, payload.files, this.hostKind),
+                    }),
+                });
+            }
             const completionResult = await eventTask;
             if (!this.currentRun || this.currentRun.requestId !== requestId) {
                 return;
@@ -777,23 +1191,27 @@ class SidebarProvider {
             if (completionResult === "stopped") {
                 this.clearCurrentRunForRequest(requestId);
                 this.respondRunEvent(webview, requestId, { type: "stopped" });
+                finishInlineDiff("stopped");
                 return;
             }
             if (completionResult instanceof Error) {
                 this.clearCurrentRunForRequest(requestId);
                 if (completionResult.name === "AbortError") {
                     this.respondRunEvent(webview, requestId, { type: "stopped" });
+                    finishInlineDiff("stopped");
                 }
                 else {
                     this.respondRunEvent(webview, requestId, {
                         type: "error",
                         error: completionResult.message || "运行失败。",
                     });
+                    finishInlineDiff("failed");
                 }
                 return;
             }
             this.clearCurrentRunForRequest(requestId);
             this.respondRunEvent(webview, requestId, { type: "done" });
+            finishInlineDiff("done");
         }
         catch (error) {
             if (!this.currentRun || this.currentRun.requestId !== requestId) {
@@ -804,6 +1222,7 @@ class SidebarProvider {
             this.clearCurrentRunForRequest(requestId);
             if (isAborted) {
                 this.respondRunEvent(webview, requestId, { type: "stopped" });
+                finishInlineDiff("stopped");
             }
             else {
                 const errorMessage = error instanceof Error ? error.message : "运行失败。";
@@ -811,6 +1230,7 @@ class SidebarProvider {
                     type: "error",
                     error: errorMessage,
                 });
+                finishInlineDiff("failed");
             }
         }
         finally {
@@ -822,6 +1242,9 @@ class SidebarProvider {
             if (this.currentRun && this.currentRun.requestId === requestId) {
                 this.clearCurrentRunBlockerPoll(this.currentRun);
                 this.currentRun = undefined;
+            }
+            if (!inlineDiffFinished) {
+                finishInlineDiff("stopped");
             }
         }
     }
@@ -1065,7 +1488,12 @@ class SidebarProvider {
     createRunLifecycleAdapter(webview, requestId) {
         return {
             isCurrentRun: (candidateRequestId) => this.currentRun?.requestId === candidateRequestId,
-            emit: (event) => this.respondRunEvent(webview, requestId, event),
+            emit: (event) => {
+                if (this.currentRun?.requestId === requestId) {
+                    this.currentRun.inlineDiffRun?.observe(event);
+                }
+                this.respondRunEvent(webview, requestId, event);
+            },
             acceptBlockerSession: (candidateRequestId, sessionId, blockerSessionId) => {
                 if (!blockerSessionId) {
                     return false;
@@ -1260,6 +1688,9 @@ class SidebarProvider {
             if (entry.supportsThinking) {
                 summary.supportsThinking = true;
             }
+            if (entry.contextWindow) {
+                summary.contextWindow = entry.contextWindow;
+            }
             return summary;
         });
     }
@@ -1306,14 +1737,18 @@ class SidebarProvider {
     }
     async getVerboseModelsPayload() {
         const result = await (0, opencodeCli_1.modelsVerbose)({ cwd: this.getDefaultCwd() });
+        const configuredModels = this.readConfiguredModelMetadata();
         return (0, parsers_1.parseModelsVerbose)(result.stdout)
             .map((entry) => {
             const split = splitModel(entry.modelName);
+            const discovered = (0, parsers_1.extractModelDefinitionMetadata)(entry.json);
+            const configured = configuredModels.get(entry.modelName);
             return {
                 name: entry.modelName,
                 providerID: split?.providerID ?? "",
-                variants: extractModelVariants(entry.json),
+                variants: configured?.variants ?? discovered.variants,
                 supportsThinking: hasModelThinkingCapability(entry.json),
+                contextWindow: configured?.contextWindow ?? discovered.contextWindow,
             };
         })
             .filter((entry) => entry.providerID.length > 0);
@@ -1339,6 +1774,16 @@ class SidebarProvider {
             const configPath = resolveOpencodeConfigPath();
             const raw = fs.readFileSync(configPath, "utf8");
             return (0, parsers_1.extractConfiguredProviderLabels)(JSON.parse(raw));
+        }
+        catch {
+            return new Map();
+        }
+    }
+    readConfiguredModelMetadata() {
+        try {
+            const configPath = resolveOpencodeConfigPath();
+            const raw = fs.readFileSync(configPath, "utf8");
+            return (0, parsers_1.extractConfiguredModelMetadata)(JSON.parse(raw));
         }
         catch {
             return new Map();
@@ -1427,6 +1872,36 @@ class SidebarProvider {
 exports.SidebarProvider = SidebarProvider;
 SidebarProvider.WORKSPACE_KEY_LAST_SELECTED_MODEL = "opencodeUI.lastSelectedModel";
 SidebarProvider.WORKSPACE_KEY_LAST_SELECTED_AGENT = "opencodeUI.lastSelectedAgent";
+function createInactiveInlineDiffController() {
+    const snapshot = {
+        revision: 0,
+        activeRun: false,
+        files: [],
+    };
+    return {
+        onDidChange: () => ({ dispose: () => undefined }),
+        beginRun: () => ({
+            observe: () => undefined,
+            finish: async () => undefined,
+        }),
+        open: async () => ({
+            ok: false,
+            code: "REVIEW_UNAVAILABLE",
+            message: "Inline Diff is not active in this host.",
+            snapshot,
+        }),
+        resolve: async () => ({
+            ok: false,
+            code: "REVIEW_UNAVAILABLE",
+            message: "Inline Diff is not active in this host.",
+            snapshot,
+        }),
+        dismiss: () => undefined,
+        invalidateAll: () => undefined,
+        getSnapshot: () => snapshot,
+        dispose: () => undefined,
+    };
+}
 function summarizeSessionTitle(message) {
     const normalized = normalizeTitleSource(message);
     if (!normalized) {
@@ -1653,38 +2128,159 @@ function splitModel(model) {
         modelID: model.slice(slash + 1),
     };
 }
-function extractModelVariants(json) {
-    if (!isRecord(json)) {
-        return undefined;
-    }
-    const variants = json.variants;
-    const names = Array.isArray(variants)
-        ? variants.filter((variant) => typeof variant === "string")
-        : isRecord(variants)
-            ? Object.keys(variants)
-            : [];
-    const unique = uniqueTrimmedNames(names);
-    return unique.length > 0 ? unique : undefined;
-}
 function hasModelThinkingCapability(json) {
     if (!isRecord(json) || !isRecord(json.capabilities)) {
         return false;
     }
     return json.capabilities.reasoning === true;
 }
-function uniqueTrimmedNames(names) {
-    const seen = new Set();
-    const result = [];
-    for (const name of names) {
-        const trimmed = name.trim();
-        const normalized = trimmed.toLowerCase();
-        if (!trimmed || seen.has(normalized)) {
-            continue;
-        }
-        seen.add(normalized);
-        result.push(trimmed);
+function normalizeComposerCommands(value) {
+    if (!Array.isArray(value)) {
+        return [];
     }
-    return result;
+    return value.flatMap((entry) => {
+        if (!isRecord(entry) || typeof entry.name !== "string") {
+            return [];
+        }
+        const name = entry.name.replace(/^\/+/, "").trim();
+        if (!name) {
+            return [];
+        }
+        const source = ["command", "mcp", "skill"].includes(String(entry.source))
+            ? entry.source
+            : undefined;
+        return [
+            {
+                name,
+                description: typeof entry.description === "string"
+                    ? entry.description.trim() || undefined
+                    : undefined,
+                source,
+                hints: Array.isArray(entry.hints)
+                    ? entry.hints.filter((hint) => typeof hint === "string")
+                    : [],
+            },
+        ];
+    });
+}
+function normalizeComposerSkills(value) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    return value.flatMap((entry) => {
+        if (!isRecord(entry) || typeof entry.name !== "string") {
+            return [];
+        }
+        const name = entry.name.trim();
+        if (!name) {
+            return [];
+        }
+        return [
+            {
+                name,
+                description: typeof entry.description === "string"
+                    ? entry.description.trim() || undefined
+                    : undefined,
+            },
+        ];
+    });
+}
+function normalizeComposerMcpServers(value) {
+    if (!isRecord(value)) {
+        return [];
+    }
+    return Object.entries(value).map(([name, entry]) => {
+        const record = isRecord(entry) ? entry : undefined;
+        const status = (typeof record?.status === "string" && record.status) ||
+            (typeof record?.type === "string" && record.type) ||
+            (typeof entry === "string" && entry) ||
+            "unknown";
+        const normalizedStatus = status.trim().toLowerCase();
+        const error = typeof record?.error === "string"
+            ? record.error.trim() || undefined
+            : undefined;
+        return {
+            name,
+            status,
+            enabled: ["connected", "ready", "active"].includes(normalizedStatus),
+            ...(error ? { error } : {}),
+        };
+    });
+}
+function uniqueWorkspaceResources(resources) {
+    const seen = new Set();
+    return resources.filter((resource) => {
+        const key = `${resource.kind}:${resource.absolutePath}`;
+        if (seen.has(key)) {
+            return false;
+        }
+        seen.add(key);
+        return true;
+    });
+}
+function scoreWorkspaceResource(resource, query) {
+    const normalizedQuery = query.trim().replace(/\\/g, "/").toLowerCase();
+    const candidate = resource.path.toLowerCase();
+    const basename = candidate.replace(/\/$/, "").split("/").pop() ?? candidate;
+    if (!normalizedQuery) {
+        return resource.kind === "folder" ? 10 : 20;
+    }
+    if (candidate === normalizedQuery || basename === normalizedQuery) {
+        return 0;
+    }
+    if (basename.startsWith(normalizedQuery)) {
+        return 10 + basename.length / 1000;
+    }
+    if (candidate.startsWith(normalizedQuery)) {
+        return 20 + candidate.length / 1000;
+    }
+    const includesAt = candidate.indexOf(normalizedQuery);
+    if (includesAt >= 0) {
+        return 30 + includesAt + candidate.length / 1000;
+    }
+    let queryIndex = 0;
+    for (const character of candidate) {
+        if (character === normalizedQuery[queryIndex]) {
+            queryIndex += 1;
+            if (queryIndex === normalizedQuery.length) {
+                return 50 + candidate.length / 1000;
+            }
+        }
+    }
+    return Number.POSITIVE_INFINITY;
+}
+function isBareWorkspaceFilename(value) {
+    return value.length > 0
+        && !/[\\/]/.test(value)
+        && !path.isAbsolute(value)
+        && !path.win32.isAbsolute(value)
+        && !path.posix.isAbsolute(value);
+}
+function escapeGlobSegment(value) {
+    return value.replace(/[*?\[\]{}]/g, (character) => {
+        if (character === "[") {
+            return "[[]";
+        }
+        if (character === "]") {
+            return "[]]";
+        }
+        return `[${character}]`;
+    });
+}
+function buildWorkspaceSearchGlobs(query) {
+    const literal = query
+        .trim()
+        .replace(/\\/g, "/")
+        .replace(/[*?\[\]{}]/g, "")
+        .replace(/^\/+|\/+$/g, "");
+    if (!literal) {
+        return ["**/*"];
+    }
+    return [
+        "**/*",
+        `**/*${literal}*`,
+        `**/*${literal}*/**/*`,
+    ];
 }
 function uniqueProviderIds(providerIds) {
     const seen = new Set();

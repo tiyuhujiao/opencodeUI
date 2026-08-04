@@ -7,14 +7,20 @@ import {
 } from '../webview-ui/src/thinkingOptions';
 
 describe('thinking options', () => {
-  it('根据当前模型 variants 生成选项，而不是固定档位', () => {
+  it('根据当前模型 variants 生成选项并按思考强度从低到高排列', () => {
     expect(getThinkingOptionsForModel({
       variants: ['minimal', 'low', 'medium', 'high']
     })).toEqual(['off', 'minimal', 'low', 'medium', 'high']);
 
     expect(getThinkingOptionsForModel({
-      variants: ['low', 'max']
-    })).toEqual(['off', 'low', 'max']);
+      variants: ['high', 'low', 'max', 'medium', 'xhigh']
+    })).toEqual(['off', 'low', 'medium', 'high', 'xhigh', 'max']);
+  });
+
+  it('按大小写无关的等级排序，并把未知自定义档位稳定放在已知档位之后', () => {
+    expect(getThinkingOptionsForModel({
+      variants: ['MAX', 'turbo', 'HIGH', 'low', 'balanced', 'Medium', 'xhigh']
+    })).toEqual(['off', 'low', 'Medium', 'HIGH', 'xhigh', 'MAX', 'turbo', 'balanced']);
   });
 
   it('没有 variants 但支持 reasoning 时只提供默认 thinking', () => {

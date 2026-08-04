@@ -12,9 +12,28 @@ describe('session dialog actions', () => {
     expect(source).toContain('aria-label={`Delete ${session.title}`}');
     expect(source).toContain('title="Delete session"');
     expect(source).toContain('event.stopPropagation()');
-    expect(source).toContain('onDeleteSessionId(session.id)');
+    expect(source).toContain('setDeleteCandidate(session)');
+    expect(source).toContain("import { Trash2 } from 'lucide-react'");
     expect(source).toContain('className="dialog__itemDeleteIcon"');
     expect(source).toContain('tabIndex={selected ? 0 : -1}');
+  });
+
+  it('requires confirmation before every session deletion path', () => {
+    const source = readFileSync(join(root, 'webview-ui/src/components/dialog/SessionDialog.tsx'), 'utf8');
+    const styles = readFileSync(join(root, 'webview-ui/src/styles.css'), 'utf8');
+
+    expect(source).toContain('const [deleteCandidate, setDeleteCandidate] = useState<SessionSummary | null>(null)');
+    expect(source).toContain("role=\"alertdialog\"");
+    expect(source).toContain('aria-labelledby="delete-session-title"');
+    expect(source).toContain('Delete session?');
+    expect(source).toContain('This action cannot be undone.');
+    expect(source).toContain('event.stopImmediatePropagation()');
+    expect(source).toContain("window.addEventListener('keydown', onKeyDown, { capture: true })");
+    expect(source).toContain('onDeleteSessionId?.(id)');
+    expect(source).not.toContain('onDeleteSessionId(session.id)');
+    expect(source).not.toContain('deleteArmedId');
+    expect(styles).toContain('.delete-confirm__dialog');
+    expect(styles).toContain('.delete-confirm__button--danger');
   });
 
   it('keeps the context menu anchored to the right-clicked session row', () => {

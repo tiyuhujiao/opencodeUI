@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Trash2 } from 'lucide-react'
 import type { SessionSummary } from '../../../../src/shared/protocol'
 
 type SessionDialogProps = {
@@ -24,15 +25,16 @@ function formatSessionUpdated(updated: string) {
 
 export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessionId, onDeleteSessionId, onClose }: SessionDialogProps) {
   const [selectedIndex, setSelectedIndex] = useState(0)
-  const [deleteArmedId, setDeleteArmedId] = useState<string | null>(null)
+  const [deleteCandidate, setDeleteCandidate] = useState<SessionSummary | null>(null)
   const [contextMenu, setContextMenu] = useState<null | { x: number; y: number; id: string }>(null)
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
-  const deleteTimerRef = useRef<number | null>(null)
-  const deleteArmedIdRef = useRef<string | null>(null)
+  const cancelDeleteButtonRef = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
     if (!open) {
+      setContextMenu(null)
+      setDeleteCandidate(null)
       return
     }
     const index = selectedSessionId ? sessions.findIndex((s) => s.id === selectedSessionId) : -1
@@ -45,14 +47,24 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (deleteCandidate) {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          event.stopImmediatePropagation()
+          setDeleteCandidate(null)
+        }
+        return
+      }
+
       if (event.key === 'Escape') {
         event.preventDefault()
+        event.stopImmediatePropagation()
         setContextMenu(null)
         onClose()
         return
       }
 
-      // TUI-like delete: Ctrl+D twice to delete selected session.
+      // Keep the keyboard shortcut, but route it through the same confirmation as pointer actions.
       if (onDeleteSessionId && event.key.toLowerCase() === 'd' && event.ctrlKey) {
         event.preventDefault()
         const session = sessions[selectedIndex]
@@ -60,30 +72,8 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
           return
         }
 
-        // Use a ref for the actual state machine so rapid key presses don't race React state.
-        if (deleteArmedIdRef.current === session.id) {
-          // second press
-          if (deleteTimerRef.current) {
-            window.clearTimeout(deleteTimerRef.current)
-            deleteTimerRef.current = null
-          }
-          deleteArmedIdRef.current = null
-          setDeleteArmedId(null)
-          onDeleteSessionId(session.id)
-          return
-        }
-
-        // first press
-        deleteArmedIdRef.current = session.id
-        setDeleteArmedId(session.id)
-        if (deleteTimerRef.current) {
-          window.clearTimeout(deleteTimerRef.current)
-        }
-        deleteTimerRef.current = window.setTimeout(() => {
-          deleteArmedIdRef.current = null
-          setDeleteArmedId(null)
-          deleteTimerRef.current = null
-        }, 1500)
+        setContextMenu(null)
+        setDeleteCandidate(session)
         return
       }
 
@@ -110,9 +100,15 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
       }
     }
 
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onClose, onDeleteSessionId, onSelectSessionId, open, selectedIndex, sessions])
+    window.addEventListener('keydown', onKeyDown, { capture: true })
+    return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
+  }, [deleteCandidate, onClose, onDeleteSessionId, onSelectSessionId, open, selectedIndex, sessions])
+
+  useEffect(() => {
+    if (deleteCandidate) {
+      cancelDeleteButtonRef.current?.focus()
+    }
+  }, [deleteCandidate])
 
   useEffect(() => {
     if (!open) {
@@ -134,7 +130,7 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
   return (
     <div className="overlay" role="dialog" aria-modal="true" aria-label="session dialog">
       <button type="button" className="overlay__backdrop" onClick={onClose} aria-label="close" />
-      <div className="dialog" ref={dialogRef}>
+      <div className="dialog" ref={dialogRef} aria-hidden={deleteCandidate ? true : undefined}>
         <header className="dialog__header">
           <div className="dialog__title">Switch Session</div>
         </header>
@@ -147,7 +143,7 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
             return (
               <div
                 key={session.id}
-                className={`dialog__item dialog__item--session${selected ? ' is-selected' : ''}${deleteArmedId === session.id ? ' is-delete-armed' : ''}`}
+                className={`dialog__item dialog__item--session${selected ? ' is-selected' : ''}`}
                 data-index={index}
                 onMouseEnter={() => setSelectedIndex(index)}
                 onContextMenu={(e) => {
@@ -155,7 +151,6 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
                     return
                   }
                   e.preventDefault()
-                  setDeleteArmedId(session.id)
 
                   const dialogRect = dialogRef.current?.getBoundingClientRect()
                   const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
@@ -189,10 +184,10 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
                       event.preventDefault()
                       event.stopPropagation()
                       setContextMenu(null)
-                      onDeleteSessionId(session.id)
+                      setDeleteCandidate(session)
                     }}
                   >
-                    <span className="dialog__itemDeleteIcon" aria-hidden="true" />
+                    <Trash2 className="dialog__itemDeleteIcon" size={14} aria-hidden="true" />
                   </button>
                 ) : null}
               </div>
@@ -206,9 +201,11 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
               type="button"
               className="context-menu__item context-menu__item--danger"
               onClick={() => {
-                const id = contextMenu.id
+                const session = sessions.find((candidate) => candidate.id === contextMenu.id)
                 setContextMenu(null)
-                onDeleteSessionId?.(id)
+                if (session) {
+                  setDeleteCandidate(session)
+                }
               }}
             >
               Delete
@@ -219,6 +216,66 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
           </div>
         ) : null}
       </div>
+
+      {deleteCandidate ? (
+        <div className="delete-confirm">
+          <button
+            type="button"
+            className="delete-confirm__backdrop"
+            tabIndex={-1}
+            aria-label="Cancel session deletion"
+            onClick={() => setDeleteCandidate(null)}
+          />
+          <div
+            className="delete-confirm__dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-session-title"
+            aria-describedby="delete-session-description"
+            onKeyDown={(event) => {
+              if (event.key !== 'Tab') {
+                return
+              }
+              const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not([disabled])'))
+              const focusedIndex = buttons.indexOf(document.activeElement as HTMLButtonElement)
+              const nextIndex = event.shiftKey
+                ? (focusedIndex <= 0 ? buttons.length - 1 : focusedIndex - 1)
+                : (focusedIndex >= buttons.length - 1 ? 0 : focusedIndex + 1)
+              event.preventDefault()
+              buttons[nextIndex]?.focus()
+            }}
+          >
+            <div className="delete-confirm__body">
+              <h2 id="delete-session-title" className="delete-confirm__title">Delete session?</h2>
+              <p id="delete-session-description" className="delete-confirm__message">
+                This session will be permanently deleted. This action cannot be undone.
+                <span className="delete-confirm__session">{deleteCandidate.title}</span>
+              </p>
+            </div>
+            <div className="delete-confirm__actions">
+              <button
+                ref={cancelDeleteButtonRef}
+                type="button"
+                className="delete-confirm__button"
+                onClick={() => setDeleteCandidate(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="delete-confirm__button delete-confirm__button--danger"
+                onClick={() => {
+                  const id = deleteCandidate.id
+                  setDeleteCandidate(null)
+                  onDeleteSessionId?.(id)
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.extractConfiguredProviderLabels = exports.buildProviderSummaries = exports.AuthListParseError = exports.parseAuthList = exports.coerceFirstJsonValue = exports.coerceFirstJsonObject = exports.parseRunEvent = exports.createNdjsonParser = exports.AgentListParseError = exports.parseAgentList = exports.ModelsVerboseParseError = exports.parseModelsVerbose = exports.ModelsListParseError = exports.parseModelsList = exports.exportToTranscript = exports.ExportJsonParseError = exports.parseExportJson = exports.sortSessionsByUpdatedDesc = exports.mergeSessionsById = exports.SessionListJsonParseError = exports.parseSessionListJson = void 0;
+exports.extractConfiguredProviderLabels = exports.buildProviderSummaries = exports.AuthListParseError = exports.parseAuthList = exports.coerceFirstJsonValue = exports.coerceFirstJsonObject = exports.parseRunEvent = exports.createNdjsonParser = exports.AgentListParseError = exports.parseAgentList = exports.extractModelDefinitionMetadata = exports.extractConfiguredModelMetadata = exports.ModelsVerboseParseError = exports.parseModelsVerbose = exports.ModelsListParseError = exports.parseModelsList = exports.liveMessagesToTranscript = exports.exportToTranscript = exports.ExportJsonParseError = exports.parseExportJson = exports.sortSessionsByUpdatedDesc = exports.mergeSessionsById = exports.SessionListJsonParseError = exports.parseSessionListJson = void 0;
 var sessionListJson_1 = require("./sessionListJson");
 Object.defineProperty(exports, "parseSessionListJson", { enumerable: true, get: function () { return sessionListJson_1.parseSessionListJson; } });
 Object.defineProperty(exports, "SessionListJsonParseError", { enumerable: true, get: function () { return sessionListJson_1.SessionListJsonParseError; } });
@@ -12,12 +12,16 @@ Object.defineProperty(exports, "parseExportJson", { enumerable: true, get: funct
 Object.defineProperty(exports, "ExportJsonParseError", { enumerable: true, get: function () { return exportJson_1.ExportJsonParseError; } });
 var exportToTranscript_1 = require("./exportToTranscript");
 Object.defineProperty(exports, "exportToTranscript", { enumerable: true, get: function () { return exportToTranscript_1.exportToTranscript; } });
+Object.defineProperty(exports, "liveMessagesToTranscript", { enumerable: true, get: function () { return exportToTranscript_1.liveMessagesToTranscript; } });
 var modelsList_1 = require("./modelsList");
 Object.defineProperty(exports, "parseModelsList", { enumerable: true, get: function () { return modelsList_1.parseModelsList; } });
 Object.defineProperty(exports, "ModelsListParseError", { enumerable: true, get: function () { return modelsList_1.ModelsListParseError; } });
 var modelsVerbose_1 = require("./modelsVerbose");
 Object.defineProperty(exports, "parseModelsVerbose", { enumerable: true, get: function () { return modelsVerbose_1.parseModelsVerbose; } });
 Object.defineProperty(exports, "ModelsVerboseParseError", { enumerable: true, get: function () { return modelsVerbose_1.ModelsVerboseParseError; } });
+var modelConfig_1 = require("./modelConfig");
+Object.defineProperty(exports, "extractConfiguredModelMetadata", { enumerable: true, get: function () { return modelConfig_1.extractConfiguredModelMetadata; } });
+Object.defineProperty(exports, "extractModelDefinitionMetadata", { enumerable: true, get: function () { return modelConfig_1.extractModelDefinitionMetadata; } });
 var agentList_1 = require("./agentList");
 Object.defineProperty(exports, "parseAgentList", { enumerable: true, get: function () { return agentList_1.parseAgentList; } });
 Object.defineProperty(exports, "AgentListParseError", { enumerable: true, get: function () { return agentList_1.AgentListParseError; } });

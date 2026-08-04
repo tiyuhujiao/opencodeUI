@@ -180,10 +180,36 @@ async function setup(lastPort: number | undefined) {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
 describe('ensureServeRunning 端口策略', () => {
+  it('serve JSON 请求复用已发现端口并携带 workspace cwd', async () => {
+    const { serveManager, requestMock } = await setup(5111);
+    configureHealthResponses(requestMock, {
+      5111: { type: 'status', statusCode: 200 }
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ files: 2 })
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(serveManager.requestServeJson('/session/s1/diff?messageID=m1', 'E:\\workspace')).resolves.toEqual({
+      files: 2
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:5111/session/s1/diff?messageID=m1',
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'x-opencode-directory': 'E:\\workspace'
+        }
+      }
+    );
+  });
+
   it('优先复用 lastPort，并在健康时持久化', async () => {
     const { serveManager, requestMock, spawnMock, setLastPort } = await setup(5111);
     const calledPorts = configureHealthResponses(requestMock, {

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { RefreshCw } from 'lucide-react'
 import type { ModelSummary, ProviderSummary } from '../../../../src/shared/protocol'
 
 type ModelDialogProps = {
@@ -129,6 +130,7 @@ export function ModelDialog({
             onClick={onRefresh}
             disabled={loadingModels || loadingProviders}
           >
+            <RefreshCw size={13} aria-hidden="true" />
             {loadingModels || loadingProviders ? 'Refreshing…' : 'Refresh'}
           </button>
         </header>

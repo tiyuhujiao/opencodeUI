@@ -2,7 +2,7 @@
   "name": "opencode-ui-vscode",
   "displayName": "opencode-ui",
   "publisher": "tiyuhujiao",
-  "version": "0.0.78",
+  "version": "0.0.88",
   "description": "OpenCode sidebar UI for VS Code-compatible IDEs.",
   "license": "MIT",
   "icon": "media/icon.png",

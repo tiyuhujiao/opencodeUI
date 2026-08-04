@@ -16,13 +16,16 @@ describe('webview theme toggle', () => {
     expect(source).toContain('window.localStorage.setItem(THEME_STORAGE_KEY, themeMode)')
   })
 
-  it('顶部区域在连接状态左侧提供太阳图标主题按钮', () => {
+  it('顶部区域在连接状态左侧提供与当前主题对应的图标按钮', () => {
     const source = readFileSync(join(root, 'webview-ui/src/App.tsx'), 'utf8')
 
     expect(source).toContain('className="theme-toggle"')
     expect(source).toContain("setThemeMode((current) => (current === 'light' ? 'dark' : 'light'))")
     expect(source).toContain("aria-label={themeMode === 'light' ? '切换到黑色主题' : '切换到白色主题'}")
-    expect(source).toContain('<span className="theme-toggle__icon" aria-hidden="true">☀</span>')
+    expect(source).toContain('Moon')
+    expect(source).toContain('Sun')
+    expect(source).toContain("themeMode === 'light' ? <Moon size={14}")
+    expect(source).toContain(': <Sun size={14}')
     expect(source.indexOf('className="theme-toggle"')).toBeLessThan(source.indexOf('className="topbar__status"'))
   })
 

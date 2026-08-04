@@ -1,4 +1,14 @@
-import type { RunStreamEvent, SessionSummary, TranscriptMessage, TranscriptPartTool } from '../../src/shared/protocol'
+import type { ContextUsage, RunStreamEvent, SessionSummary, TranscriptMessage, TranscriptPartTool } from '../../src/shared/protocol'
+
+export function preserveContextUsage(previous: ContextUsage | undefined, incoming: ContextUsage): ContextUsage {
+  if (incoming.usedTokens === 0 && previous && previous.usedTokens > 0) {
+    return {
+      ...previous,
+      ...(incoming.model ? { model: incoming.model } : {})
+    }
+  }
+  return incoming
+}
 
 export function compactTranscript(messages: TranscriptMessage[]): TranscriptMessage[] {
   const next: TranscriptMessage[] = []
@@ -7,8 +17,15 @@ export function compactTranscript(messages: TranscriptMessage[]): TranscriptMess
     if (last && last.role === message.role) {
       const merged = [...last.parts, ...message.parts]
       last.parts = merged
+      if (message.contextUsage) {
+        last.contextUsage = preserveContextUsage(last.contextUsage, message.contextUsage)
+      }
     } else {
-      next.push({ role: message.role, parts: [...message.parts] })
+      next.push({
+        role: message.role,
+        parts: [...message.parts],
+        ...(message.contextUsage ? { contextUsage: message.contextUsage } : {})
+      })
     }
   }
   return next
@@ -79,7 +96,8 @@ export function mergeLocalImageParts(local: TranscriptMessage[], exported: Trans
 
   const merged = exported.map((message) => ({
     role: message.role,
-    parts: [...message.parts]
+    parts: [...message.parts],
+    ...(message.contextUsage ? { contextUsage: message.contextUsage } : {})
   }))
 
   for (let i = 0; i < Math.min(local.length, merged.length); i += 1) {
@@ -114,6 +132,12 @@ export function applyRunEventToTranscript(messages: TranscriptMessage[], event: 
     parts: [...target.parts]
   }
   next[assistantIndex] = nextTarget
+
+  if (event.type === 'context.usage') {
+    const previousUsage = findLatestContextUsage(messages, assistantIndex)
+    nextTarget.contextUsage = preserveContextUsage(previousUsage, event.usage)
+    return next
+  }
 
   if (event.type === 'part') {
     if (event.part.type === 'tool') {
@@ -178,6 +202,16 @@ export function applyRunEventToTranscript(messages: TranscriptMessage[], event: 
   }
 
   return next
+}
+
+function findLatestContextUsage(messages: TranscriptMessage[], beforeIndex: number): ContextUsage | undefined {
+  for (let index = beforeIndex; index >= 0; index -= 1) {
+    const usage = messages[index]?.contextUsage
+    if (usage) {
+      return usage
+    }
+  }
+  return undefined
 }
 
 function mergeToolPart(previous: TranscriptPartTool, next: TranscriptPartTool): TranscriptPartTool {

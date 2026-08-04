@@ -84,13 +84,13 @@ npm run package
 Install the generated package into VS Code:
 
 ```bash
-code --install-extension vsix/opencode-ui-vscode-0.0.78.vsix --force
+code --install-extension vsix/opencode-ui-vscode-0.0.88.vsix --force
 ```
 
 Or into Cursor:
 
 ```bash
-cursor --install-extension vsix/opencode-ui-vscode-0.0.78.vsix --force
+cursor --install-extension vsix/opencode-ui-vscode-0.0.88.vsix --force
 ```
 
 Adjust the VSIX filename to match the current `package.json` version.

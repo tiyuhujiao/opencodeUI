@@ -159,6 +159,10 @@ export function dispatchServeEvent(
 			streamState.assistantMessageIds.add(messageId);
 			streamState.lastAssistantMessageId = messageId;
 		}
+		const usage = normalizeContextUsage(info);
+		if (usage) {
+			adapter.emit({ type: "context.usage", usage });
+		}
 		if (
 			messageId &&
 			typeof info.finish === "string" &&
@@ -232,6 +236,40 @@ export function dispatchServeEvent(
 	}
 
 	return { done: false };
+}
+
+function normalizeContextUsage(
+	info: Record<string, unknown>,
+): Extract<RunStreamEvent, { type: "context.usage" }>["usage"] | null {
+	const metadata = isRecord(info.metadata) ? info.metadata : undefined;
+	const assistant = isRecord(metadata?.assistant)
+		? metadata.assistant
+		: info;
+	const tokens = isRecord(assistant.tokens) ? assistant.tokens : undefined;
+	if (!tokens) {
+		return null;
+	}
+	const cache = isRecord(tokens.cache) ? tokens.cache : undefined;
+	const input = toNonNegativeFiniteNumber(tokens.input);
+	const cacheRead = toNonNegativeFiniteNumber(cache?.read);
+	if (input === undefined && cacheRead === undefined) {
+		return null;
+	}
+
+	const providerId =
+		typeof assistant.providerID === "string" ? assistant.providerID : undefined;
+	const modelId =
+		typeof assistant.modelID === "string" ? assistant.modelID : undefined;
+	return {
+		usedTokens: (input ?? 0) + (cacheRead ?? 0),
+		...(providerId && modelId ? { model: `${providerId}/${modelId}` } : {}),
+	};
+}
+
+function toNonNegativeFiniteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0
+		? value
+		: undefined;
 }
 
 export async function pollServeBlockers(

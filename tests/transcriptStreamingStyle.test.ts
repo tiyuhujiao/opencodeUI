@@ -19,4 +19,13 @@ describe('transcript streaming text styles', () => {
     expect(styles).toContain('font-size: 1.15rem;')
     expect(styles).not.toContain('.stream-text')
   })
+
+  it('持续输出前后始终预留滚动条槽位，避免正文横向跳动', () => {
+    const styles = readFileSync(join(root, 'webview-ui/src/styles.css'), 'utf8')
+    const codexStyles = styles.slice(styles.indexOf('/* Codex-like editor shell'))
+
+    expect(codexStyles).toContain('.transcript {')
+    expect(codexStyles).toContain('overflow-y: auto;')
+    expect(codexStyles).toContain('scrollbar-gutter: stable;')
+  })
 })

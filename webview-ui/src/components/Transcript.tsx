@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { ChevronRight } from 'lucide-react'
 import { renderMarkdown } from '../markdown/renderMarkdown'
 import type { TranscriptMessage, TranscriptPart, TranscriptPartTool } from '../../../src/shared/protocol'
 
 type TranscriptProps = {
   messages: TranscriptMessage[]
   isRunning: boolean
+  onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
+  onOpenFileReference?: (reference: { path: string; line?: number; column?: number }) => void
 }
 
-export function Transcript({ messages, isRunning }: TranscriptProps) {
+export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileReference }: TranscriptProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const autoScrollPausedRef = useRef(false)
   const scrollLockRef = useRef<{ top: number; until: number } | null>(null)
@@ -96,10 +99,51 @@ export function Transcript({ messages, isRunning }: TranscriptProps) {
   const rendered = buildDisplayBlocks(messages)
 
   return (
-    <div className="transcript" aria-live="polite" ref={containerRef}>
+    <div
+      className="transcript"
+      role="log"
+      aria-live="polite"
+      ref={containerRef}
+      onClick={(event) => {
+        const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-file-path]') : null
+        const filePath = target?.dataset.filePath
+        if (!filePath || !onOpenFileReference) {
+          return
+        }
+        event.preventDefault()
+        onOpenFileReference({
+          path: filePath,
+          line: parsePositiveInteger(target.dataset.fileLine),
+          column: parsePositiveInteger(target.dataset.fileColumn)
+        })
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') {
+          return
+        }
+        const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-file-path]') : null
+        const filePath = target?.dataset.filePath
+        if (!filePath || !onOpenFileReference) {
+          return
+        }
+        event.preventDefault()
+        onOpenFileReference({
+          path: filePath,
+          line: parsePositiveInteger(target.dataset.fileLine),
+          column: parsePositiveInteger(target.dataset.fileColumn)
+        })
+      }}
+    >
       {rendered.map((entry, messageIndex) => {
         if (entry.kind === 'tool-group') {
-          return <ToolGroupBlock key={`tool-group-${String(messageIndex)}`} items={entry.items} onUserToggle={pauseAutoScrollForUserAction} />
+          return (
+            <ToolGroupBlock
+              key={`tool-group-${String(messageIndex)}`}
+              items={entry.items}
+              onUserToggle={pauseAutoScrollForUserAction}
+              onOpenSubtask={onOpenSubtask}
+            />
+          )
         }
 
         const message = entry.message
@@ -131,6 +175,7 @@ export function Transcript({ messages, isRunning }: TranscriptProps) {
                 isStreamingBubble={isStreamingBubble}
                 currentActivityKey={currentActivityKey}
                 onUserToggle={pauseAutoScrollForUserAction}
+                onOpenSubtask={onOpenSubtask}
               />
             </article>
           </div>
@@ -138,6 +183,14 @@ export function Transcript({ messages, isRunning }: TranscriptProps) {
       })}
     </div>
   )
+}
+
+function parsePositiveInteger(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined
+  }
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
 type ToolGroupEntry = {
@@ -149,6 +202,7 @@ type ToolGroupEntry = {
   detail?: string
   status?: string
   mergeKey?: string
+  sessionId?: string
 }
 
 type ActivityEntry = {
@@ -164,12 +218,14 @@ function MessageContent({
   items,
   isStreamingBubble,
   currentActivityKey,
-  onUserToggle
+  onUserToggle,
+  onOpenSubtask
 }: {
   items: MessageRenderItem[]
   isStreamingBubble: boolean
   currentActivityKey: string | null
   onUserToggle: () => void
+  onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
 }) {
   const finalAnswerIndex = items.findIndex((item) => item.kind === 'part' && item.isFinalAnswer)
   const workDurationLabel = usePrefinalWorkDuration(items, isStreamingBubble)
@@ -184,22 +240,28 @@ function MessageContent({
           durationLabel={workDurationLabel}
           currentActivityKey={currentActivityKey}
           onUserToggle={onUserToggle}
+          onOpenSubtask={onOpenSubtask}
         />
-        {finalItems.map((item) => renderMessageItem(item, { currentActivityKey, onUserToggle }))}
+        {finalItems.map((item) => renderMessageItem(item, { currentActivityKey, onUserToggle, onOpenSubtask }))}
       </div>
     )
   }
 
   return (
     <div className="msg__content">
-      {items.map((item) => renderMessageItem(item, { currentActivityKey, onUserToggle }))}
+      {items.map((item) => renderMessageItem(item, { currentActivityKey, onUserToggle, onOpenSubtask }))}
     </div>
   )
 }
 
 function renderMessageItem(
   item: MessageRenderItem,
-  options: { currentActivityKey: string | null; onUserToggle: () => void; insidePrefinal?: boolean }
+  options: {
+    currentActivityKey: string | null
+    onUserToggle: () => void
+    onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
+    insidePrefinal?: boolean
+  }
 ) {
   if (item.kind === 'activity') {
     return (
@@ -208,6 +270,7 @@ function renderMessageItem(
         entries={item.entries}
         isCurrent={item.key === options.currentActivityKey}
         onUserToggle={options.onUserToggle}
+        onOpenSubtask={options.onOpenSubtask}
       />
     )
   }
@@ -309,12 +372,14 @@ function PrefinalWorkBlock({
   items,
   durationLabel,
   currentActivityKey,
-  onUserToggle
+  onUserToggle,
+  onOpenSubtask
 }: {
   items: MessageRenderItem[]
   durationLabel: string
   currentActivityKey: string | null
   onUserToggle: () => void
+  onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
 }) {
   const [open, setOpen] = useState(false)
   const title = durationLabel ? `Worked for ${durationLabel}` : 'Worked before final answer'
@@ -335,7 +400,9 @@ function PrefinalWorkBlock({
       </button>
       {open ? (
         <div className="prefinal-work__body">
-          {items.map((item) => renderMessageItem(item, { currentActivityKey, onUserToggle, insidePrefinal: true }))}
+          {items.map((item) =>
+            renderMessageItem(item, { currentActivityKey, onUserToggle, onOpenSubtask, insidePrefinal: true })
+          )}
         </div>
       ) : null}
     </section>
@@ -403,11 +470,13 @@ function isLastItemTextWithPriorWork(items: MessageRenderItem[]) {
 function ActivityBlock({
   entries,
   isCurrent,
-  onUserToggle
+  onUserToggle,
+  onOpenSubtask
 }: {
   entries: ActivityEntry[]
   isCurrent: boolean
   onUserToggle: () => void
+  onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
 }) {
   const [open, setOpen] = useState(false)
   const summary = getActivitySummary(entries)
@@ -430,7 +499,12 @@ function ActivityBlock({
       {open ? (
         <div className="activity-block__body">
           {entries.map((entry) => (
-            <ActivityEntryBlock key={entry.key} entry={entry} onUserToggle={onUserToggle} />
+            <ActivityEntryBlock
+              key={entry.key}
+              entry={entry}
+              onUserToggle={onUserToggle}
+              onOpenSubtask={onOpenSubtask}
+            />
           ))}
         </div>
       ) : null}
@@ -440,10 +514,12 @@ function ActivityBlock({
 
 function ActivityEntryBlock({
   entry,
-  onUserToggle
+  onUserToggle,
+  onOpenSubtask
 }: {
   entry: ActivityEntry
   onUserToggle: () => void
+  onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
 }) {
   const part = entry.part
 
@@ -467,7 +543,15 @@ function ActivityEntryBlock({
       if (group.length === 0) {
         return null
       }
-      return <ToolGroupBlock items={group} onUserToggle={onUserToggle} defaultExpanded={false} autoOpenActive={false} />
+      return (
+        <ToolGroupBlock
+          items={group}
+          onUserToggle={onUserToggle}
+          onOpenSubtask={onOpenSubtask}
+          defaultExpanded={false}
+          autoOpenActive={false}
+        />
+      )
     }
 
     const item = createToolGroupEntry(part)
@@ -566,11 +650,13 @@ function formatDuration(ms: number) {
 function ToolGroupBlock({
   items,
   onUserToggle,
+  onOpenSubtask,
   defaultExpanded = false,
   autoOpenActive = false
 }: {
   items: ToolGroupEntry[]
   onUserToggle: () => void
+  onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
   defaultExpanded?: boolean
   autoOpenActive?: boolean
 }) {
@@ -672,6 +758,7 @@ function ToolGroupBlock({
                     item={item}
                     open={openTaskKeys.has(taskKey)}
                     onToggle={() => toggleTask(taskKey)}
+                    onOpenSubtask={onOpenSubtask}
                   />
                 )
               })}
@@ -718,8 +805,19 @@ function TaskSummaryLine({ item, compact }: { item: ToolGroupEntry; compact: boo
   )
 }
 
-function TaskEntry({ item, open, onToggle }: { item: ToolGroupEntry; open: boolean; onToggle: () => void }) {
+function TaskEntry({
+  item,
+  open,
+  onToggle,
+  onOpenSubtask
+}: {
+  item: ToolGroupEntry
+  open: boolean
+  onToggle: () => void
+  onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
+}) {
   const statusKind = getTaskStatusKind(item)
+  const canNavigate = Boolean(item.sessionId && onOpenSubtask)
   const emptyMessage =
     statusKind === 'done'
       ? 'No output'
@@ -728,13 +826,27 @@ function TaskEntry({ item, open, onToggle }: { item: ToolGroupEntry; open: boole
         : 'Running subtask...'
   return (
     <div className={`subtask-entry is-${statusKind}`}>
-      <button type="button" className="subtask-entry__button" onClick={onToggle} aria-expanded={open}>
+      <button
+        type="button"
+        className="subtask-entry__button"
+        onClick={() => {
+          if (item.sessionId && onOpenSubtask) {
+            onOpenSubtask({ sessionId: item.sessionId, title: item.title || item.summary })
+            return
+          }
+          onToggle()
+        }}
+        aria-expanded={canNavigate ? undefined : open}
+        aria-label={canNavigate ? `Open subtask: ${item.title || item.summary}` : undefined}
+      >
         <span className="subtask-dot" aria-hidden="true" />
         <span className="subtask-entry__title">{item.title || item.summary}</span>
         <span className="subtask-status">{formatTaskStatus(item)}</span>
-        <span className="subtask-entry__chevron" aria-hidden="true">{open ? 'v' : '>'}</span>
+        <span className="subtask-entry__chevron" aria-hidden="true">
+          {canNavigate ? <ChevronRight size={14} strokeWidth={1.8} /> : open ? 'v' : '>'}
+        </span>
       </button>
-      {open ? (
+      {!canNavigate && open ? (
         <div className="subtask-entry__detail">
           {item.detail ? <div className="subtask-entry__input">{item.detail}</div> : null}
           {item.output ? (
@@ -807,15 +919,17 @@ function formatToolSummary(toolName: string, raw: unknown): string {
 function createToolGroupEntry(part: TranscriptPartTool): ToolGroupEntry {
   const state = extractToolState(part.raw)
   const status = normalizeToolStatus(part.status || state.status)
+  const output = extractToolOutput(part.raw)
   return {
     summary: formatToolSummary(part.toolName, part.raw),
-    output: extractToolOutput(part.raw),
+    output,
     isError: isToolError(part.raw),
     toolName: part.toolName,
     title: getToolTitle(part.toolName, state),
     detail: getToolDetail(part.toolName, state),
     status,
-    mergeKey: getToolPartMergeKey(part)
+    mergeKey: getToolPartMergeKey(part),
+    sessionId: extractSubtaskSessionId(part.raw, output)
   }
 }
 
@@ -858,7 +972,8 @@ function mergeTaskEntry(previous: ToolGroupEntry, next: ToolGroupEntry): ToolGro
     title: preferSpecificText(next.title, previous.title),
     detail: next.detail || previous.detail,
     status: next.status || previous.status,
-    mergeKey: next.mergeKey || previous.mergeKey
+    mergeKey: next.mergeKey || previous.mergeKey,
+    sessionId: next.sessionId || previous.sessionId
   }
 }
 
@@ -1133,6 +1248,29 @@ function extractToolOutput(raw: unknown): string | null {
   return null
 }
 
+export function extractSubtaskSessionId(raw: unknown, output: string | null): string | undefined {
+  const record = toRecord(raw)
+  const part = toRecord(record?.part)
+  const state = toRecord(part?.state) ?? toRecord(record?.state)
+  const metadata = toRecord(state?.metadata)
+  const direct = pickFirstString([
+    metadata?.sessionId,
+    metadata?.sessionID,
+    state?.sessionId,
+    state?.sessionID,
+    part?.sessionId,
+    part?.sessionID,
+    record?.sessionId,
+    record?.sessionID
+  ])
+  if (direct) {
+    return direct
+  }
+
+  const taskOutput = output ?? pickFirstString([state?.output, metadata?.output])
+  return taskOutput?.match(/<task\s+id=["']([^"']+)["']/i)?.[1]?.trim() || undefined
+}
+
 function pickToolErrorText(value: Record<string, unknown> | null, options: { includeOutput?: boolean } = {}): string | null {
   if (!value) {
     return null
@@ -1202,6 +1340,7 @@ function extractToolGroup(raw: unknown): ToolGroupEntry[] {
       detail?: unknown
       status?: unknown
       mergeKey?: unknown
+      sessionId?: unknown
     }
     if (typeof entry.summary !== 'string' || entry.summary.trim().length === 0) {
       return []
@@ -1215,7 +1354,8 @@ function extractToolGroup(raw: unknown): ToolGroupEntry[] {
         title: typeof entry.title === 'string' ? entry.title : undefined,
         detail: typeof entry.detail === 'string' ? entry.detail : undefined,
         status: typeof entry.status === 'string' ? entry.status : undefined,
-        mergeKey: typeof entry.mergeKey === 'string' ? entry.mergeKey : undefined
+        mergeKey: typeof entry.mergeKey === 'string' ? entry.mergeKey : undefined,
+        sessionId: typeof entry.sessionId === 'string' ? entry.sessionId : undefined
       }
     ]
   })

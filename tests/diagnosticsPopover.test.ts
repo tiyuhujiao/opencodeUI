@@ -35,6 +35,7 @@ describe('diagnostics popover', () => {
     expect(styles).toContain('.diagnostics-trigger--ok');
     expect(styles).toContain('.diagnostics-trigger--error');
     expect(styles).toContain('.diagnostics-trigger--capturing');
+    expect(styles).toMatch(/\.diagnostics-trigger,\s*\.diagnostics-trigger:hover,\s*\.diagnostics-trigger\[aria-expanded='true'\]\s*\{\s*color: var\(--diagnostics-color\);/);
     expect(styles).toContain('.diagnostics-popover');
     expect(styles).toContain('width: min(24rem, calc(100vw - 2rem));');
     expect(styles).toContain('width: calc(100vw - 2rem);');

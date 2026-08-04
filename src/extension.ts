@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
-import { configureServePortStorage, ensureServeRunning } from './bridge/serveManager';
-import { initializeDiagnostics, logError, showDiagnostics } from './diagnostics';
+import { configureServePortStorage, ensureServeRunning, requestServeJson } from './bridge/serveManager';
+import { initializeDiagnostics, logError, logInfo, logWarn, showDiagnostics } from './diagnostics';
+import { createInlineDiffController } from './inlineDiff';
 import { SidebarProvider } from './webview/SidebarProvider';
 import type { HostKind } from './shared/protocol';
 
@@ -10,11 +11,27 @@ export function activate(context: vscode.ExtensionContext): void {
   initializeDiagnostics(context);
 
   const hostKind = resolveHostKind(vscode.env.remoteName, process.platform);
+  const inlineDiff = createInlineDiffController({
+    requestServeJson: <T>(pathname: string) =>
+      requestServeJson<T>(pathname, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath),
+    log: (level, message) => {
+      if (level === 'error') {
+        logError(message);
+        return;
+      }
+      if (level === 'warn') {
+        logWarn(message);
+        return;
+      }
+      logInfo(message);
+    }
+  });
   const sidebarProvider = new SidebarProvider(
     context.extensionUri,
     context.workspaceState,
     hostKind,
-    vscode.env.remoteName
+    vscode.env.remoteName,
+    inlineDiff
   );
 
   const lastPortKey = buildLastPortKey(hostKind, vscode.env.remoteName);
@@ -37,6 +54,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   context.subscriptions.push(
+    sidebarProvider,
     vscode.window.registerWebviewViewProvider('opencodeUI.sidebar', sidebarProvider),
     vscode.commands.registerCommand('opencodeUI.refresh', () => {
       sidebarProvider.refresh();

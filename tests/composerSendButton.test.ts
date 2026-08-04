@@ -17,16 +17,21 @@ describe('composer send button', () => {
   });
 
   it('keeps the send and stop glyphs visually stable', () => {
+    const source = readFileSync(join(root, 'webview-ui/src/App.tsx'), 'utf8');
     const styles = readFileSync(join(root, 'webview-ui/src/styles.css'), 'utf8');
+    const codexStyles = styles.slice(styles.indexOf('/* Codex-like editor shell'));
 
-    expect(styles).toContain('width: 2.5rem;');
-    expect(styles).toContain('height: 2.5rem;');
-    expect(styles).toContain('.composer-stack__send-arrow');
-    expect(styles).toContain('font-size: 1.62rem;');
-    expect(styles).toContain('scaleX(1.28)');
-    expect(styles).toContain('.composer-stack__send--running');
-    expect(styles).toContain('.composer-stack__stop-icon');
-    expect(styles).toContain('animation: composer-stop-pulse');
-    expect(styles).toContain('@keyframes composer-stop-pulse');
+    expect(source).toContain('<ArrowUp size={19} strokeWidth={2.4} />');
+    expect(source).toContain('<Square size={11} fill="currentColor" strokeWidth={0} />');
+    expect(codexStyles).toContain('width: 2rem;');
+    expect(codexStyles).toContain('height: 2rem;');
+    expect(codexStyles).toContain('border-radius: 999px;');
+    expect(codexStyles).toContain('.composer-stack__send-arrow,');
+    expect(codexStyles).toContain('.composer-stack__stop-icon');
+    expect(codexStyles).toContain('transform: none;');
+    expect(codexStyles).toContain('animation: none;');
+    expect(codexStyles).toContain('background: transparent;');
+    expect(codexStyles).toContain('.composer-stack__stop-icon svg');
+    expect(codexStyles).toContain('flex: 0 0 11px;');
   });
 });

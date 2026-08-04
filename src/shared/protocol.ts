@@ -2,6 +2,7 @@ export const WEBVIEW_REQUEST_WHITELIST = [
   'webview.ready',
   'sessions.list',
   'session.export',
+  'subtask.transcript',
   'session.timeline',
   'session.undo',
   'session.redo',
@@ -10,11 +11,17 @@ export const WEBVIEW_REQUEST_WHITELIST = [
   'question.reply',
   'question.reject',
   'file.open',
+  'inlineDiff.open',
+  'inlineDiff.dismiss',
   'tempfile.write',
   'providers.list',
   'models.list',
   'models.list.byProvider',
   'agents.list',
+  'composer.resources.list',
+  'mcp.setEnabled',
+  'workspace.resources.search',
+  'workspace.resources.resolve',
   'selfcheck.run',
   'run.start',
   'run.stop'
@@ -34,6 +41,14 @@ export type SessionsListRequest = {
 
 export type SessionExportRequest = {
   type: 'session.export';
+  requestId: string;
+  payload: {
+    sessionId: string;
+  };
+};
+
+export type SubtaskTranscriptRequest = {
+  type: 'subtask.transcript';
   requestId: string;
   payload: {
     sessionId: string;
@@ -112,6 +127,36 @@ export type AgentsListRequest = {
   requestId: string;
 };
 
+export type ComposerResourcesListRequest = {
+  type: 'composer.resources.list';
+  requestId: string;
+};
+
+export type McpSetEnabledRequest = {
+  type: 'mcp.setEnabled';
+  requestId: string;
+  payload: {
+    name: string;
+    enabled: boolean;
+  };
+};
+
+export type WorkspaceResourcesSearchRequest = {
+  type: 'workspace.resources.search';
+  requestId: string;
+  payload: {
+    query: string;
+  };
+};
+
+export type WorkspaceResourcesResolveRequest = {
+  type: 'workspace.resources.resolve';
+  requestId: string;
+  payload: {
+    values: string[];
+  };
+};
+
 export type SelfcheckRunRequest = {
   type: 'selfcheck.run';
   requestId: string;
@@ -129,6 +174,10 @@ export type RunStartRequest = {
     thinking?: boolean;
     variant?: string;
     files?: string[];
+    command?: {
+      name: string;
+      arguments: string;
+    };
   };
 };
 
@@ -141,6 +190,7 @@ export type WebviewRequestMessage =
   | WebviewReadyRequest
   | SessionsListRequest
   | SessionExportRequest
+  | SubtaskTranscriptRequest
   | SessionTimelineRequest
   | SessionUndoRequest
   | SessionRedoRequest
@@ -149,11 +199,17 @@ export type WebviewRequestMessage =
   | QuestionReplyRequest
   | QuestionRejectRequest
   | FileOpenRequest
+  | InlineDiffOpenRequest
+  | InlineDiffDismissRequest
   | TempfileWriteRequest
   | ProvidersListRequest
   | ModelsListRequest
   | ModelsListByProviderRequest
   | AgentsListRequest
+  | ComposerResourcesListRequest
+  | McpSetEnabledRequest
+  | WorkspaceResourcesSearchRequest
+  | WorkspaceResourcesResolveRequest
   | SelfcheckRunRequest
   | RunStartRequest
   | RunStopRequest;
@@ -246,6 +302,12 @@ export type TranscriptPart =
 export type TranscriptMessage = {
   role: TranscriptRole;
   parts: TranscriptPart[];
+  contextUsage?: ContextUsage;
+};
+
+export type ContextUsage = {
+  usedTokens: number;
+  model?: string;
 };
 
 export type SessionExportResponseMessage = {
@@ -253,6 +315,16 @@ export type SessionExportResponseMessage = {
   requestId: string;
   ok: true;
   payload: {
+    messages: TranscriptMessage[];
+  };
+};
+
+export type SubtaskTranscriptResponseMessage = {
+  type: 'subtask.transcript.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    sessionId: string;
     messages: TranscriptMessage[];
   };
 };
@@ -324,6 +396,7 @@ export type ModelSummary = {
   name: string;
   variants?: string[];
   supportsThinking?: boolean;
+  contextWindow?: number;
 };
 
 export type ProviderSummary = {
@@ -363,6 +436,71 @@ export type AgentsListResponseMessage = {
   };
 };
 
+export type ComposerCommandSummary = {
+  name: string;
+  description?: string;
+  source?: 'command' | 'mcp' | 'skill';
+  hints: string[];
+};
+
+export type ComposerSkillSummary = {
+  name: string;
+  description?: string;
+};
+
+export type ComposerMcpServerSummary = {
+  name: string;
+  status: string;
+  enabled: boolean;
+  error?: string;
+};
+
+export type WorkspaceResourceSummary = {
+  kind: 'file' | 'folder';
+  path: string;
+  absolutePath: string;
+};
+
+export type ComposerResourcesListResponseMessage = {
+  type: 'composer.resources.list.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    commands: ComposerCommandSummary[];
+    skills: ComposerSkillSummary[];
+    mcpServers: ComposerMcpServerSummary[];
+    mcpError?: string;
+  };
+};
+
+export type McpSetEnabledResponseMessage = {
+  type: 'mcp.setEnabled.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    server: ComposerMcpServerSummary;
+  };
+};
+
+export type WorkspaceResourcesSearchResponseMessage = {
+  type: 'workspace.resources.search.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    query: string;
+    resources: WorkspaceResourceSummary[];
+  };
+};
+
+export type WorkspaceResourcesResolveResponseMessage = {
+  type: 'workspace.resources.resolve.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    resources: WorkspaceResourceSummary[];
+  };
+};
+
 export type RunStartResponseMessage = {
   type: 'run.start.response';
   requestId: string;
@@ -382,6 +520,10 @@ export type RunStreamEvent =
   | {
       type: 'part';
       part: TranscriptPart;
+    }
+  | {
+      type: 'context.usage';
+      usage: ContextUsage;
     }
   | {
       type: 'permission';
@@ -463,6 +605,24 @@ export type FileOpenRequest = {
   requestId: string;
   payload: {
     path: string;
+    line?: number;
+    column?: number;
+  };
+};
+
+export type InlineDiffOpenRequest = {
+  type: 'inlineDiff.open';
+  requestId: string;
+  payload: {
+    fileId: string;
+  };
+};
+
+export type InlineDiffDismissRequest = {
+  type: 'inlineDiff.dismiss';
+  requestId: string;
+  payload: {
+    fileId: string;
   };
 };
 
@@ -472,6 +632,49 @@ export type FileOpenResponseMessage = {
   ok: true;
   payload: {
     path: string;
+    line?: number;
+    column?: number;
+  };
+};
+
+export type InlineDiffFileStatus = 'pending' | 'stale' | 'unavailable';
+
+export type InlineDiffFileSummary = {
+  fileId: string;
+  path: string;
+  displayPath: string;
+  additions: number;
+  deletions: number;
+  hunks: number;
+  status: InlineDiffFileStatus;
+  reason?: string;
+};
+
+export type InlineDiffOpenResponseMessage = {
+  type: 'inlineDiff.open.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    fileId: string;
+  };
+};
+
+export type InlineDiffDismissResponseMessage = {
+  type: 'inlineDiff.dismiss.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    fileId: string;
+  };
+};
+
+export type InlineDiffStateMessage = {
+  type: 'inlineDiff.state';
+  requestId: string;
+  ok: true;
+  payload: {
+    revision: number;
+    files: InlineDiffFileSummary[];
   };
 };
 
@@ -513,6 +716,7 @@ export type SelfcheckResponseMessage = {
     remoteName?: string;
     opencodeBinary: string;
     opencode?: OpencodeCompatibility;
+    health: { ok: true; version?: string } | { ok: false; error: string };
     sessions: { ok: true; count: number } | { ok: false; error: string };
     models: { ok: true; count: number } | { ok: false; error: string };
     agents: { ok: true; count: number } | { ok: false; error: string };
@@ -523,6 +727,7 @@ export type ExtensionResponseMessage =
   | WebviewReadyAckMessage
   | SessionsListResponseMessage
   | SessionExportResponseMessage
+  | SubtaskTranscriptResponseMessage
   | SessionTimelineResponseMessage
   | SessionUndoResponseMessage
   | SessionRedoResponseMessage
@@ -531,10 +736,17 @@ export type ExtensionResponseMessage =
   | QuestionReplyResponseMessage
   | QuestionRejectResponseMessage
   | FileOpenResponseMessage
+  | InlineDiffOpenResponseMessage
+  | InlineDiffDismissResponseMessage
+  | InlineDiffStateMessage
   | TempfileWriteResponseMessage
   | ProvidersListResponseMessage
   | ModelsListResponseMessage
   | AgentsListResponseMessage
+  | ComposerResourcesListResponseMessage
+  | McpSetEnabledResponseMessage
+  | WorkspaceResourcesSearchResponseMessage
+  | WorkspaceResourcesResolveResponseMessage
   | SelfcheckResponseMessage
   | RunStartResponseMessage
   | RunStopResponseMessage
@@ -548,15 +760,23 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set<string>([
   'webview.ready.ack',
   'sessions.list.response',
   'session.export.response',
+  'subtask.transcript.response',
   'session.timeline.response',
   'session.undo.response',
   'session.redo.response',
   'session.delete.response',
   'file.open.response',
+  'inlineDiff.open.response',
+  'inlineDiff.dismiss.response',
+  'inlineDiff.state',
   'tempfile.write.response',
   'providers.list.response',
   'models.list.response',
   'agents.list.response',
+  'composer.resources.list.response',
+  'mcp.setEnabled.response',
+  'workspace.resources.search.response',
+  'workspace.resources.resolve.response',
   'run.start.response',
   'run.stop.response',
   'permission.reply.response',
@@ -600,6 +820,25 @@ export function isExtensionResponseMessage(message: unknown): message is Extensi
     return false;
   }
 
+  if (message.type === 'subtask.transcript.response') {
+    return message.ok === true
+      && isObject(message.payload)
+      && isNonEmptyString(message.payload.sessionId)
+      && Array.isArray(message.payload.messages);
+  }
+
+  if (message.type === 'inlineDiff.open.response' || message.type === 'inlineDiff.dismiss.response') {
+    return message.ok === true && isObject(message.payload) && isNonEmptyString(message.payload.fileId);
+  }
+
+  if (message.type === 'inlineDiff.state') {
+    if (message.ok !== true || !isObject(message.payload) || !isNonNegativeInteger(message.payload.revision) || !Array.isArray(message.payload.files)) {
+      return false;
+    }
+
+    return message.payload.files.every(isInlineDiffFileSummary);
+  }
+
   return true;
 }
 
@@ -616,7 +855,7 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
     return false;
   }
 
-  if (message.type === 'session.export') {
+  if (message.type === 'session.export' || message.type === 'subtask.transcript') {
     if (!isObject(message.payload)) {
       return false;
     }
@@ -700,6 +939,40 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
     if (typeof message.payload.path !== 'string' || message.payload.path.trim().length === 0) {
       return false;
     }
+
+    for (const key of ['line', 'column'] as const) {
+      const value = message.payload[key];
+      if (typeof value !== 'undefined' && (typeof value !== 'number' || !Number.isInteger(value) || value < 1)) {
+        return false;
+      }
+    }
+  }
+
+  if (message.type === 'mcp.setEnabled') {
+    if (!isObject(message.payload) || !isNonEmptyString(message.payload.name) || typeof message.payload.enabled !== 'boolean') {
+      return false;
+    }
+  }
+
+  if (message.type === 'workspace.resources.search') {
+    if (!isObject(message.payload) || typeof message.payload.query !== 'string' || message.payload.query.length > 256) {
+      return false;
+    }
+  }
+
+  if (message.type === 'workspace.resources.resolve') {
+    if (!isObject(message.payload) || !Array.isArray(message.payload.values) || message.payload.values.length > 32) {
+      return false;
+    }
+    if (!message.payload.values.every((value) => typeof value === 'string' && value.trim().length > 0 && value.length <= 4096)) {
+      return false;
+    }
+  }
+
+  if (message.type === 'inlineDiff.open' || message.type === 'inlineDiff.dismiss') {
+    if (!isObject(message.payload) || !isNonEmptyString(message.payload.fileId)) {
+      return false;
+    }
   }
 
   if (message.type === 'tempfile.write') {
@@ -742,6 +1015,16 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
         if (typeof file !== 'string' || file.trim().length === 0) {
           return false;
         }
+      }
+    }
+
+    if (typeof message.payload.command !== 'undefined') {
+      if (!isObject(message.payload.command)) {
+        return false;
+      }
+
+      if (!isNonEmptyString(message.payload.command.name) || typeof message.payload.command.arguments !== 'string') {
+        return false;
       }
     }
   }
@@ -803,4 +1086,27 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
   }
 
   return true;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+function isInlineDiffFileSummary(value: unknown): value is InlineDiffFileSummary {
+  if (!isObject(value)) {
+    return false;
+  }
+
+  return isNonEmptyString(value.fileId)
+    && isNonEmptyString(value.path)
+    && isNonEmptyString(value.displayPath)
+    && isNonNegativeInteger(value.additions)
+    && isNonNegativeInteger(value.deletions)
+    && isNonNegativeInteger(value.hunks)
+    && ['pending', 'stale', 'unavailable'].includes(String(value.status))
+    && (typeof value.reason === 'undefined' || typeof value.reason === 'string');
 }

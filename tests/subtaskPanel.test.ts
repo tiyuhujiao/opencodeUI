@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { extractSubtaskSessionId } from '../webview-ui/src/components/Transcript';
 
 const root = process.cwd();
 
@@ -17,6 +18,8 @@ describe('subtask progress panel', () => {
     expect(source).toContain('status: typeof entry.status');
     expect(source).toContain('mergeKey: getToolPartMergeKey(part)');
     expect(source).toContain('mergeKey: typeof entry.mergeKey');
+    expect(source).toContain('sessionId: extractSubtaskSessionId(part.raw, output)');
+    expect(source).toContain('sessionId: typeof entry.sessionId');
     expect(source).toContain("item.toolName?.trim().toLowerCase()");
     expect(source).toContain('Subtasks (');
   });
@@ -32,17 +35,26 @@ describe('subtask progress panel', () => {
     expect(source).toContain('isGenericTaskPlaceholder(item)');
   });
 
-  it('opens active task progress and exposes a visible running state', () => {
+  it('navigates tasks with child session IDs and keeps legacy inline details as a fallback', () => {
     const source = readFileSync(join(root, 'webview-ui/src/components/Transcript.tsx'), 'utf8');
 
     expect(source).toContain('const activeTaskKey = getActiveTaskKey(indexedTasks)');
     expect(source).toContain('const [openTaskKeys, setOpenTaskKeys] = useState<Set<string>>');
-    expect(source).toContain('autoOpenedTaskKeysRef.current.has(activeTaskKey)');
-    expect(source).toContain('setExpanded(true)');
-    expect(source).toContain('next.add(activeTaskKey)');
+    expect(source).toContain('if (item.sessionId && onOpenSubtask)');
+    expect(source).toContain('onOpenSubtask({ sessionId: item.sessionId, title: item.title || item.summary })');
+    expect(source).toContain('!canNavigate && open');
     expect(source).toContain('Running subtask...');
     expect(source).toContain('Queued and waiting to start...');
     expect(source).toContain("prompt: typeof input?.prompt === 'string'");
+  });
+
+  it('extracts child session IDs from metadata and completed task output', () => {
+    expect(extractSubtaskSessionId({
+      part: { state: { metadata: { sessionId: 'ses_child_metadata' } } }
+    }, null)).toBe('ses_child_metadata');
+
+    expect(extractSubtaskSessionId({ state: { output: '<task id="ses_child_output">done</task>' } }, null))
+      .toBe('ses_child_output');
   });
 
   it('keeps subtask toggles independent and pauses forced autoscroll after user expansion', () => {
@@ -80,6 +92,9 @@ describe('subtask progress panel', () => {
     expect(styles).toContain('.subtask-status');
     expect(styles).toContain('.tool-group__line--subtask.is-running .subtask-dot');
     expect(styles).toContain('@keyframes subtask-pulse');
+    expect(styles).toContain('.subtask-detail');
+    expect(styles).toContain('position: absolute');
+    expect(styles).toContain('.main-shell.has-subtask > :not(.subtask-detail)');
     expect(styles).not.toContain('var(--ui-warning)');
     expect(styles).not.toContain('var(--ui-success)');
   });

@@ -41,6 +41,26 @@ export async function ensureServeRunning(): Promise<ServeRuntime> {
   return ensurePromise;
 }
 
+export async function requestServeJson<T>(pathname: string, cwd?: string): Promise<T> {
+  const runtime = await ensureServeRunning();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json'
+  };
+  if (cwd) {
+    headers['x-opencode-directory'] = cwd;
+  }
+  const response = await fetch(`${runtime.baseUrl}${pathname}`, { headers });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(
+      text.trim().length > 0
+        ? text.trim()
+        : `OpenCode serve 请求失败（${String(response.status)}）。`
+    );
+  }
+  return (await response.json()) as T;
+}
+
 async function ensureServeRunningInternal(): Promise<ServeRuntime> {
   if (currentPort && (await probeHealth(currentPort))) {
     await persistLastPort(currentPort);

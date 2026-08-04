@@ -739,4 +739,43 @@ describe("run lifecycle serve event dispatch", () => {
 			},
 		});
 	});
+
+	it("从 assistant message.updated 转发 input 与 cache.read 的真实 context 用量", () => {
+		const posted: unknown[] = [];
+		const lifecycle = createLifecycle({ posted });
+		const streamState = createServeStreamState();
+
+		dispatchServeEvent(
+			lifecycle,
+			"request-1",
+			"session-1",
+			{
+				type: "message.updated",
+				properties: {
+					info: {
+						sessionID: "session-1",
+						role: "assistant",
+						id: "message-1",
+						providerID: "cpa",
+						modelID: "gpt-5",
+						tokens: {
+							input: 1800,
+							output: 400,
+							cache: { read: 2200, write: 100 },
+						},
+					},
+				},
+			},
+			streamState,
+		);
+
+		expect(posted[0]).toMatchObject({
+			payload: {
+				event: {
+					type: "context.usage",
+					usage: { usedTokens: 4000, model: "cpa/gpt-5" },
+				},
+			},
+		});
+	});
 });

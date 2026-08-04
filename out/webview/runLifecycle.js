@@ -77,6 +77,10 @@ function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
             streamState.assistantMessageIds.add(messageId);
             streamState.lastAssistantMessageId = messageId;
         }
+        const usage = normalizeContextUsage(info);
+        if (usage) {
+            adapter.emit({ type: "context.usage", usage });
+        }
         if (messageId &&
             typeof info.finish === "string" &&
             !["tool-calls", "unknown"].includes(info.finish) &&
@@ -133,6 +137,33 @@ function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
         }
     }
     return { done: false };
+}
+function normalizeContextUsage(info) {
+    const metadata = isRecord(info.metadata) ? info.metadata : undefined;
+    const assistant = isRecord(metadata?.assistant)
+        ? metadata.assistant
+        : info;
+    const tokens = isRecord(assistant.tokens) ? assistant.tokens : undefined;
+    if (!tokens) {
+        return null;
+    }
+    const cache = isRecord(tokens.cache) ? tokens.cache : undefined;
+    const input = toNonNegativeFiniteNumber(tokens.input);
+    const cacheRead = toNonNegativeFiniteNumber(cache?.read);
+    if (input === undefined && cacheRead === undefined) {
+        return null;
+    }
+    const providerId = typeof assistant.providerID === "string" ? assistant.providerID : undefined;
+    const modelId = typeof assistant.modelID === "string" ? assistant.modelID : undefined;
+    return {
+        usedTokens: (input ?? 0) + (cacheRead ?? 0),
+        ...(providerId && modelId ? { model: `${providerId}/${modelId}` } : {}),
+    };
+}
+function toNonNegativeFiniteNumber(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0
+        ? value
+        : undefined;
 }
 async function pollServeBlockers(adapter, requestId, sessionId, streamState) {
     if (!adapter.isCurrentRun(requestId)) {

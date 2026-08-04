@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, ArrowUp, History, Moon, Plus, RefreshCw, ShieldCheck, Square, Sun } from 'lucide-react'
 import { createRequestId, getVsCodeApi } from './vscodeApi'
 import { Transcript } from './components/Transcript'
 import { ModelDialog } from './components/dialog/ModelDialog'
 import { SessionDialog } from './components/dialog/SessionDialog'
 import { TimelineDialog } from './components/dialog/TimelineDialog'
+import { ResourceDialog, type ResourceDialogKind } from './components/dialog/ResourceDialog'
 import { resolveSessionSelectionAfterList } from './sessionSelection'
 import {
   applyRunEventToTranscript,
@@ -18,14 +20,20 @@ import {
 import {
   isExtensionResponseMessage,
   type AgentSummary,
+  type ComposerCommandSummary,
+  type ComposerMcpServerSummary,
+  type ComposerSkillSummary,
+  type ContextUsage,
   type HostKind,
+  type InlineDiffFileSummary,
   type ModelSummary,
   type ProviderSummary,
   type QuestionInfo,
   type RunStreamEvent,
   type SessionSummary,
   type SessionTimelineItem,
-  type TranscriptMessage
+  type TranscriptMessage,
+  type WorkspaceResourceSummary
 } from '../../src/shared/protocol'
 import { summarizeEditedFiles, type EditedFileSummary } from './editedFiles'
 import {
@@ -38,10 +46,18 @@ import {
 import {
   findThinkingOption,
   getThinkingOptionsForModel,
-  getThinkingSelectionValue,
   THINKING_OFF_VALUE,
   toThinkingSelection
 } from './thinkingOptions'
+import { readThinkingPreferences, writeThinkingPreferences } from './thinkingPreferences'
+import { isComposerCommandInvocation, resolveComposerCommandInvocation } from './composerCommands'
+import {
+  appendWorkspaceMentions,
+  getWorkspaceMentionState,
+  hasWorkspaceMention,
+  insertWorkspaceMention,
+  mergeWorkspaceResources
+} from './workspaceMentions'
 
 type ThemeMode = 'light' | 'dark'
 
@@ -56,7 +72,52 @@ function readInitialTheme(): ThemeMode {
   }
 }
 
+function ContextUsageIndicator({ usage, contextWindow }: { usage: ContextUsage; contextWindow: number }) {
+  const percent = Math.max(0, Math.min(100, (usage.usedTokens / contextWindow) * 100))
+  const roundedPercent = Math.round(percent)
+  const remainingPercent = Math.max(0, 100 - roundedPercent)
+  const status = roundedPercent >= 50 ? `${roundedPercent}% full` : `${roundedPercent}% used (${remainingPercent}% left)`
+  const label = `Context usage: ${roundedPercent}%`
+
+  return (
+    <button className="context-usage" type="button" aria-label={label}>
+      <svg className="context-usage__donut" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+        <circle className="context-usage__track" cx="6" cy="6" r="5" pathLength="100" />
+        <circle
+          className="context-usage__value"
+          cx="6"
+          cy="6"
+          r="5"
+          pathLength="100"
+          strokeDasharray="100"
+          strokeDashoffset={100 - percent}
+        />
+      </svg>
+      <span className="context-usage__tooltip" role="tooltip">
+        <span>Context window:</span>
+        <strong>{status}</strong>
+        <span>{`${formatTokenCount(usage.usedTokens)} / ${formatTokenCount(contextWindow)} tokens used`}</span>
+      </span>
+    </button>
+  )
+}
+
+function formatTokenCount(value: number): string {
+  if (value < 1000) {
+    return String(Math.round(value))
+  }
+  const thousands = value / 1000
+  return `${Number.isInteger(thousands) ? thousands.toFixed(0) : thousands.toFixed(1)}k`
+}
+
 export type UiRunEvent = RunStreamEvent
+
+type DisplayEditedFile = EditedFileSummary & {
+  fileId?: string
+  hunks?: number
+  status?: InlineDiffFileSummary['status']
+  reason?: string
+}
 
 type DebugEntry = {
   at: string
@@ -74,6 +135,7 @@ type SelfcheckState = {
 }
 
 type SelfcheckSnapshot = {
+  health: SelfcheckState
   sessions: SelfcheckState
   models: SelfcheckState
   agents: SelfcheckState
@@ -98,6 +160,11 @@ type SessionListRequestMeta = {
 type ExportRequestMeta = {
   sessionId: string
   background: boolean
+}
+
+type ActiveSubtask = {
+  sessionId: string
+  title: string
 }
 
 function formatHostLabel(hostKind: HostKind, remoteName?: string): string {
@@ -143,14 +210,13 @@ function hasBlockingSessionListRequests(requests: Map<string, SessionListRequest
 }
 
 function getDiagnosticsState(selfcheck: SelfcheckSnapshot): DiagnosticsState {
-  const states = [selfcheck.sessions.state, selfcheck.models.state, selfcheck.agents.state]
-  if (states.some((state) => state === 'error' || state === 'timeout')) {
+  if (selfcheck.health.state === 'error') {
     return 'error'
   }
-  if (states.some((state) => state === 'pending')) {
+  if (selfcheck.health.state === 'pending' || selfcheck.health.state === 'timeout') {
     return 'pending'
   }
-  if (states.every((state) => state === 'ok')) {
+  if (selfcheck.health.state === 'ok') {
     return 'ok'
   }
   return 'idle'
@@ -191,19 +257,21 @@ function getRunActivity(status: string): { kind: 'running' | 'completed' | 'stop
 
 function RunStatusIndicator({
   status,
-  editedFiles,
-  onOpenFile
+  files,
+  onOpenFile,
+  onDismissFile
 }: {
   status: string
-  editedFiles: EditedFileSummary[]
-  onOpenFile: (filePath: string) => void
+  files: DisplayEditedFile[]
+  onOpenFile: (file: DisplayEditedFile) => void
+  onDismissFile: (fileId: string) => void
 }) {
   const activity = getRunActivity(status)
   if (!activity) {
     return (
       <div className="run-status-row">
         <p className="status-line status-line--message">{status}</p>
-        <EditedFilesSummary files={editedFiles} onOpenFile={onOpenFile} />
+        <EditedFilesSummary files={files} onOpenFile={onOpenFile} onDismissFile={onDismissFile} />
       </div>
     )
   }
@@ -213,12 +281,20 @@ function RunStatusIndicator({
       <output className={`run-indicator run-indicator--${activity.kind}`} aria-label={activity.label}>
         <span className="run-indicator__icon" aria-hidden="true" />
       </output>
-      <EditedFilesSummary files={editedFiles} onOpenFile={onOpenFile} />
+      <EditedFilesSummary files={files} onOpenFile={onOpenFile} onDismissFile={onDismissFile} />
     </div>
   )
 }
 
-function EditedFilesSummary({ files, onOpenFile }: { files: EditedFileSummary[]; onOpenFile: (filePath: string) => void }) {
+function EditedFilesSummary({
+  files,
+  onOpenFile,
+  onDismissFile
+}: {
+  files: DisplayEditedFile[]
+  onOpenFile: (file: DisplayEditedFile) => void
+  onDismissFile: (fileId: string) => void
+}) {
   if (files.length === 0) {
     return null
   }
@@ -237,18 +313,67 @@ function EditedFilesSummary({ files, onOpenFile }: { files: EditedFileSummary[];
         </span>
       </summary>
       <div className="edit-summary__list">
-        {files.map((file) => (
-          <button key={file.path} type="button" className="edit-summary__item" onClick={() => onOpenFile(file.path)}>
-            <span className="edit-summary__path">{file.displayPath}</span>
-            <span className="edit-summary__stats">
-              <span className="edit-summary__add">+{file.additions}</span>
-              <span className="edit-summary__del">-{file.deletions}</span>
-            </span>
-          </button>
-        ))}
+        {files.map((file) => {
+          const fileId = file.fileId
+          const canDismiss = Boolean(fileId && file.status && file.status !== 'pending')
+          const actionLabel = fileId ? (file.status === 'pending' ? 'Review' : 'View') : 'Open'
+          return (
+            <div key={fileId ?? file.path} className={`edit-summary__item${file.status ? ` edit-summary__item--${file.status}` : ''}`}>
+              <button
+                type="button"
+                className="edit-summary__open"
+                onClick={() => onOpenFile(file)}
+                title={file.reason}
+              >
+                <span className="edit-summary__file">
+                  <span className="edit-summary__path">{file.displayPath}</span>
+                  {file.reason ? <span className="edit-summary__reason">{file.reason}</span> : null}
+                </span>
+                <span className="edit-summary__meta">
+                  <span className="edit-summary__stats">
+                    <span className="edit-summary__add">+{file.additions}</span>
+                    <span className="edit-summary__del">-{file.deletions}</span>
+                  </span>
+                  {typeof file.hunks === 'number' && file.hunks > 0 ? <span>{file.hunks} {file.hunks === 1 ? 'hunk' : 'hunks'}</span> : null}
+                  {file.status && file.status !== 'pending' ? <span className="edit-summary__state">{file.status}</span> : null}
+                  <span className="edit-summary__action">{actionLabel}</span>
+                </span>
+              </button>
+              {canDismiss && fileId ? (
+                <button
+                  type="button"
+                  className="edit-summary__dismiss"
+                  aria-label={`Dismiss ${file.displayPath}`}
+                  onClick={() => onDismissFile(fileId)}
+                >
+                  Dismiss
+                </button>
+              ) : null}
+            </div>
+          )
+        })}
       </div>
     </details>
   )
+}
+
+function mergeEditedFileSummaries(liveFiles: EditedFileSummary[], reviewFiles: InlineDiffFileSummary[]): DisplayEditedFile[] {
+  const merged = new Map<string, DisplayEditedFile>()
+
+  for (const file of liveFiles) {
+    merged.set(normalizeEditedFilePath(file.path), file)
+  }
+
+  for (const file of reviewFiles) {
+    merged.set(normalizeEditedFilePath(file.path), file)
+  }
+
+  return [...merged.values()]
+}
+
+function normalizeEditedFilePath(filePath: string): string {
+  const normalized = filePath.replace(/\\/gu, '/')
+  return /^[A-Za-z]:\//u.test(normalized) || normalized.startsWith('//') ? normalized.toLowerCase() : normalized
 }
 
 function TodoPanel({ todos }: { todos: TodoItem[] }) {
@@ -530,6 +655,7 @@ export default function App() {
   const [debugLog, setDebugLog] = useState<DebugEntry[]>([])
 
   const [selfcheck, setSelfcheck] = useState<SelfcheckSnapshot>({
+    health: { state: 'idle' },
     sessions: { state: 'idle' },
     models: { state: 'idle' },
     agents: { state: 'idle' }
@@ -539,7 +665,7 @@ export default function App() {
     setDebugLog((current) => [...current, entry].slice(-200))
   }, [])
 
-  const selfcheckTimersRef = useRef<{ sessions?: number; models?: number; agents?: number }>({})
+  const selfcheckTimersRef = useRef<{ health?: number; sessions?: number; models?: number; agents?: number }>({})
 
   const startSelfcheckTimer = useCallback(
     (key: keyof SelfcheckSnapshot, requestId: string) => {
@@ -563,7 +689,7 @@ export default function App() {
             }
           }
         })
-      }, 2500)
+      }, key === 'health' ? 8000 : 4000)
     },
     []
   )
@@ -574,8 +700,19 @@ export default function App() {
   const [transcript, setTranscript] = useState<TranscriptMessage[]>([])
   const [transcriptError, setTranscriptError] = useState<string | null>(null)
   const [loadingTranscript, setLoadingTranscript] = useState(false)
+  const [activeSubtask, setActiveSubtask] = useState<ActiveSubtask | null>(null)
+  const [subtaskTranscript, setSubtaskTranscript] = useState<TranscriptMessage[]>([])
+  const [subtaskTranscriptError, setSubtaskTranscriptError] = useState<string | null>(null)
+  const [loadingSubtaskTranscript, setLoadingSubtaskTranscript] = useState(false)
   const [models, setModels] = useState<ModelSummary[]>([])
   const [agents, setAgents] = useState<AgentSummary[]>([])
+  const [composerCommands, setComposerCommands] = useState<ComposerCommandSummary[]>([])
+  const [composerSkills, setComposerSkills] = useState<ComposerSkillSummary[]>([])
+  const [composerMcpServers, setComposerMcpServers] = useState<ComposerMcpServerSummary[]>([])
+  const [resourceDialogKind, setResourceDialogKind] = useState<ResourceDialogKind | null>(null)
+  const [pendingMcpTargets, setPendingMcpTargets] = useState<Map<string, boolean>>(new Map())
+  const [refreshingResources, setRefreshingResources] = useState(false)
+  const [mcpError, setMcpError] = useState<string | null>(null)
   const [selectedModel, setSelectedModel] = useState<string>('')
   const [selectedAgent, setSelectedAgent] = useState<string>('')
   const [modelsError, setModelsError] = useState<string | null>(null)
@@ -589,9 +726,17 @@ export default function App() {
   const [loadingProviders, setLoadingProviders] = useState(false)
   const [selectedProviderId, setSelectedProviderId] = useState('')
   const [composerValue, setComposerValue] = useState('')
+  const [composerCursor, setComposerCursor] = useState(0)
+  const [workspaceResources, setWorkspaceResources] = useState<WorkspaceResourceSummary[]>([])
+  const [workspaceAttachments, setWorkspaceAttachments] = useState<WorkspaceResourceSummary[]>([])
+  const [workspaceResourceIndex, setWorkspaceResourceIndex] = useState(0)
   const composerRef = useRef<HTMLTextAreaElement | null>(null)
+  const commandMenuRef = useRef<HTMLDivElement | null>(null)
+  const workspaceMenuRef = useRef<HTMLDivElement | null>(null)
+  const permissionAllowButtonRef = useRef<HTMLButtonElement | null>(null)
 
   const [commandIndex, setCommandIndex] = useState(0)
+  const [selectedNativeCommandName, setSelectedNativeCommandName] = useState<string | null>(null)
   const [deleteArmed, setDeleteArmed] = useState<null | { sessionId: string; armedAt: number }>(null)
   const [pastedImage, setPastedImage] = useState<null | { fileName: string; bytesBase64: string; previewUrl: string; mimeType: string }>(
     null
@@ -600,13 +745,37 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false)
   const [runStatus, setRunStatus] = useState<string | null>(null)
   const [editedFiles, setEditedFiles] = useState<EditedFileSummary[]>([])
+  const [reviewFiles, setReviewFiles] = useState<InlineDiffFileSummary[]>([])
+  const displayedEditedFiles = useMemo(() => mergeEditedFileSummaries(editedFiles, reviewFiles), [editedFiles, reviewFiles])
 
-  const [thinkingEnabled, setThinkingEnabled] = useState(false)
-  const [thinkingVariant, setThinkingVariant] = useState('')
+  const [thinkingPreferences, setThinkingPreferences] = useState<Record<string, string>>(() =>
+    readThinkingPreferences(window.localStorage)
+  )
   const selectedModelSummary = useMemo(() => models.find((model) => model.name === selectedModel), [models, selectedModel])
   const thinkingOptions = useMemo(() => getThinkingOptionsForModel(selectedModelSummary), [selectedModelSummary])
-  const thinkingSelectionValue = getThinkingSelectionValue(thinkingEnabled, thinkingVariant)
-  const selectedThinkingOption = findThinkingOption(thinkingOptions, thinkingSelectionValue) ?? THINKING_OFF_VALUE
+  const savedThinkingOption = thinkingPreferences[selectedModel] ?? THINKING_OFF_VALUE
+  const selectedThinkingOption = findThinkingOption(thinkingOptions, savedThinkingOption) ?? THINKING_OFF_VALUE
+  const thinkingSelection = toThinkingSelection(selectedThinkingOption)
+  const thinkingEnabled = thinkingSelection.enabled
+  const thinkingVariant = thinkingSelection.variant
+  const contextUsage = useMemo(() => {
+    for (let index = transcript.length - 1; index >= 0; index -= 1) {
+      const usage = transcript[index]?.contextUsage
+      if (!usage) {
+        continue
+      }
+      const model = models.find((entry) => entry.name === usage.model) ?? selectedModelSummary
+      if (model?.contextWindow) {
+        return { usage, contextWindow: model.contextWindow }
+      }
+    }
+    return selectedModelSummary?.contextWindow
+      ? {
+          usage: { usedTokens: 0, model: selectedModelSummary.name },
+          contextWindow: selectedModelSummary.contextWindow
+        }
+      : null
+  }, [models, selectedModelSummary, transcript])
 
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
   const [sessionDialogOpen, setSessionDialogOpen] = useState(false)
@@ -628,6 +797,7 @@ export default function App() {
   const readyRequestIdRef = useRef<string>('')
   const sessionsRequestIdsRef = useRef<Map<string, SessionListRequestMeta>>(new Map())
   const exportRequestIdsRef = useRef<Map<string, ExportRequestMeta>>(new Map())
+  const subtaskTranscriptRequestIdsRef = useRef<Map<string, string>>(new Map())
   const deleteRequestIdsRef = useRef<Map<string, string>>(new Map())
   const timelineRequestIdsRef = useRef<Map<string, string>>(new Map())
   const undoRequestIdsRef = useRef<Map<string, string>>(new Map())
@@ -635,9 +805,18 @@ export default function App() {
   const permissionReplyRequestIdsRef = useRef<Map<string, string>>(new Map())
   const questionReplyRequestIdsRef = useRef<Map<string, string>>(new Map())
   const questionRejectRequestIdsRef = useRef<Map<string, string>>(new Map())
+  const inlineDiffOpenRequestIdsRef = useRef<Map<string, string>>(new Map())
+  const inlineDiffDismissRequestIdsRef = useRef<Map<string, string>>(new Map())
+  const inlineDiffRevisionRef = useRef(-1)
   const providersRequestIdsRef = useRef<Set<string>>(new Set())
   const modelsRequestIdsRef = useRef<Set<string>>(new Set())
   const agentsRequestIdsRef = useRef<Set<string>>(new Set())
+  const composerResourcesRequestIdsRef = useRef<Set<string>>(new Set())
+  const latestComposerResourcesRequestIdRef = useRef<string | null>(null)
+  const mcpRequestIdsRef = useRef<Map<string, { name: string; enabled: boolean }>>(new Map())
+  const workspaceSearchRequestIdsRef = useRef<Set<string>>(new Set())
+  const latestWorkspaceSearchRequestIdRef = useRef<string | null>(null)
+  const workspaceResolveRequestIdsRef = useRef<Set<string>>(new Set())
   const fileOpenRequestIdsRef = useRef<Set<string>>(new Set())
   const tempfileRequestIdsRef = useRef<Map<string, { previewUrl: string }>>(new Map())
   const runStartRequestIdRef = useRef<string | null>(null)
@@ -665,6 +844,7 @@ export default function App() {
 
   const sessionsRef = useRef<SessionSummary[]>([])
   const transcriptRef = useRef<TranscriptMessage[]>([])
+  const activeSubtaskRef = useRef<ActiveSubtask | null>(null)
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode
@@ -676,12 +856,19 @@ export default function App() {
   }, [themeMode])
 
   useEffect(() => {
-    if (findThinkingOption(thinkingOptions, thinkingSelectionValue)) {
-      return
-    }
-    setThinkingEnabled(false)
-    setThinkingVariant('')
-  }, [thinkingOptions, thinkingSelectionValue])
+    writeThinkingPreferences(window.localStorage, thinkingPreferences)
+  }, [thinkingPreferences])
+
+  const selectThinkingOption = useCallback(
+    (value: string) => {
+      if (!selectedModel) {
+        return
+      }
+      const option = findThinkingOption(thinkingOptions, value) ?? THINKING_OFF_VALUE
+      setThinkingPreferences((current) => ({ ...current, [selectedModel]: option }))
+    },
+    [selectedModel, thinkingOptions]
+  )
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: We intentionally register the message handler once.
   // biome-ignore lint/correctness/useExhaustiveDependencies: Handler reads transcriptRef instead of transcript.
@@ -696,6 +883,10 @@ export default function App() {
   useEffect(() => {
     transcriptRef.current = transcript
   }, [transcript])
+
+  useEffect(() => {
+    activeSubtaskRef.current = activeSubtask
+  }, [activeSubtask])
 
   useEffect(() => {
     sessionsRef.current = sessions
@@ -750,6 +941,7 @@ export default function App() {
           detail: 'Not running in VS Code'
         })
         setSelfcheck({
+          health: { state: 'error', detail: 'Not running in VS Code' },
           sessions: { state: 'error', detail: 'Not running in VS Code' },
           models: { state: 'error', detail: 'Not running in VS Code' },
           agents: { state: 'error', detail: 'Not running in VS Code' }
@@ -765,12 +957,17 @@ export default function App() {
         requestId
       })
 
-      setSelfcheck({
+      setSelfcheck((current) => ({
+        health:
+          current.health.state === 'ok'
+            ? { ...current.health, detail: 'Refreshing', lastRequestId: requestId }
+            : { state: 'pending', detail: 'Request sent', lastRequestId: requestId },
         sessions: { state: 'pending', detail: 'Request sent', lastRequestId: requestId },
         models: { state: 'pending', detail: 'Request sent', lastRequestId: requestId },
         agents: { state: 'pending', detail: 'Request sent', lastRequestId: requestId }
-      })
+      }))
 
+      startSelfcheckTimer('health', requestId)
       startSelfcheckTimer('sessions', requestId)
       startSelfcheckTimer('models', requestId)
       startSelfcheckTimer('agents', requestId)
@@ -789,6 +986,7 @@ export default function App() {
         detail
       })
       setSelfcheck({
+        health: { state: 'error', detail },
         sessions: { state: 'error', detail },
         models: { state: 'error', detail },
         agents: { state: 'error', detail }
@@ -846,7 +1044,48 @@ export default function App() {
     })
   }, [pushDebug])
 
-  const applyLiveRunEvent = useCallback((event: Extract<UiRunEvent, { type: 'part' } | { type: 'error' }>, assistantIndex: number) => {
+  const requestSubtaskTranscript = useCallback((sessionId: string) => {
+    const vscode = getVsCodeApi()
+    if (!vscode) {
+      setSubtaskTranscriptError('Not running in VS Code')
+      return
+    }
+
+    if ([...subtaskTranscriptRequestIdsRef.current.values()].includes(sessionId)) {
+      return
+    }
+
+    const requestId = createRequestId()
+    subtaskTranscriptRequestIdsRef.current.set(requestId, sessionId)
+    setLoadingSubtaskTranscript(true)
+    setSubtaskTranscriptError(null)
+    vscode.postMessage({
+      type: 'subtask.transcript',
+      requestId,
+      payload: { sessionId }
+    })
+  }, [])
+
+  const openSubtask = useCallback((subtask: ActiveSubtask) => {
+    subtaskTranscriptRequestIdsRef.current.clear()
+    activeSubtaskRef.current = subtask
+    setActiveSubtask(subtask)
+    setSubtaskTranscript([])
+    setSubtaskTranscriptError(null)
+    requestSubtaskTranscript(subtask.sessionId)
+  }, [requestSubtaskTranscript])
+
+  useEffect(() => {
+    if (!activeSubtask) {
+      return
+    }
+    const timer = window.setInterval(() => {
+      requestSubtaskTranscript(activeSubtask.sessionId)
+    }, 1500)
+    return () => window.clearInterval(timer)
+  }, [activeSubtask, requestSubtaskTranscript])
+
+  const applyLiveRunEvent = useCallback((event: Extract<UiRunEvent, { type: 'part' } | { type: 'context.usage' } | { type: 'error' }>, assistantIndex: number) => {
     const nextTranscript = applyRunEventToTranscript(transcriptRef.current, event, assistantIndex)
     transcriptRef.current = nextTranscript
     setTranscript(nextTranscript)
@@ -918,6 +1157,10 @@ export default function App() {
     if (!isRunningRef.current) {
       setEditedFiles([])
     }
+    activeSubtaskRef.current = null
+    setActiveSubtask(null)
+    setSubtaskTranscript([])
+    setSubtaskTranscriptError(null)
     setSelectedSessionId(sessionId)
   }, [])
 
@@ -1124,7 +1367,7 @@ export default function App() {
   )
 
   const openEditedFile = useCallback(
-    (filePath: string) => {
+    (file: DisplayEditedFile) => {
       const vscode = getVsCodeApi()
       if (!vscode) {
         setRunStatus('Not running in VS Code')
@@ -1132,20 +1375,90 @@ export default function App() {
       }
 
       const requestId = createRequestId()
+      if (file.fileId) {
+        inlineDiffOpenRequestIdsRef.current.set(requestId, file.fileId)
+        pushDebug({
+          at: new Date().toISOString(),
+          kind: 'tx',
+          type: 'inlineDiff.open',
+          requestId,
+          detail: file.fileId
+        })
+        vscode.postMessage({
+          type: 'inlineDiff.open',
+          requestId,
+          payload: {
+            fileId: file.fileId
+          }
+        })
+        return
+      }
+
       fileOpenRequestIdsRef.current.add(requestId)
       pushDebug({
         at: new Date().toISOString(),
         kind: 'tx',
         type: 'file.open',
         requestId,
-        detail: filePath
+        detail: file.path
       })
       vscode.postMessage({
         type: 'file.open',
         requestId,
         payload: {
-          path: filePath
+          path: file.path
         }
+      })
+    },
+    [pushDebug]
+  )
+
+  const openFileReference = useCallback(
+    (reference: { path: string; line?: number; column?: number }) => {
+      const vscode = getVsCodeApi()
+      if (!vscode) {
+        setRunStatus('Not running in VS Code')
+        return
+      }
+      const requestId = createRequestId()
+      fileOpenRequestIdsRef.current.add(requestId)
+      pushDebug({
+        at: new Date().toISOString(),
+        kind: 'tx',
+        type: 'file.open',
+        requestId,
+        detail: `${reference.path}${reference.line ? `:${String(reference.line)}` : ''}`
+      })
+      vscode.postMessage({
+        type: 'file.open',
+        requestId,
+        payload: reference
+      })
+    },
+    [pushDebug]
+  )
+
+  const dismissEditedFile = useCallback(
+    (fileId: string) => {
+      const vscode = getVsCodeApi()
+      if (!vscode) {
+        setRunStatus('Not running in VS Code')
+        return
+      }
+
+      const requestId = createRequestId()
+      inlineDiffDismissRequestIdsRef.current.set(requestId, fileId)
+      pushDebug({
+        at: new Date().toISOString(),
+        kind: 'tx',
+        type: 'inlineDiff.dismiss',
+        requestId,
+        detail: fileId
+      })
+      vscode.postMessage({
+        type: 'inlineDiff.dismiss',
+        requestId,
+        payload: { fileId }
       })
     },
     [pushDebug]
@@ -1267,6 +1580,90 @@ export default function App() {
     })
   }, [pushDebug, startSelfcheckTimer])
 
+  const requestComposerResources = useCallback(() => {
+    const vscode = getVsCodeApi()
+    if (!vscode) {
+      setRefreshingResources(false)
+      setMcpError('Not running in VS Code')
+      return
+    }
+    const requestId = createRequestId()
+    composerResourcesRequestIdsRef.current.add(requestId)
+    latestComposerResourcesRequestIdRef.current = requestId
+    setRefreshingResources(true)
+    setMcpError(null)
+    pushDebug({
+      at: new Date().toISOString(),
+      kind: 'tx',
+      type: 'composer.resources.list',
+      requestId
+    })
+    vscode.postMessage({
+      type: 'composer.resources.list',
+      requestId
+    })
+  }, [pushDebug])
+
+  const toggleMcpServer = useCallback(
+    (server: ComposerMcpServerSummary) => {
+      const vscode = getVsCodeApi()
+      if (!vscode) {
+        setMcpError('Not running in VS Code')
+        return
+      }
+      const requestId = createRequestId()
+      const enabled = !server.enabled
+      mcpRequestIdsRef.current.set(requestId, { name: server.name, enabled })
+      setPendingMcpTargets((current) => new Map(current).set(server.name, enabled))
+      setMcpError(null)
+      pushDebug({
+        at: new Date().toISOString(),
+        kind: 'tx',
+        type: 'mcp.setEnabled',
+        requestId,
+        detail: `${server.name} -> ${String(enabled)}`
+      })
+      vscode.postMessage({
+        type: 'mcp.setEnabled',
+        requestId,
+        payload: {
+          name: server.name,
+          enabled
+        }
+      })
+    },
+    [pushDebug]
+  )
+
+  const requestWorkspaceResources = useCallback((query: string) => {
+    const vscode = getVsCodeApi()
+    if (!vscode) {
+      return
+    }
+    const requestId = createRequestId()
+    latestWorkspaceSearchRequestIdRef.current = requestId
+    workspaceSearchRequestIdsRef.current.add(requestId)
+    vscode.postMessage({
+      type: 'workspace.resources.search',
+      requestId,
+      payload: { query }
+    })
+  }, [])
+
+  const resolveDroppedWorkspaceResources = useCallback((values: string[]) => {
+    const vscode = getVsCodeApi()
+    if (!vscode || values.length === 0) {
+      return
+    }
+    const requestId = createRequestId()
+    workspaceResolveRequestIdsRef.current.add(requestId)
+    vscode.postMessage({
+      type: 'workspace.resources.resolve',
+      requestId,
+      payload: { values }
+    })
+  }, [])
+
   const openModelDialog = useCallback(() => {
     const nextProviderId = splitModel(selectedModel)?.providerID
     if (nextProviderId) {
@@ -1293,6 +1690,7 @@ export default function App() {
     }
 
     const requestId = createRequestId()
+    const command = resolveComposerCommandInvocation(message, composerCommands)
     pushDebug({
       at: new Date().toISOString(),
       kind: 'tx',
@@ -1349,6 +1747,13 @@ export default function App() {
       return nextTranscript
     })
     setComposerValue('')
+    setComposerCursor(0)
+    setSelectedNativeCommandName(null)
+
+    const attachedFiles = [
+      ...(pastedImageFilePath ? [pastedImageFilePath] : []),
+      ...workspaceAttachments.filter((resource) => resource.kind === 'file').map((resource) => resource.absolutePath)
+    ].filter((filePath, index, files) => files.indexOf(filePath) === index)
 
     vscode.postMessage({
       type: 'run.start',
@@ -1361,32 +1766,34 @@ export default function App() {
         title: undefined,
         thinking: thinkingEnabled,
         variant: thinkingVariant || undefined,
-        files: pastedImageFilePath ? [pastedImageFilePath] : undefined
+        files: attachedFiles.length > 0 ? attachedFiles : undefined,
+        command: command ?? undefined
       }
     })
     if (pastedImage) {
       setPastedImage(null)
       setPastedImageFilePath(null)
     }
-  }, [composerValue, isRunning, moveSessionExportsToBackground, pastedImage, pastedImageFilePath, pushDebug, selectedSessionId, selectedModel, selectedAgent, thinkingEnabled, thinkingVariant, transcript.length])
+    setWorkspaceAttachments([])
+  }, [composerCommands, composerValue, isRunning, moveSessionExportsToBackground, pastedImage, pastedImageFilePath, pushDebug, selectedSessionId, selectedModel, selectedAgent, thinkingEnabled, thinkingVariant, transcript.length, workspaceAttachments])
 
   const commands = useMemo(() => {
     type Cmd = {
       name: string
       hint: string
+      source?: 'command' | 'mcp' | 'skill'
+      preserveComposer?: boolean
+      nativeCommand?: string
       run: (args: string[]) => void
     }
 
-    const thinkingUsage = `Usage: /thinking ${thinkingOptions.join('|')}`
     const setThinkingDepth = (value: string) => {
       const option = findThinkingOption(thinkingOptions, value)
       if (!option) {
-        setRunStatus(thinkingUsage)
+        setResourceDialogKind('thinking')
         return
       }
-      const next = toThinkingSelection(option)
-      setThinkingEnabled(next.enabled)
-      setThinkingVariant(next.variant)
+      selectThinkingOption(option)
     }
 
     const cmds: Cmd[] = [
@@ -1468,14 +1875,18 @@ export default function App() {
       },
       {
         name: '/agent',
-        hint: 'Set agent: build|plan',
+        hint: 'Select agent',
         run: (args) => {
           const next = (args[0] || '').toLowerCase()
-          if (next !== 'build' && next !== 'plan') {
-            setRunStatus('Usage: /agent build|plan')
+          if (!next) {
+            setResourceDialogKind('agents')
             return
           }
-          setSelectedAgent(next)
+          if (!agents.some((agent) => agent.name.toLowerCase() === next)) {
+            setResourceDialogKind('agents')
+            return
+          }
+          setSelectedAgent(agents.find((agent) => agent.name.toLowerCase() === next)?.name ?? next)
         }
       },
       {
@@ -1484,7 +1895,7 @@ export default function App() {
         run: (args) => {
           const v = args[0] || ''
           if (!v) {
-            setRunStatus(thinkingUsage)
+            setResourceDialogKind('thinking')
             return
           }
           setThinkingDepth(v)
@@ -1499,6 +1910,55 @@ export default function App() {
             return
           }
           requestSessionExport(selectedSessionIdRef.current)
+        }
+      },
+      {
+        name: '/mcp',
+        hint: composerMcpServers.length > 0 ? `MCP servers: ${composerMcpServers.length}` : 'List configured MCP servers',
+        source: 'mcp',
+        preserveComposer: true,
+        run: (args) => {
+          const requested = args.join(' ').trim().toLowerCase()
+          if (!requested) {
+            setComposerValue('')
+            setMcpError(null)
+            setResourceDialogKind('mcp')
+            return
+          }
+          const server = composerMcpServers.find((entry) => entry.name.toLowerCase() === requested)
+          if (!server) {
+            setComposerValue('')
+            setMcpError(`Unknown MCP server: ${args.join(' ')}`)
+            setResourceDialogKind('mcp')
+            return
+          }
+          setComposerValue(`Use the "${server.name}" MCP server to `)
+          window.requestAnimationFrame(() => composerRef.current?.focus())
+        }
+      },
+      {
+        name: '/skill',
+        hint: 'Use an available OpenCode skill',
+        source: 'skill',
+        preserveComposer: true,
+        run: (args) => {
+          const requested = args.join(' ').trim().toLowerCase()
+          const skill = composerSkills.find((entry) => entry.name.toLowerCase() === requested)
+          if (!skill) {
+            setComposerValue('')
+            setResourceDialogKind('skills')
+            return
+          }
+          setComposerValue(`Use the "${skill.name}" skill to `)
+          window.requestAnimationFrame(() => composerRef.current?.focus())
+        }
+      },
+      {
+        name: '/skills',
+        hint: composerSkills.length > 0 ? `Available skills: ${composerSkills.length}` : 'List available OpenCode skills',
+        source: 'skill',
+        run: () => {
+          setResourceDialogKind('skills')
         }
       },
       {
@@ -1548,35 +2008,146 @@ export default function App() {
         }
       }
     ]
+
+    const builtInNames = new Set(cmds.map((command) => command.name.toLowerCase()))
+    for (const command of composerCommands) {
+      const name = `/${command.name.replace(/^\/+/, '')}`
+      if (builtInNames.has(name.toLowerCase())) {
+        continue
+      }
+      builtInNames.add(name.toLowerCase())
+      cmds.push({
+        name,
+        hint: command.description || `${command.source ?? 'command'}${command.hints.length > 0 ? ` · ${command.hints.join(', ')}` : ''}`,
+        source: command.source,
+        preserveComposer: true,
+        nativeCommand: command.name,
+        run: (args) => {
+          setComposerValue(`${name}${args.length > 0 ? ` ${args.join(' ')}` : ''}`)
+          window.requestAnimationFrame(() => composerRef.current?.focus())
+        }
+      })
+    }
+
+    for (const server of composerMcpServers) {
+      cmds.push({
+        name: `/mcp ${server.name}`,
+        hint: `${server.status} · MCP server`,
+        source: 'mcp',
+        preserveComposer: true,
+        run: () => {
+          setComposerValue(`Use the "${server.name}" MCP server to `)
+          window.requestAnimationFrame(() => composerRef.current?.focus())
+        }
+      })
+    }
+
+    for (const skill of composerSkills) {
+      cmds.push({
+        name: `/skill ${skill.name}`,
+        hint: skill.description || 'OpenCode skill',
+        source: 'skill',
+        preserveComposer: true,
+        run: () => {
+          setComposerValue(`Use the "${skill.name}" skill to `)
+          window.requestAnimationFrame(() => composerRef.current?.focus())
+        }
+      })
+    }
+
     return cmds
-  }, [deleteArmed, handleDeleteSession, openModelDialog, requestSessionExport, requestSessionRedo, requestSessions, requestSessionTimeline, requestSessionUndo, selectSession, thinkingOptions])
+  }, [agents, composerCommands, composerMcpServers, composerSkills, deleteArmed, handleDeleteSession, openModelDialog, requestSessionExport, requestSessionRedo, requestSessions, requestSessionTimeline, requestSessionUndo, selectSession, selectThinkingOption, thinkingOptions])
 
   const commandState = useMemo(() => {
     const raw = composerValue
+    if (selectedNativeCommandName && isComposerCommandInvocation(raw, selectedNativeCommandName)) {
+      return { open: false as const, query: '', filter: '', args: [] as string[] }
+    }
     const isSingleLine = !raw.includes('\n')
     if (!isSingleLine) {
-      return { open: false as const, query: '', args: [] as string[] }
+      return { open: false as const, query: '', filter: '', args: [] as string[] }
     }
     const trimmed = raw.trimStart()
     if (!trimmed.startsWith('/')) {
-      return { open: false as const, query: '', args: [] as string[] }
+      return { open: false as const, query: '', filter: '', args: [] as string[] }
     }
     const text = trimmed.slice(1)
     const tokens = text.split(/\s+/).filter(Boolean)
     const query = tokens[0] ? `/${tokens[0]}` : '/'
     const args = tokens.slice(1)
-    return { open: true as const, query, args }
-  }, [composerValue])
+    return { open: true as const, query, filter: trimmed.toLowerCase(), args }
+  }, [composerValue, selectedNativeCommandName])
+
+  const workspaceMentionState = useMemo(
+    () => (commandState.open ? null : getWorkspaceMentionState(composerValue, composerCursor)),
+    [commandState.open, composerCursor, composerValue]
+  )
+
+  useEffect(() => {
+    if (!workspaceMentionState) {
+      latestWorkspaceSearchRequestIdRef.current = null
+      setWorkspaceResources([])
+      return
+    }
+    const timer = window.setTimeout(() => requestWorkspaceResources(workspaceMentionState.query), 120)
+    return () => window.clearTimeout(timer)
+  }, [requestWorkspaceResources, workspaceMentionState])
+
+  useEffect(() => {
+    if (workspaceResourceIndex >= workspaceResources.length && workspaceResources.length > 0) {
+      setWorkspaceResourceIndex(0)
+    }
+  }, [workspaceResourceIndex, workspaceResources.length])
+
+  useEffect(() => {
+    const selected = workspaceMenuRef.current?.querySelector<HTMLElement>(
+      `[data-resource-index="${String(workspaceResourceIndex)}"]`
+    )
+    selected?.scrollIntoView({ block: 'nearest' })
+  }, [workspaceResourceIndex])
+
+  const selectWorkspaceResource = useCallback(
+    (resource: WorkspaceResourceSummary) => {
+      const cursor = composerRef.current?.selectionStart ?? composerCursor
+      const state = getWorkspaceMentionState(composerValue, cursor)
+      const inserted = state
+        ? insertWorkspaceMention(composerValue, state, resource)
+        : appendWorkspaceMentions(composerValue, [resource])
+      setComposerValue(inserted.value)
+      setComposerCursor(inserted.cursor)
+      setWorkspaceAttachments((current) => mergeWorkspaceResources(current, [resource]))
+      setWorkspaceResources([])
+      window.requestAnimationFrame(() => {
+        composerRef.current?.focus()
+        composerRef.current?.setSelectionRange(inserted.cursor, inserted.cursor)
+      })
+    },
+    [composerCursor, composerValue]
+  )
 
   const filteredCommands = useMemo(() => {
     if (!commandState.open) {
       return []
     }
     const q = commandState.query.toLowerCase()
+    const filter = commandState.filter
     return commands
-      .filter((cmd) => cmd.name.startsWith(q) || q === '/')
-      .slice(0, 12)
-  }, [commandState.open, commandState.query, commands])
+      .filter((cmd) => {
+        const name = cmd.name.toLowerCase()
+        return q === '/' || name.startsWith(filter) || filter.startsWith(`${name} `) || cmd.hint.toLowerCase().includes(filter.slice(1))
+      })
+  }, [commandState.filter, commandState.open, commandState.query, commands])
+
+  useEffect(() => {
+    if (commandIndex >= filteredCommands.length && filteredCommands.length > 0) {
+      setCommandIndex(0)
+    }
+  }, [commandIndex, filteredCommands.length])
+
+  useEffect(() => {
+    const selected = commandMenuRef.current?.querySelector<HTMLElement>(`[data-command-index="${String(commandIndex)}"]`)
+    selected?.scrollIntoView({ block: 'nearest' })
+  }, [commandIndex])
 
   const runCommand = useCallback(
     (cmdName: string, args: string[]) => {
@@ -1586,7 +2157,10 @@ export default function App() {
         return
       }
       cmd.run(args)
-      setComposerValue('')
+      setSelectedNativeCommandName(cmd.nativeCommand ?? null)
+      if (!cmd.preserveComposer) {
+        setComposerValue('')
+      }
     },
     [commands]
   )
@@ -1619,6 +2193,11 @@ export default function App() {
         return
       }
 
+      if (resourceDialogKind) {
+        event.preventDefault()
+        setResourceDialogKind(null)
+        return
+      }
       if (modelDialogOpen) {
         event.preventDefault()
         setModelDialogOpen(false)
@@ -1629,6 +2208,11 @@ export default function App() {
         setSessionDialogOpen(false)
         return
       }
+      if (pendingPermission) {
+        event.preventDefault()
+        requestPermissionReply(pendingPermission.permissionId, 'reject')
+        return
+      }
       if (isRunning) {
         event.preventDefault()
         stopRun()
@@ -1637,7 +2221,14 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [isRunning, modelDialogOpen, sessionDialogOpen, stopRun])
+  }, [isRunning, modelDialogOpen, pendingPermission, requestPermissionReply, resourceDialogKind, sessionDialogOpen, stopRun])
+
+  useEffect(() => {
+    if (!pendingPermission) {
+      return
+    }
+    window.requestAnimationFrame(() => permissionAllowButtonRef.current?.focus())
+  }, [pendingPermission])
 
   useEffect(() => {
     const vscode = getVsCodeApi()
@@ -1694,6 +2285,17 @@ export default function App() {
         requestProviders()
         requestModels()
         requestAgents()
+        requestComposerResources()
+        requestSelfcheck()
+        return
+      }
+
+      if (message.type === 'inlineDiff.state' && message.ok) {
+        if (message.payload.revision < inlineDiffRevisionRef.current) {
+          return
+        }
+        inlineDiffRevisionRef.current = message.payload.revision
+        setReviewFiles(message.payload.files)
         return
       }
 
@@ -1817,6 +2419,23 @@ export default function App() {
         return
       }
 
+      if (message.type === 'subtask.transcript.response' && message.ok) {
+        const targetSessionId = subtaskTranscriptRequestIdsRef.current.get(message.requestId)
+        if (!targetSessionId) {
+          return
+        }
+        subtaskTranscriptRequestIdsRef.current.delete(message.requestId)
+        if (targetSessionId !== message.payload.sessionId || activeSubtaskRef.current?.sessionId !== targetSessionId) {
+          return
+        }
+        setSubtaskTranscript(compactTranscript(message.payload.messages))
+        setSubtaskTranscriptError(null)
+        setLoadingSubtaskTranscript(
+          [...subtaskTranscriptRequestIdsRef.current.values()].includes(targetSessionId)
+        )
+        return
+      }
+
       if (message.type === 'session.timeline.response' && message.ok) {
         const targetSessionId = timelineRequestIdsRef.current.get(message.requestId)
         if (!targetSessionId) {
@@ -1922,6 +2541,22 @@ export default function App() {
         return
       }
 
+      if (message.type === 'inlineDiff.open.response' && message.ok) {
+        if (!inlineDiffOpenRequestIdsRef.current.has(message.requestId)) {
+          return
+        }
+        inlineDiffOpenRequestIdsRef.current.delete(message.requestId)
+        return
+      }
+
+      if (message.type === 'inlineDiff.dismiss.response' && message.ok) {
+        if (!inlineDiffDismissRequestIdsRef.current.has(message.requestId)) {
+          return
+        }
+        inlineDiffDismissRequestIdsRef.current.delete(message.requestId)
+        return
+      }
+
       if (message.type === 'models.list.response' && message.ok) {
         pushDebug({
           at: new Date().toISOString(),
@@ -1990,6 +2625,76 @@ export default function App() {
         return
       }
 
+      if (message.type === 'composer.resources.list.response' && message.ok) {
+        if (!composerResourcesRequestIdsRef.current.has(message.requestId)) {
+          return
+        }
+        composerResourcesRequestIdsRef.current.delete(message.requestId)
+        setRefreshingResources(composerResourcesRequestIdsRef.current.size > 0)
+        if (latestComposerResourcesRequestIdRef.current !== message.requestId) {
+          return
+        }
+        setComposerCommands(message.payload.commands)
+        setComposerSkills(message.payload.skills)
+        if (!message.payload.mcpError) {
+          setComposerMcpServers(message.payload.mcpServers)
+        }
+        setMcpError(message.payload.mcpError ?? null)
+        return
+      }
+
+      if (message.type === 'mcp.setEnabled.response' && message.ok) {
+        const pending = mcpRequestIdsRef.current.get(message.requestId)
+        if (!pending) {
+          return
+        }
+        mcpRequestIdsRef.current.delete(message.requestId)
+        setPendingMcpTargets((current) => {
+          const next = new Map(current)
+          next.delete(pending.name)
+          return next
+        })
+        setComposerMcpServers((current) =>
+          current.map((server) => (server.name === message.payload.server.name ? message.payload.server : server))
+        )
+        setMcpError(null)
+        return
+      }
+
+      if (message.type === 'workspace.resources.search.response' && message.ok) {
+        if (!workspaceSearchRequestIdsRef.current.has(message.requestId)) {
+          return
+        }
+        workspaceSearchRequestIdsRef.current.delete(message.requestId)
+        if (latestWorkspaceSearchRequestIdRef.current !== message.requestId) {
+          return
+        }
+        setWorkspaceResources(message.payload.resources)
+        setWorkspaceResourceIndex(0)
+        return
+      }
+
+      if (message.type === 'workspace.resources.resolve.response' && message.ok) {
+        if (!workspaceResolveRequestIdsRef.current.has(message.requestId)) {
+          return
+        }
+        workspaceResolveRequestIdsRef.current.delete(message.requestId)
+        if (message.payload.resources.length === 0) {
+          return
+        }
+        setWorkspaceAttachments((current) => mergeWorkspaceResources(current, message.payload.resources))
+        setComposerValue((current) => {
+          const inserted = appendWorkspaceMentions(current, message.payload.resources)
+          setComposerCursor(inserted.cursor)
+          window.requestAnimationFrame(() => {
+            composerRef.current?.focus()
+            composerRef.current?.setSelectionRange(inserted.cursor, inserted.cursor)
+          })
+          return inserted.value
+        })
+        return
+      }
+
       if (message.type === 'selfcheck.response' && message.ok) {
         const rid = message.requestId
         pushDebug({
@@ -2005,7 +2710,7 @@ export default function App() {
         }
 
         setSelfcheck((current) => {
-          const currentRid = current.sessions.lastRequestId
+          const currentRid = current.health.lastRequestId
           if (currentRid && currentRid !== rid) {
             return current
           }
@@ -2016,6 +2721,13 @@ export default function App() {
               : { state: 'error', detail: v.error, lastRequestId: rid }
 
           return {
+            health: message.payload.health.ok
+              ? {
+                  state: 'ok',
+                  detail: message.payload.health.version ? `version=${message.payload.health.version}` : 'healthy',
+                  lastRequestId: rid
+                }
+              : { state: 'error', detail: message.payload.health.error, lastRequestId: rid },
             sessions: toState(message.payload.sessions),
             models: toState(message.payload.models),
             agents: toState(message.payload.agents)
@@ -2091,6 +2803,11 @@ export default function App() {
 
         if (message.payload.event.type === 'part') {
           setLastRunPartKind(message.payload.event.part.type)
+          applyLiveRunEvent(message.payload.event, active.assistantIndex)
+          return
+        }
+
+        if (message.payload.event.type === 'context.usage') {
           applyLiveRunEvent(message.payload.event, active.assistantIndex)
           return
         }
@@ -2232,6 +2949,18 @@ export default function App() {
           return
         }
 
+        if (subtaskTranscriptRequestIdsRef.current.has(message.requestId)) {
+          const targetSessionId = subtaskTranscriptRequestIdsRef.current.get(message.requestId) ?? null
+          subtaskTranscriptRequestIdsRef.current.delete(message.requestId)
+          if (targetSessionId && activeSubtaskRef.current?.sessionId === targetSessionId) {
+            setSubtaskTranscriptError(message.error)
+            setLoadingSubtaskTranscript(
+              [...subtaskTranscriptRequestIdsRef.current.values()].includes(targetSessionId)
+            )
+          }
+          return
+        }
+
         if (timelineRequestIdsRef.current.has(message.requestId)) {
           timelineRequestIdsRef.current.delete(message.requestId)
           setTimelineError(message.error)
@@ -2292,10 +3021,59 @@ export default function App() {
           return
         }
 
+        if (composerResourcesRequestIdsRef.current.has(message.requestId)) {
+          composerResourcesRequestIdsRef.current.delete(message.requestId)
+          setRefreshingResources(composerResourcesRequestIdsRef.current.size > 0)
+          if (latestComposerResourcesRequestIdRef.current === message.requestId) {
+            setMcpError(message.error)
+          }
+          return
+        }
+
+        if (mcpRequestIdsRef.current.has(message.requestId)) {
+          const pending = mcpRequestIdsRef.current.get(message.requestId)
+          mcpRequestIdsRef.current.delete(message.requestId)
+          setPendingMcpTargets((current) => {
+            const next = new Map(current)
+            if (pending) {
+              next.delete(pending.name)
+            }
+            return next
+          })
+          setMcpError(message.error)
+          return
+        }
+
+        if (workspaceSearchRequestIdsRef.current.has(message.requestId)) {
+          workspaceSearchRequestIdsRef.current.delete(message.requestId)
+          if (latestWorkspaceSearchRequestIdRef.current === message.requestId) {
+            setWorkspaceResources([])
+          }
+          return
+        }
+
+        if (workspaceResolveRequestIdsRef.current.has(message.requestId)) {
+          workspaceResolveRequestIdsRef.current.delete(message.requestId)
+          setRunStatus(`File drop failed: ${message.error}`)
+          return
+        }
+
         if (agentsRequestIdsRef.current.has(message.requestId)) {
           agentsRequestIdsRef.current.delete(message.requestId)
           setAgentsError(message.error)
           setLoadingAgents(agentsRequestIdsRef.current.size > 0)
+          return
+        }
+
+        if (inlineDiffOpenRequestIdsRef.current.has(message.requestId)) {
+          inlineDiffOpenRequestIdsRef.current.delete(message.requestId)
+          setRunStatus(`Open review failed: ${message.error}`)
+          return
+        }
+
+        if (inlineDiffDismissRequestIdsRef.current.has(message.requestId)) {
+          inlineDiffDismissRequestIdsRef.current.delete(message.requestId)
+          setRunStatus(`Dismiss review failed: ${message.error}`)
           return
         }
 
@@ -2344,14 +3122,33 @@ export default function App() {
     completeRun,
     pushDebug,
     requestAgents,
+    requestComposerResources,
     requestModels,
     requestProviders,
+    requestSelfcheck,
     requestSessions,
     requestSessionExport,
     timelineDialogOpen,
     requestSessionTimeline,
     selectSession
   ])
+
+  useEffect(() => {
+    if (!status.startsWith('Connected:')) {
+      return
+    }
+    const refresh = () => {
+      if (document.visibilityState === 'visible') {
+        requestSelfcheck()
+      }
+    }
+    const interval = window.setInterval(refresh, 30_000)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      window.clearInterval(interval)
+      document.removeEventListener('visibilitychange', refresh)
+    }
+  }, [requestSelfcheck, status])
 
   // Startup preloads models; this remains as a retry path if the first load failed or was skipped.
   useEffect(() => {
@@ -2427,7 +3224,9 @@ export default function App() {
               aria-label={themeMode === 'light' ? '切换到黑色主题' : '切换到白色主题'}
               title={themeMode === 'light' ? '切换到黑色主题' : '切换到白色主题'}
             >
-              <span className="theme-toggle__icon" aria-hidden="true">☀</span>
+              <span className="theme-toggle__icon" aria-hidden="true">
+                {themeMode === 'light' ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
+              </span>
             </button>
             <div className="topbar__status">{status}</div>
             <div className="topbar__diagnostics">
@@ -2467,6 +3266,10 @@ export default function App() {
                   </div>
 
                   <div className="diagnostics-popover__status">
+                    <div>
+                      health: {selfcheck.health.state}
+                      {selfcheck.health.detail ? ` (${selfcheck.health.detail})` : ''}
+                    </div>
                     <div>
                       sessions: {selfcheck.sessions.state}
                       {selfcheck.sessions.detail ? ` (${selfcheck.sessions.detail})` : ''}
@@ -2518,6 +3321,7 @@ export default function App() {
           <div className="topbar__actions">
             <button
               type="button"
+              className="topbar__icon-button"
               onClick={() => {
                 if (isRunningRef.current) {
                   setRunStatus('Cannot start new session while running')
@@ -2533,51 +3337,163 @@ export default function App() {
                 setPendingPermission(null)
                 setPendingQuestion(null)
               }}
+              aria-label="New session"
+              title="New session"
             >
-              New
+              <Plus size={16} aria-hidden="true" />
             </button>
-            <button type="button" onClick={() => setSessionDialogOpen(true)} disabled={sessions.length === 0}>
-              Switch
+            <button
+              type="button"
+              className="topbar__icon-button"
+              onClick={() => setSessionDialogOpen(true)}
+              disabled={sessions.length === 0}
+              aria-label="Switch session"
+              title="Switch session"
+            >
+              <History size={16} aria-hidden="true" />
             </button>
-            <button type="button" onClick={() => requestSessions()} disabled={loadingSessions}>
-              {loadingSessions ? 'Refreshing…' : 'Refresh'}
+            <button
+              type="button"
+              className={`topbar__icon-button${loadingSessions ? ' is-loading' : ''}`}
+              onClick={() => requestSessions()}
+              disabled={loadingSessions}
+              aria-label={loadingSessions ? 'Refreshing sessions' : 'Refresh sessions'}
+              title={loadingSessions ? 'Refreshing sessions' : 'Refresh sessions'}
+            >
+              <RefreshCw size={15} aria-hidden="true" />
             </button>
           </div>
         </div>
       </header>
 
       {sessionsError ? <p className="error-line">{sessionsError}</p> : null}
-      {runStatus ? <RunStatusIndicator status={runStatus} editedFiles={editedFiles} onOpenFile={openEditedFile} /> : null}
+      {runStatus || displayedEditedFiles.length > 0 ? (
+        <RunStatusIndicator
+          status={runStatus ?? 'Changes ready'}
+          files={displayedEditedFiles}
+          onOpenFile={openEditedFile}
+          onDismissFile={dismissEditedFile}
+        />
+      ) : null}
 
-      <section className="main-shell" aria-label="main">
-        <div className="chat">
-          {pendingPermission ? (
-            <div className="permission-banner" role="alert">
-              <div className="permission-banner__text">
-                <strong>{pendingPermission.toolName}</strong>
-                {pendingPermission.patterns.length > 0 ? ` wants ${pendingPermission.patterns.join(', ')}` : ' requests permission'}
-                {pendingPermission.message ? ` - ${pendingPermission.message}` : ''}
+      <section className={`main-shell${activeSubtask ? ' has-subtask' : ''}`} aria-label="main">
+        {activeSubtask ? (
+          <section className="subtask-detail" aria-label={`Subtask: ${activeSubtask.title}`}>
+            <header className="subtask-detail__header">
+              <button
+                type="button"
+                className="subtask-detail__iconButton"
+                onClick={() => {
+                  subtaskTranscriptRequestIdsRef.current.clear()
+                  activeSubtaskRef.current = null
+                  setActiveSubtask(null)
+                  setSubtaskTranscript([])
+                  setSubtaskTranscriptError(null)
+                  setLoadingSubtaskTranscript(false)
+                }}
+                aria-label="Back to parent task"
+                title="Back to parent task"
+              >
+                <ArrowLeft size={16} aria-hidden="true" />
+              </button>
+              <div className="subtask-detail__heading">
+                <span className="subtask-detail__eyebrow">Subtask</span>
+                <strong>{activeSubtask.title}</strong>
               </div>
-              <div className="permission-banner__actions">
-                <button type="button" onClick={() => requestPermissionReply(pendingPermission.permissionId, 'once')}>
-                  Allow once
-                </button>
-                <button type="button" onClick={() => requestPermissionReply(pendingPermission.permissionId, 'always')}>
-                  Always allow
-                </button>
-                <button type="button" onClick={() => requestPermissionReply(pendingPermission.permissionId, 'reject')}>
-                  Reject
-                </button>
-              </div>
+              <button
+                type="button"
+                className={`subtask-detail__iconButton${loadingSubtaskTranscript ? ' is-loading' : ''}`}
+                onClick={() => requestSubtaskTranscript(activeSubtask.sessionId)}
+                disabled={loadingSubtaskTranscript}
+                aria-label="Refresh subtask"
+                title="Refresh subtask"
+              >
+                <RefreshCw size={15} aria-hidden="true" />
+              </button>
+            </header>
+            <div className="subtask-detail__body">
+              {subtaskTranscriptError ? <p className="error-panel">{subtaskTranscriptError}</p> : null}
+              {!subtaskTranscriptError && subtaskTranscript.length === 0 ? (
+                <p className="empty-line">{loadingSubtaskTranscript ? 'Loading subtask...' : 'No subtask messages yet'}</p>
+              ) : null}
+              {!subtaskTranscriptError && subtaskTranscript.length > 0 ? (
+                <Transcript
+                  messages={subtaskTranscript}
+                  isRunning={false}
+                  onOpenSubtask={openSubtask}
+                  onOpenFileReference={openFileReference}
+                />
+              ) : null}
             </div>
-          ) : null}
+          </section>
+        ) : null}
+        <div className="chat">
           {pendingQuestion ? (
             <QuestionBanner pending={pendingQuestion} onReply={requestQuestionReply} onReject={requestQuestionReject} />
           ) : null}
           {transcriptError ? <p className="error-panel">{transcriptError}</p> : null}
           {!loadingTranscript && !transcriptError && transcript.length === 0 ? <p className="empty-line">No messages</p> : null}
-          {!transcriptError && transcript.length > 0 ? <Transcript messages={compactTranscript(transcript)} isRunning={isRunning} /> : null}
+          {!transcriptError && transcript.length > 0 ? (
+            <Transcript
+              messages={compactTranscript(transcript)}
+              isRunning={isRunning}
+              onOpenSubtask={openSubtask}
+              onOpenFileReference={openFileReference}
+            />
+          ) : null}
         </div>
+
+        {pendingPermission ? (
+          <section
+            className="permission-banner"
+            role="alertdialog"
+            aria-modal="false"
+            aria-labelledby="permission-title"
+            aria-describedby="permission-detail"
+          >
+            <div className="permission-banner__body">
+              <div className="permission-banner__header">
+                <ShieldCheck size={14} aria-hidden="true" />
+                <span>Permission request</span>
+              </div>
+              <strong className="permission-banner__title" id="permission-title">
+                {`Allow ${pendingPermission.toolName}?`}
+              </strong>
+              <div className="permission-banner__text" id="permission-detail">
+                {pendingPermission.message ||
+                  (pendingPermission.patterns.length > 0
+                    ? pendingPermission.patterns.join(', ')
+                    : 'OpenCode needs permission to continue this task.')}
+              </div>
+            </div>
+            <div className="permission-banner__actions">
+              <button
+                type="button"
+                className="permission-banner__button permission-banner__button--secondary permission-banner__button--always"
+                onClick={() => requestPermissionReply(pendingPermission.permissionId, 'always')}
+              >
+                Always allow
+              </button>
+              <div className="permission-banner__primary-actions">
+                <button
+                  type="button"
+                  className="permission-banner__button permission-banner__button--secondary"
+                  onClick={() => requestPermissionReply(pendingPermission.permissionId, 'reject')}
+                >
+                  Deny
+                </button>
+                <button
+                  ref={permissionAllowButtonRef}
+                  type="button"
+                  className="permission-banner__button permission-banner__button--primary"
+                  onClick={() => requestPermissionReply(pendingPermission.permissionId, 'once')}
+                >
+                  Allow once
+                </button>
+              </div>
+            </div>
+          </section>
+        ) : null}
 
         <section
           className={`composer-stack${pastedImage ? ' has-preview' : ''}${activeTodos.length > 0 ? ' has-todos' : ''}`}
@@ -2606,7 +3522,27 @@ export default function App() {
             ref={composerRef}
             className="composer-stack__textarea"
             value={composerValue}
-            onChange={(e) => setComposerValue(e.target.value)}
+            onChange={(e) => {
+              const nextValue = e.target.value
+              setComposerValue(nextValue)
+              setComposerCursor(e.target.selectionStart)
+              setWorkspaceAttachments((current) => current.filter((resource) => hasWorkspaceMention(nextValue, resource)))
+              setSelectedNativeCommandName((current) =>
+                current && isComposerCommandInvocation(nextValue, current) ? current : null
+              )
+              setCommandIndex(0)
+            }}
+            onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)}
+            aria-controls={
+              workspaceMentionState ? 'composer-workspace-menu' : commandState.open ? 'composer-command-menu' : undefined
+            }
+            aria-activedescendant={
+              workspaceMentionState && workspaceResources[workspaceResourceIndex]
+                ? `workspace-option-${String(workspaceResourceIndex)}`
+                : commandState.open && filteredCommands[commandIndex]
+                  ? `command-option-${String(commandIndex)}`
+                  : undefined
+            }
             placeholder="输入消息…"
             rows={2}
             onPaste={(e) => {
@@ -2668,7 +3604,54 @@ export default function App() {
                 return
               }
             }}
+            onDragOver={(event) => {
+              if (event.dataTransfer.types.some((type) => type.includes('uri-list') || type === 'Files')) {
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'copy'
+              }
+            }}
+            onDrop={(event) => {
+              const values = ['text/uri-list', 'application/vnd.code.uri-list', 'text/plain']
+                .map((type) => event.dataTransfer.getData(type))
+                .filter((value) => value.trim().length > 0)
+              for (const file of Array.from(event.dataTransfer.files)) {
+                if (file.name) {
+                  values.push(file.name)
+                }
+              }
+              if (values.length === 0) {
+                return
+              }
+              event.preventDefault()
+              resolveDroppedWorkspaceResources([...new Set(values)])
+            }}
           onKeyDown={(event) => {
+            if (workspaceMentionState && workspaceResources.length > 0) {
+              if (event.key === 'ArrowDown') {
+                event.preventDefault()
+                setWorkspaceResourceIndex((index) => (index + 1) % workspaceResources.length)
+                return
+              }
+              if (event.key === 'ArrowUp') {
+                event.preventDefault()
+                setWorkspaceResourceIndex((index) => (index - 1 + workspaceResources.length) % workspaceResources.length)
+                return
+              }
+              if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) {
+                event.preventDefault()
+                const resource = workspaceResources[workspaceResourceIndex]
+                if (resource) {
+                  selectWorkspaceResource(resource)
+                }
+                return
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setWorkspaceResources([])
+                return
+              }
+            }
+
             if (commandState.open && filteredCommands.length > 0) {
               if (event.key === 'ArrowDown') {
                 event.preventDefault()
@@ -2721,15 +3704,59 @@ export default function App() {
           }}
         />
 
-        {commandState.open ? (
-          <div className="command-menu" role="listbox" aria-label="commands">
+        {workspaceMentionState ? (
+          <div
+            ref={workspaceMenuRef}
+            id="composer-workspace-menu"
+            className="command-menu workspace-menu"
+            role="listbox"
+            aria-label="workspace files and folders"
+          >
+            {workspaceResources.length === 0 ? (
+              <div className="command-menu__empty">No matching files</div>
+            ) : (
+              workspaceResources.map((resource, index) => (
+                <button
+                  key={`${resource.kind}:${resource.absolutePath}`}
+                  id={`workspace-option-${String(index)}`}
+                  type="button"
+                  role="option"
+                  aria-selected={index === workspaceResourceIndex}
+                  data-resource-index={index}
+                  className={`command-menu__item${index === workspaceResourceIndex ? ' is-selected' : ''}`}
+                  onMouseEnter={() => setWorkspaceResourceIndex(index)}
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                    selectWorkspaceResource(resource)
+                  }}
+                >
+                  <span className="command-menu__name">@{resource.path}</span>
+                  <span className="command-menu__source">{resource.kind}</span>
+                </button>
+              ))
+            )}
+          </div>
+        ) : null}
+
+        {commandState.open && !workspaceMentionState ? (
+          <div
+            ref={commandMenuRef}
+            id="composer-command-menu"
+            className="command-menu"
+            role="listbox"
+            aria-label="commands"
+          >
             {filteredCommands.length === 0 ? (
               <div className="command-menu__empty">No commands</div>
             ) : (
               filteredCommands.map((cmd, idx) => (
                 <button
                   key={cmd.name}
+                  id={`command-option-${String(idx)}`}
                   type="button"
+                  role="option"
+                  aria-selected={idx === commandIndex}
+                  data-command-index={idx}
                   className={`command-menu__item${idx === commandIndex ? ' is-selected' : ''}`}
                   onMouseEnter={() => setCommandIndex(idx)}
                   onMouseDown={(e) => {
@@ -2739,6 +3766,7 @@ export default function App() {
                 >
                   <span className="command-menu__name">{cmd.name}</span>
                   <span className="command-menu__hint">{cmd.hint}</span>
+                  {cmd.source ? <span className="command-menu__source">{cmd.source}</span> : null}
                 </button>
               ))
             )}
@@ -2766,11 +3794,7 @@ export default function App() {
           <select
             className="composer-chip composer-chip--depth"
             value={selectedThinkingOption}
-            onChange={(e) => {
-              const next = toThinkingSelection(e.target.value)
-              setThinkingEnabled(next.enabled)
-              setThinkingVariant(next.variant)
-            }}
+            onChange={(e) => selectThinkingOption(e.target.value)}
             aria-label="thinking depth"
             disabled={thinkingOptions.length <= 1}
           >
@@ -2781,6 +3805,8 @@ export default function App() {
             ))}
           </select>
 
+          {contextUsage ? <ContextUsageIndicator usage={contextUsage.usage} contextWindow={contextUsage.contextWindow} /> : null}
+
           <button
             type="button"
             className={`composer-stack__send${isRunning ? ' composer-stack__send--running' : ''}`}
@@ -2790,9 +3816,13 @@ export default function App() {
             title={isRunning ? 'Stop' : 'Send'}
           >
             {isRunning ? (
-              <span className="composer-stack__stop-icon" aria-hidden="true" />
+              <span className="composer-stack__stop-icon" aria-hidden="true">
+                <Square size={11} fill="currentColor" strokeWidth={0} />
+              </span>
             ) : (
-              <span className="composer-stack__send-arrow" aria-hidden="true">↑</span>
+              <span className="composer-stack__send-arrow" aria-hidden="true">
+                <ArrowUp size={19} strokeWidth={2.4} />
+              </span>
             )}
           </button>
         </div>
@@ -2820,6 +3850,35 @@ export default function App() {
         loading={timelineLoading}
         error={timelineError}
         onClose={() => setTimelineDialogOpen(false)}
+      />
+
+      <ResourceDialog
+        kind={resourceDialogKind}
+        mcpServers={composerMcpServers}
+        skills={composerSkills}
+        agents={agents}
+        thinkingOptions={thinkingOptions}
+        selectedAgent={selectedAgent}
+        selectedThinking={selectedThinkingOption}
+        pendingMcpTargets={pendingMcpTargets}
+        refreshing={refreshingResources}
+        mcpError={mcpError}
+        onToggleMcp={toggleMcpServer}
+        onSelectSkill={(skill) => {
+          setComposerValue(`Use the "${skill.name}" skill to `)
+          setResourceDialogKind(null)
+          window.requestAnimationFrame(() => composerRef.current?.focus())
+        }}
+        onSelectAgent={(agent) => {
+          setSelectedAgent(agent)
+          setResourceDialogKind(null)
+        }}
+        onSelectThinking={(value) => {
+          selectThinkingOption(value)
+          setResourceDialogKind(null)
+        }}
+        onRefresh={requestComposerResources}
+        onClose={() => setResourceDialogKind(null)}
       />
 
         <SessionDialog
