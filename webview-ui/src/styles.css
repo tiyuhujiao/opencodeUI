@@ -378,6 +378,41 @@ body {
   line-height: 1;
 }
 
+.language-selector {
+  height: 1.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.18rem;
+  padding: 0 0.18rem 0 0.35rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ui-text-muted);
+}
+
+.language-selector:hover,
+.language-selector:focus-within {
+  background: var(--ui-button-hover-bg);
+  color: var(--ui-text);
+}
+
+.language-selector select {
+  width: 3.85rem;
+  height: 1.5rem;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.68rem;
+  cursor: pointer;
+}
+
+.language-selector option {
+  background: var(--ui-menu-bg);
+  color: var(--ui-text);
+}
+
 .topbar__session {
   display: flex;
   align-items: center;
@@ -390,6 +425,27 @@ body {
   display: flex;
   gap: 0.5rem;
   align-items: center;
+}
+
+.run-activity-slot {
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: 0 0 1.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.run-activity-slot.is-empty {
+  visibility: hidden;
+}
+
+.run-activity-slot .run-indicator {
+  width: 1.2rem;
+  height: 1.2rem;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
 }
 
 .topbar__actions button {
@@ -3330,7 +3386,7 @@ summary:focus-visible {
 }
 
 .transcript__run-spacer {
-  min-height: calc(100% - 3rem);
+  height: 0;
   pointer-events: none;
 }
 

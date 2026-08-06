@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { ModelSummary } from '../../../src/shared/protocol'
+import { useI18n } from '../i18n'
 
 type ModelPickerProps = {
   models: ModelSummary[]
@@ -13,6 +14,7 @@ const ROW_HEIGHT = 32
 const VIEWPORT_HEIGHT = 192
 
 export function ModelPicker({ models, selectedModel, onSelect, loading, error }: ModelPickerProps) {
+  const { t } = useI18n()
   const [query, setQuery] = useState('')
   const [scrollTop, setScrollTop] = useState(0)
 
@@ -31,17 +33,17 @@ export function ModelPicker({ models, selectedModel, onSelect, loading, error }:
   const visible = filtered.slice(startIndex, endIndex)
 
   return (
-    <section className="picker" aria-label="model picker">
+    <section className="picker" aria-label={t('Model picker')}>
       <header className="picker__header">
-        <h3>Model</h3>
-        {loading ? <span>Loading…</span> : null}
+        <h3>{t('Model')}</h3>
+        {loading ? <span>{t('Loading...')}</span> : null}
       </header>
 
       <input
         className="picker__search"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
-        placeholder="搜索 model"
+        placeholder={t('Search models')}
       />
 
       {error ? <p className="error-line">{error}</p> : null}

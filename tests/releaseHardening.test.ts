@@ -20,6 +20,7 @@ describe('release hardening', () => {
     expect(ci).toContain('npm run package');
     expect(vscodeIgnore).toContain('out/test/**');
     expect(vscodeIgnore).toContain('out/**/*.map');
+    expect(vscodeIgnore).toContain('out/**/*.d.ts');
   });
 
   it('注册本地诊断输出通道命令', () => {

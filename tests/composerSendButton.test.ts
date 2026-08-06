@@ -13,7 +13,7 @@ describe('composer send button', () => {
     expect(source).toContain("if (commandState.open) {");
     expect(source).toContain('runCommand(selected?.name ?? commandState.query, commandState.args)');
     expect(source).toContain('disabled={!isRunning && (composerValue.trim().length === 0 || (!commandState.open && (!selectedModel || !selectedAgent)))}');
-    expect(source).toContain("aria-label={isRunning ? 'stop' : 'send'}");
+    expect(source).toContain("aria-label={isRunning ? t('Stop') : t('Send')}");
     expect(source).toContain('className="composer-stack__send-arrow"');
     expect(source).toContain('className="composer-stack__stop-icon"');
   });

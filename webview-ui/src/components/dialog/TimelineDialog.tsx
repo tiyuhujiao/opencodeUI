@@ -1,4 +1,5 @@
 import type { SessionTimelineItem } from '../../../../src/shared/protocol'
+import { useI18n } from '../../i18n'
 
 type TimelineDialogProps = {
   open: boolean
@@ -9,11 +10,11 @@ type TimelineDialogProps = {
   onClose: () => void
 }
 
-function formatWhen(value: number): string {
+function formatWhen(value: number, locale: string, unknownLabel: string): string {
   if (!Number.isFinite(value) || value <= 0) {
-    return 'Unknown time'
+    return unknownLabel
   }
-  return new Date(value).toLocaleString()
+  return new Date(value).toLocaleString(locale)
 }
 
 function clip(text: string, empty: string): string {
@@ -25,21 +26,22 @@ function clip(text: string, empty: string): string {
 }
 
 export function TimelineDialog({ open, items, revertMessageId, loading, error, onClose }: TimelineDialogProps) {
+  const { language, t } = useI18n()
   if (!open) {
     return null
   }
 
   return (
-    <div className="overlay" role="dialog" aria-modal="true" aria-label="timeline dialog">
-      <button type="button" className="overlay__backdrop" onClick={onClose} aria-label="close" />
+    <div className="overlay" role="dialog" aria-modal="true" aria-label={t('Session Timeline')}>
+      <button type="button" className="overlay__backdrop" onClick={onClose} aria-label={t('Close')} />
       <div className="dialog dialog--wide">
         <header className="dialog__header">
-          <div className="dialog__title">Session Timeline</div>
+          <div className="dialog__title">{t('Session Timeline')}</div>
         </header>
 
-        {loading ? <div className="dialog__empty">Loading timeline…</div> : null}
-        {error ? <div className="dialog__error">{error}</div> : null}
-        {!loading && !error && items.length === 0 ? <div className="dialog__empty">No timeline yet</div> : null}
+        {loading ? <div className="dialog__empty">{t('Loading timeline...')}</div> : null}
+        {error ? <div className="dialog__error">{t(error)}</div> : null}
+        {!loading && !error && items.length === 0 ? <div className="dialog__empty">{t('No timeline yet')}</div> : null}
 
         {!loading && !error ? (
           <ul className="timeline-list">
@@ -52,13 +54,13 @@ export function TimelineDialog({ open, items, revertMessageId, loading, error, o
                 >
                   <div className="timeline-item__head">
                     <div className="timeline-item__index">#{index + 1}</div>
-                    <div className="timeline-item__time">{formatWhen(item.created)}</div>
-                    {isReverted ? <div className="timeline-item__badge">Undo here</div> : null}
+                    <div className="timeline-item__time">{formatWhen(item.created, language, t('Unknown time'))}</div>
+                    {isReverted ? <div className="timeline-item__badge">{t('Undo here')}</div> : null}
                   </div>
-                  <div className="timeline-item__user">{clip(item.text, 'Empty user turn')}</div>
-                  <div className="timeline-item__assistant">{clip(item.assistantText, 'No assistant text')}</div>
+                  <div className="timeline-item__user">{clip(item.text, t('Empty user turn'))}</div>
+                  <div className="timeline-item__assistant">{clip(item.assistantText, t('No assistant text'))}</div>
                   <div className="timeline-item__meta">
-                    tools {item.toolCount} · thinking {item.reasoningCount} · steps {item.stepCount}
+                    {t('tools')} {item.toolCount} · {t('thinking')} {item.reasoningCount} · {t('steps')} {item.stepCount}
                   </div>
                 </li>
               )

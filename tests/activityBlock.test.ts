@@ -33,20 +33,21 @@ describe('transcript activity block', () => {
     expect(source).toContain('const workDurationLabel = usePrefinalWorkDuration(items, isStreamingBubble)');
     expect(source).toContain('function ActivityBlock({');
     expect(source).toContain('const [open, setOpen] = useState(false)');
-    expect(source).toContain('const summary = getActivitySummary(entries)');
+    expect(source).toContain('const summary = getActivitySummary(entries, t)');
     expect(source).toContain('aria-expanded={open}');
     expect(source).toContain('className="activity-block__summary"');
     expect(source).toContain('className="activity-block__current"');
     expect(source).toContain("md-body${item.isFinalAnswer && !options.insidePrefinal ? ' md-body--final-answer' : ''}");
     expect(source).toContain('function markFinalAnswerItem(items: MessageRenderItem[]): MessageRenderItem[]');
     expect(source).toContain('function PrefinalWorkBlock({');
-    expect(source).toContain("const title = durationLabel ? `Worked for ${durationLabel}` : 'Worked before final answer'");
+    expect(source).toContain("t('Worked for {duration}', { duration: durationLabel })");
+    expect(source).toContain("t('Worked before final answer')");
     expect(source).toContain('function usePrefinalWorkDuration(items: MessageRenderItem[], isStreamingBubble: boolean)');
     expect(source).toContain('const candidateFinalStarted = isStreamingBubble && isLastItemTextWithPriorWork(items)');
     expect(source).toContain('candidateFinalStartedAtRef.current ?? Date.now()');
-    expect(source).toContain('Subtask: ${summarizeActivityText(activeTask.title || activeTask.summary)}');
-    expect(source).toContain('Tool: ${summarizeActivityText(latestTool.title || latestTool.summary)}');
-    expect(source).toContain('Thinking ${summarizeActivityText(latestThinking.part.text)}');
+    expect(source).toContain("${t('Subtask')}: ${summarizeActivityText(activeTask.title || activeTask.summary)}");
+    expect(source).toContain("${t('Tool')}: ${summarizeActivityText(latestTool.title || latestTool.summary)}");
+    expect(source).toContain("${t('Thinking')} ${summarizeActivityText(latestThinking.part.text)}");
     expect(source).not.toContain('activity-block__meta');
     expect(source).not.toContain('prefinal-work__meta');
     expect(source).not.toContain('function getPrefinalWorkSummary');
@@ -70,7 +71,7 @@ describe('transcript activity block', () => {
     const styles = readFileSync(join(root, 'webview-ui/src/styles.css'), 'utf8');
 
     expect(source).toContain('<details className="activity-thinking" open onToggle={onUserToggle}>');
-    expect(source).toContain('<summary className="activity-thinking__summary">Thinking</summary>');
+    expect(source).toContain('<summary className="activity-thinking__summary">{t(\'Thinking\')}</summary>');
     expect(source).toContain('const isLive = isCurrent && summary.isLive');
     expect(source).toContain('activity-block--active');
     expect(styles).toContain('.activity-block');

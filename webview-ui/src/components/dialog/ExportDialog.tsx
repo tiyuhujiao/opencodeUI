@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { FileText, X } from 'lucide-react'
+import { useI18n } from '../../i18n'
 
 export type SessionExportOptions = {
   filename: string
@@ -19,11 +20,12 @@ type ExportDialogProps = {
 }
 
 export function ExportDialog({ open, defaultFilename, busy, error, onClose, onConfirm }: ExportDialogProps) {
+  const { t } = useI18n()
   const filenameRef = useRef<HTMLInputElement | null>(null)
   const [filename, setFilename] = useState(defaultFilename)
   const [includeThinking, setIncludeThinking] = useState(true)
-  const [includeToolDetails, setIncludeToolDetails] = useState(false)
-  const [includeAssistantMetadata, setIncludeAssistantMetadata] = useState(false)
+  const [includeToolDetails, setIncludeToolDetails] = useState(true)
+  const [includeAssistantMetadata, setIncludeAssistantMetadata] = useState(true)
   const [openWithoutSaving, setOpenWithoutSaving] = useState(false)
 
   useEffect(() => {
@@ -32,8 +34,8 @@ export function ExportDialog({ open, defaultFilename, busy, error, onClose, onCo
     }
     setFilename(defaultFilename)
     setIncludeThinking(true)
-    setIncludeToolDetails(false)
-    setIncludeAssistantMetadata(false)
+    setIncludeToolDetails(true)
+    setIncludeAssistantMetadata(true)
     setOpenWithoutSaving(false)
     window.requestAnimationFrame(() => filenameRef.current?.focus())
   }, [defaultFilename, open])
@@ -70,11 +72,11 @@ export function ExportDialog({ open, defaultFilename, busy, error, onClose, onCo
           <div className="export-dialog__heading">
             <span className="export-dialog__icon" aria-hidden="true"><FileText size={16} /></span>
             <div>
-              <h2 id="export-dialog-title">Export session</h2>
-              <p>Markdown transcript</p>
+              <h2 id="export-dialog-title">{t('Export session')}</h2>
+              <p>{t('Markdown transcript')}</p>
             </div>
           </div>
-          <button type="button" className="export-dialog__close" onClick={onClose} disabled={busy} aria-label="Close export dialog" title="Close">
+          <button type="button" className="export-dialog__close" onClick={onClose} disabled={busy} aria-label={t('Close export dialog')} title={t('Close')}>
             <X size={16} aria-hidden="true" />
           </button>
         </header>
@@ -87,7 +89,7 @@ export function ExportDialog({ open, defaultFilename, busy, error, onClose, onCo
           onConfirm({ filename: filename.trim(), includeThinking, includeToolDetails, includeAssistantMetadata, openWithoutSaving })
         }}>
           <label className="settings-field" htmlFor="export-filename">
-            <span className="settings-field__label">Filename</span>
+            <span className="settings-field__label">{t('Filename')}</span>
             <input
               ref={filenameRef}
               id="export-filename"
@@ -100,19 +102,19 @@ export function ExportDialog({ open, defaultFilename, busy, error, onClose, onCo
           </label>
 
           <fieldset className="export-dialog__options">
-            <legend className="export-dialog__options-title">Export options</legend>
+            <legend className="export-dialog__options-title">{t('Export options')}</legend>
             <ExportOption checked={includeThinking} onChange={setIncludeThinking} label="Include thinking" disabled={busy} />
             <ExportOption checked={includeToolDetails} onChange={setIncludeToolDetails} label="Include tool details" disabled={busy} />
             <ExportOption checked={includeAssistantMetadata} onChange={setIncludeAssistantMetadata} label="Include assistant metadata" disabled={busy} />
             <ExportOption checked={openWithoutSaving} onChange={setOpenWithoutSaving} label="Open without saving" disabled={busy} />
           </fieldset>
 
-          {error ? <p className="export-dialog__error" role="alert">{error}</p> : null}
+          {error ? <p className="export-dialog__error" role="alert">{t(error)}</p> : null}
 
           <footer className="export-dialog__actions">
-            <button type="button" className="button-secondary" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="button" className="button-secondary" onClick={onClose} disabled={busy}>{t('Cancel')}</button>
             <button type="submit" className="button-primary" disabled={!canSubmit || busy}>
-              {busy ? 'Exporting…' : openWithoutSaving ? 'Open' : 'Export'}
+              {busy ? t('Exporting') : openWithoutSaving ? t('Open') : t('Export')}
             </button>
           </footer>
         </form>
@@ -122,10 +124,11 @@ export function ExportDialog({ open, defaultFilename, busy, error, onClose, onCo
 }
 
 function ExportOption({ checked, onChange, label, disabled }: { checked: boolean; onChange: (value: boolean) => void; label: string; disabled: boolean }) {
+  const { t } = useI18n()
   return (
     <label className="export-option">
       <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} disabled={disabled} />
-      <span>{label}</span>
+      <span>{t(label)}</span>
     </label>
   )
 }

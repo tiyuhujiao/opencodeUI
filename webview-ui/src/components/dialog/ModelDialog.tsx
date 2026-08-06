@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
 import type { ModelSummary, ProviderSummary } from '../../../../src/shared/protocol'
+import { useI18n } from '../../i18n'
 
 type ModelDialogProps = {
   open: boolean
@@ -29,6 +30,7 @@ export function ModelDialog({
   onSelectModel,
   onClose
 }: ModelDialogProps) {
+  const { t } = useI18n()
   const [selectedIndex, setSelectedIndex] = useState(0)
   const listRef = useRef<HTMLDivElement | null>(null)
 
@@ -119,11 +121,11 @@ export function ModelDialog({
   const selectedProvider = providers[providerIndex]
 
   return (
-    <div className="overlay" role="dialog" aria-modal="true" aria-label="model dialog">
-      <button type="button" className="overlay__backdrop" onClick={onClose} aria-label="close" />
+    <div className="overlay" role="dialog" aria-modal="true" aria-label={t('Select Model')}>
+      <button type="button" className="overlay__backdrop" onClick={onClose} aria-label={t('Close')} />
       <div className="dialog">
         <header className="dialog__header">
-          <div className="dialog__title">Select Model</div>
+          <div className="dialog__title">{t('Select Model')}</div>
           <button
             type="button"
             className="dialog__secondary"
@@ -131,18 +133,18 @@ export function ModelDialog({
             disabled={loadingModels || loadingProviders}
           >
             <RefreshCw size={13} aria-hidden="true" />
-            {loadingModels || loadingProviders ? 'Refreshing…' : 'Refresh'}
+            {loadingModels || loadingProviders ? t('Refreshing') : t('Refresh')}
           </button>
         </header>
 
         <div className="dialog__row">
-          <div className="dialog__label">Provider</div>
+          <div className="dialog__label">{t('Provider')}</div>
           <div className="dialog__value">
             <select
               className="dialog__select"
               value={selectedProviderId}
               onChange={(event) => setSelectedProviderId(event.target.value)}
-              aria-label="provider"
+              aria-label={t('Provider')}
             >
               {providers.map((provider) => (
                 <option key={provider.id} value={provider.id}>
@@ -153,14 +155,14 @@ export function ModelDialog({
           </div>
         </div>
 
-        {modelsError ? <div className="dialog__error">{modelsError}</div> : null}
-        {loadingModels ? <div className="dialog__empty">Loading models…</div> : null}
+        {modelsError ? <div className="dialog__error">{t(modelsError)}</div> : null}
+        {loadingModels ? <div className="dialog__empty">{t('Loading models...')}</div> : null}
 
         {!loadingModels && models.length === 0 && !modelsError ? (
-          <div className="dialog__empty">No models</div>
+          <div className="dialog__empty">{t('No models')}</div>
         ) : null}
 
-        <div className="dialog__list" ref={listRef} role="listbox" aria-label="models">
+        <div className="dialog__list" ref={listRef} role="listbox" aria-label={t('Models')}>
           {models.map((model, index) => {
             const selected = index === selectedIndex
             return (

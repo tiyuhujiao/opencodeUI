@@ -181,6 +181,28 @@ describe('webview request protocol guards', () => {
     })).toBe(false);
   });
 
+  it('仅打开 Markdown 时允许空文件名，保存到磁盘时仍要求文件名', () => {
+    const basePayload = {
+      sessionId: 'ses_123',
+      filename: '',
+      includeThinking: true,
+      includeToolDetails: true,
+      includeAssistantMetadata: true
+    };
+
+    expect(isWebviewRequestMessage({
+      type: 'session.export.markdown',
+      requestId: 'export-open-1',
+      payload: { ...basePayload, openWithoutSaving: true }
+    })).toBe(true);
+
+    expect(isWebviewRequestMessage({
+      type: 'session.export.markdown',
+      requestId: 'export-save-1',
+      payload: { ...basePayload, openWithoutSaving: false }
+    })).toBe(false);
+  });
+
   it('允许问题回复和拒绝请求', () => {
     expect(isWebviewRequestMessage({
       type: 'question.reply',

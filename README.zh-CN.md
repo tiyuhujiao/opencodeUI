@@ -1,168 +1,71 @@
 # opencode-ui
 
-语言：[English](./README.md) | 简体中文
+[English](./README.md) | 简体中文
 
-`opencode-ui` 是一个适用于 VS Code 兼容 IDE 的扩展，用来把 OpenCode 聊天界面带到 IDE 侧边栏中。它会连接当前扩展宿主环境里的 `opencode` CLI，按需启动 `opencode serve`，并在 React/Vite Webview 中展示会话、流式回答、工具调用、权限确认、模型、agent、todo 和图片附件。
+[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/tiyuhujiao.opencode-ui-vscode?label=VS%20Code%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=tiyuhujiao.opencode-ui-vscode)
+[![GitHub release](https://img.shields.io/github/v/release/tiyuhujiao/opencodeUI)](https://github.com/tiyuhujiao/opencodeUI/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](./LICENSE)
 
-该扩展面向 VS Code，也适用于 Cursor 等兼容 IDE。
+OpenCode 很强大，但使用它不应该意味着反复切换编辑器、终端和配置文件。我们设计 `opencode-ui`，是希望在 VS Code 中提供一个清晰、顺手的可视化界面，让对话、工具、模型选择与代码改动都留在工作发生的地方。
 
-## 预览
+`1.0.0` 对之前的扩展进行了彻底的设计与重构。界面更安静，常用操作更直接，也把更多 OpenCode 能力自然地带进了编辑器，同时仍然以 OpenCode CLI 作为可靠的运行核心。
 
-![opencode-ui 侧边栏聊天界面](./docs/images/opencode-ui-chat.png)
+## 界面预览
 
-| Todo 规划面板 | Thinking 详情 |
+![在 VS Code 侧边栏中运行 OpenCode](./docs/images/opencode-ui-preview.png)
+
+## 1.0.0 的重点更新
+
+### 快捷自定义供应商
+
+你可以直接在 VS Code 中连接内置供应商，或者快速创建自己的供应商。可视化编辑器支持多个模型、思考强度、上下文与最大输出、价格、headers、凭据和上游模型拉取；需要更细致控制时，也保留了完整的高级配置。
+
+| 浏览和管理供应商 | 快速创建自定义供应商 |
 | --- | --- |
-| ![opencode-ui Todo 面板](./docs/images/opencode-ui-models.png) | ![opencode-ui Thinking 详情](./docs/images/opencode-ui-diagnostics.png) |
+| ![带连接状态的供应商列表](./docs/images/provider-list.png) | ![快捷自定义供应商编辑器](./docs/images/provider-quick-setup.png) |
 
-## 功能
+### VS Code Inline Diff
 
-- 在 IDE Activity Bar 中提供 OpenCode 侧边栏聊天界面。
-- 自动启动 `127.0.0.1` 上的 `opencode serve`，优先使用 `4096` 端口，冲突时自动回退到空闲端口。
-- 自动在 Windows、Linux、WSL、Remote-SSH 等常见环境中发现 `opencode` 可执行文件。
-- 支持会话列表、切换、导出、删除、时间线、撤销和重做。
-- 支持 provider、model、agent 选择和刷新。
-- 支持文本、reasoning、工具、子任务、todo、权限请求和问题请求的流式 transcript 展示。
-- 支持图片/文件 prompt，并根据当前宿主环境归一化路径。
-- 提供诊断浮层和 `/debug`，可自检 sessions、models、agents 与请求日志。
+OpenCode 修改代码后，可以直接在编辑器里查看 inline diff。新增和删除内容一目了然，并且可以按区块、按文件或整体接受与拒绝，不必离开当前工作区。
 
-## 环境要求
+![在 VS Code 中审阅 OpenCode inline diff](./docs/images/inline-diff.png)
 
-- VS Code 兼容宿主，扩展 API `>=1.105.0`。
-- 开发环境需要 Node.js `>=20.0.0` 和 npm `>=10.0.0`。
-- `opencode >=1.15.10`，并且必须安装在扩展实际运行的宿主环境中。
+### 中英文双语
 
-检查 CLI 版本：
+界面可以随时在 English 和简体中文之间切换。设置、提示、弹窗与状态反馈都会跟随语言选择，同时 `Thinking`、`Tools` 等熟悉的技术术语保持清晰一致。
 
-```powershell
+## 还可以做什么
+
+- 在 VS Code 侧边栏与 OpenCode 对话，查看流式回答、`Thinking`、工具调用、子任务、todo、权限与问题请求。
+- 不必逐项手写配置，即可创建和管理供应商与模型。
+- 在接受代码改动前，通过 inline diff 完成审阅。
+- 管理会话、历史、导出、撤销与重做，并使用文件、图片、MCP、skills 和 agents。
+- 支持 Windows、Linux、Remote-WSL 与 Remote-SSH Linux，也可用于 Cursor 等兼容 VS Code 的 IDE。
+
+## 使用前提
+
+请先在 VS Code 扩展实际运行的本机或远端环境中安装 [OpenCode CLI](https://opencode.ai/)：
+
+```bash
 opencode --version
 ```
 
-## 支持的宿主环境
+这是唯一必需的运行依赖。`opencode-ui` 会自动查找 CLI，并在需要时启动 `opencode serve`。
 
-| 宿主 | 状态 | 说明 |
-| --- | --- | --- |
-| Windows 本机 | 支持 | 可发现 npm、Volta、Scoop、Chocolatey、pnpm、Yarn、Bun、Mise、PATH 和常见用户目录中的 `.exe`、`.cmd`、`.bat`。 |
-| Linux 本机 | 支持 | 可发现 `~/.opencode/bin`、`~/.local/bin`、Bun、pnpm、Volta、Mise 等常见用户级安装目录。 |
-| Remote-WSL | 支持 | `opencode` 需要安装在 WSL 发行版内部，因为扩展宿主运行在那里。 |
-| Remote-SSH Linux | 支持 | `opencode` 需要安装在远端 Linux 机器上。 |
-| 通用 Linux 远端 | 支持 | 按 Linux 远端宿主处理。 |
-| macOS 或非 Linux 远端 | 暂不支持 | 扩展会提示不支持，并跳过 `opencode serve` 启动。 |
+## 安装
 
-如果安装位置比较特殊，可以手动指定：
+**从 VS Code 插件市场安装**
 
-```powershell
-$env:OPENCODE_BINARY = "C:\path\to\opencode.exe"
-```
+打开 VS Code 的扩展页面，搜索 **opencode-ui**，安装发布者为 **tiyuhujiao** 的扩展。也可以直接打开 [VS Code Marketplace 页面](https://marketplace.visualstudio.com/items?itemName=tiyuhujiao.opencode-ui-vscode)。
 
-Linux/WSL：
+**从 GitHub Releases 安装**
 
-```bash
-export OPENCODE_BINARY=/path/to/opencode
-```
+前往 [GitHub Releases](https://github.com/tiyuhujiao/opencodeUI/releases/latest) 下载最新的 `.vsix`，然后在 VS Code 中运行 **Extensions: Install from VSIX...** 即可。
 
-## 从源码安装
+## 反馈
 
-安装依赖：
-
-```bash
-npm ci
-npm --prefix webview-ui ci
-```
-
-构建和验证：
-
-```bash
-npm run check
-```
-
-打包 VSIX：
-
-```bash
-npm run package
-```
-
-安装到 VS Code：
-
-```bash
-code --install-extension vsix/opencode-ui-vscode-0.0.89.vsix --force
-```
-
-安装到 Cursor：
-
-```bash
-cursor --install-extension vsix/opencode-ui-vscode-0.0.89.vsix --force
-```
-
-如果版本号更新，请按当前 `package.json` 版本调整 VSIX 文件名。
-
-## 开发
-
-常用命令：
-
-```bash
-npm run build
-npm --prefix webview-ui run build
-npm run watch
-npm --prefix webview-ui run dev
-npm test
-npm run test:extension
-```
-
-提交 PR 或构建发布前的主要检查：
-
-```bash
-npm run check
-```
-
-如果改动涉及扩展激活或打包后的 IDE 行为，再运行：
-
-```bash
-npm run test:extension
-```
-
-## 仓库结构
-
-- `src/extension.ts` - 扩展激活、宿主识别、命令和侧边栏注册。
-- `src/bridge/` - `opencode` CLI 封装、serve 管理、兼容性检查和输出解析器。
-- `src/shared/protocol.ts` - Webview 与扩展之间的类型化消息协议。
-- `src/webview/SidebarProvider.ts` - VS Code、`opencode serve`、CLI helper 与 Webview 之间的桥接层。
-- `webview-ui/` - React/Vite Webview 应用。
-- `tests/` - Vitest 测试，覆盖解析器、宿主识别、serve 启动、运行流、UI 状态 helper 和回归场景。
-- `out/` 与 `media/` - VSIX 中包含的已生成运行产物。
-- `vsix/` - 本地打包输出目录，默认被 git 忽略；仓库 Release 中提供可下载的 VSIX。
-
-不要手工编辑 `out/` 或 `media/` 中的生成文件；请修改源码后执行 `npm run build`。
-
-## CI
-
-GitHub Actions 会在 push 和 pull request 时运行检查并打包 VSIX artifact：
-
-```bash
-npm run check
-npm run package
-```
-
-维护者可以在仓库 Secrets 中添加 `AZURE_CLIENT_ID` 和 `AZURE_TENANT_ID`，然后通过 `Publish Marketplace` workflow 发布 Marketplace 包。该 workflow 会在 GitHub Release 发布时自动运行，并使用 Release tag 作为 Marketplace 版本，例如发布 `v0.1.0` 时会同步发布 `0.1.0` 到插件市场；也可以手动运行并填写可选版本，未填写时回退到 `github-upload/release.json`。每次运行都会重新构建并验证项目，生成公开 VSIX，上传 artifact，通过 GitHub Actions OIDC 登录 Azure，并使用 `vsce --azure-credential --skip-duplicate` 发布到插件市场。
-
-## 反馈与 Issue
-
-欢迎大家提出 bug、宿主环境适配问题、UI 建议和新功能需求。可以通过 [GitHub Issues](https://github.com/tiyuhujiao/opencodeUI/issues) 反馈；如果是问题报告，建议附上宿主环境、IDE、`opencode --version` 和已脱敏的诊断信息，方便复现。
-
-## 常见问题
-
-如果侧边栏提示找不到 `opencode`：
-
-- 在扩展实际运行的同一个宿主环境中执行 `opencode --version`。
-- Remote-WSL 或 Remote-SSH 中，需要在远端环境安装 `opencode`，不能只装在 Windows 本机。
-- 如果安装目录不常见，设置 `OPENCODE_BINARY` 为绝对路径。
-- 打开侧边栏诊断浮层并运行 self-check。
-
-如果 `4096` 端口被占用，扩展会自动在其他空闲端口启动 `opencode serve`，并按宿主类型缓存该端口。
-
-## 发布说明
-
-发布说明可以通过 GitHub Releases 或 VSIX artifact 描述发布。
+欢迎大家提出想法、问题和界面建议，可以直接提交 [GitHub Issue](https://github.com/tiyuhujiao/opencodeUI/issues)，我们会继续把这个项目做得更顺手。若 `opencode-ui` 让你的 OpenCode 使用体验轻松了一点，也欢迎点亮一个 Star。
 
 ## 许可证
 
-MIT。详见 [`LICENSE`](./LICENSE)。
+MIT，详见 [LICENSE](./LICENSE)。

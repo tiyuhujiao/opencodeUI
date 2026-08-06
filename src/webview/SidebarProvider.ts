@@ -14,7 +14,10 @@ import {
 	sessionDelete,
 	sessionListJson,
 } from "../bridge/opencodeCli";
-import { ensureServeRunning } from "../bridge/serveManager";
+import {
+	ensureServeRunning,
+	restartServeForConfigChange,
+} from "../bridge/serveManager";
 import {
 	resolveOpencodeBinary,
 	withOpencodeBinInPath,
@@ -54,6 +57,10 @@ import {
 	type WorkspaceResourceSummary,
 	type ModelSummary,
 	type OpencodeCompatibility,
+	type ProviderSettingsDraft,
+	type ProviderAuthAuthorization,
+	type ProviderSettingsScope,
+	type ProviderSettingsSnapshot,
 	type RunStreamEvent,
 } from "../shared/protocol";
 import {
@@ -77,10 +84,28 @@ import {
 	formatSessionMarkdown,
 	resolveSessionExportPath,
 } from "../sessionMarkdown";
+import {
+	deleteProviderConfigDraft,
+	ensureProviderConfigFile,
+	providerConfigToDrafts,
+	readProviderConfigDocument,
+	saveProviderConfigDraft,
+	shouldDeleteStoredProviderCredential,
+	type ProviderSettingsPathOptions,
+} from "../providerSettings";
+import { fetchProviderUpstreamModels } from "../providerUpstreamModels";
+import {
+	mergeConfiguredCatalogEntries,
+	normalizeProviderCatalog,
+	resolveStoredCredentialProviderIds,
+	resolveStoredCredentialTypes,
+	type NormalizedProviderCatalog,
+} from "../providerCatalog";
 
 const SESSION_EXPORT_CACHE_TTL_MS = 8_000;
 const EMPTY_SESSION_EXPORT_CACHE_TTL_MS = 750;
 const MODELS_CACHE_TTL_MS = 15 * 60_000;
+const PROVIDER_SETTINGS_CATALOG_TTL_MS = 5 * 60_000;
 const TEMPFILE_MAX_BYTES = 10 * 1024 * 1024;
 const TEMPFILE_MAX_BASE64_CHARS = Math.ceil(TEMPFILE_MAX_BYTES / 3) * 4 + 4;
 const TEMPFILE_TTL_MS = 30 * 60_000;
@@ -115,6 +140,11 @@ export class SidebarProvider
 		string,
 		Promise<CachedModelEntry[]>
 	>();
+	private providerSettingsCatalogCache?: {
+		loadedAt: number;
+		catalog: NormalizedProviderCatalog;
+	};
+	private providerSettingsCatalogInFlight?: Promise<NormalizedProviderCatalog>;
 	private readonly tempFiles = new Map<string, NodeJS.Timeout>();
 	private readonly inlineDiff: InlineDiffController;
 	private readonly inlineDiffStateSubscription: vscode.Disposable;
@@ -462,6 +492,97 @@ export class SidebarProvider
 						message.payload.forceRefresh === true,
 					);
 					return;
+				case "provider.settings.get":
+					void this.handleProviderSettingsGetRequest(
+						webview,
+						message.requestId,
+						message.payload.scope,
+						message.payload.forceRefresh === true,
+					);
+					return;
+				case "provider.settings.models":
+					void this.handleProviderSettingsModelsRequest(
+						webview,
+						message.requestId,
+						message.payload.providerId,
+						message.payload.forceRefresh === true,
+					);
+					return;
+				case "provider.settings.upstreamModels":
+					void this.handleProviderSettingsUpstreamModelsRequest(
+						webview,
+						message.requestId,
+						message.payload.scope,
+						message.payload.draft,
+						message.payload.endpoint,
+					);
+					return;
+				case "provider.settings.save":
+					void this.handleProviderSettingsSaveRequest(
+						webview,
+						message.requestId,
+						message.payload.scope,
+						message.payload.revision,
+						message.payload.draft,
+					);
+					return;
+				case "provider.settings.delete":
+					void this.handleProviderSettingsDeleteRequest(
+						webview,
+						message.requestId,
+						message.payload.scope,
+						message.payload.revision,
+						message.payload.providerId,
+					);
+					return;
+				case "provider.settings.openConfig":
+					void this.handleProviderSettingsOpenConfigRequest(
+						webview,
+						message.requestId,
+						message.payload.scope,
+					);
+					return;
+				case "provider.auth.api":
+					void this.handleProviderAuthApiRequest(
+						webview,
+						message.requestId,
+						message.payload.providerId,
+						message.payload.key,
+						message.payload.metadata,
+					);
+					return;
+				case "provider.auth.oauth.authorize":
+					void this.handleProviderAuthOAuthAuthorizeRequest(
+						webview,
+						message.requestId,
+						message.payload.providerId,
+						message.payload.method,
+						message.payload.inputs,
+					);
+					return;
+				case "provider.auth.oauth.callback":
+					void this.handleProviderAuthOAuthCallbackRequest(
+						webview,
+						message.requestId,
+						message.payload.providerId,
+						message.payload.method,
+						message.payload.code,
+					);
+					return;
+				case "provider.auth.disconnect":
+					void this.handleProviderAuthDisconnectRequest(
+						webview,
+						message.requestId,
+						message.payload.providerId,
+					);
+					return;
+				case "provider.auth.openExternal":
+					void this.handleProviderAuthOpenExternalRequest(
+						webview,
+						message.requestId,
+						message.payload.url,
+					);
+					return;
 				case "agents.list":
 					void this.handleAgentsListRequest(webview, message.requestId);
 					return;
@@ -659,14 +780,27 @@ export class SidebarProvider
 		},
 	): Promise<void> {
 		try {
-			const [cachedExport, sessionInfo] = await Promise.all([
+			const [cachedExport, sessionInfo, providerCatalog] = await Promise.all([
 				this.getSessionExportData(payload.sessionId),
 				this.getSessionInfoForRead(payload.sessionId),
+				this.getProviderSettingsCatalog(false).catch(() => undefined),
 			]);
+			const modelNames = providerCatalog
+				? new Map(
+						[...providerCatalog.modelsByProvider].flatMap(
+							([providerId, models]) =>
+								models.map(
+									(model) =>
+										[`${providerId}/${model.id}`, model.name] as const,
+								),
+						),
+					)
+				: undefined;
 			const markdown = formatSessionMarkdown({
 				sessionId: payload.sessionId,
 				sessionInfo,
 				exportPayload: cachedExport.data,
+				modelNames,
 				options: {
 					includeThinking: payload.includeThinking,
 					includeToolDetails: payload.includeToolDetails,
@@ -1206,6 +1340,493 @@ export class SidebarProvider
 				`获取 models 失败（provider=${providerId}）。`,
 			);
 		}
+	}
+
+	private async handleProviderSettingsGetRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		scope: ProviderSettingsScope,
+		forceRefresh: boolean,
+	): Promise<void> {
+		try {
+			const snapshot = await this.buildProviderSettingsSnapshot(scope, forceRefresh);
+			this.respond(webview, {
+				type: "provider.settings.get.response",
+				requestId,
+				ok: true,
+				payload: snapshot,
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "读取 provider 配置失败。");
+		}
+	}
+
+	private async handleProviderSettingsModelsRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		providerId: string,
+		forceRefresh: boolean,
+	): Promise<void> {
+		try {
+			const catalog = await this.getProviderSettingsCatalog(forceRefresh);
+			this.respond(webview, {
+				type: "provider.settings.models.response",
+				requestId,
+				ok: true,
+				payload: {
+					providerId,
+					models: catalog.modelsByProvider.get(providerId) ?? [],
+				},
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "读取 provider 模型目录失败。");
+		}
+	}
+
+	private async handleProviderSettingsUpstreamModelsRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		scope: ProviderSettingsScope,
+		draft: ProviderSettingsDraft,
+		endpoint: string,
+	): Promise<void> {
+		try {
+			const result = await fetchProviderUpstreamModels(scope, draft, endpoint, {
+				...this.getProviderSettingsPathContext(),
+			});
+			this.respond(webview, {
+				type: "provider.settings.upstreamModels.response",
+				requestId,
+				ok: true,
+				payload: {
+					providerId: draft.id,
+					endpoint: result.endpoint,
+					models: result.models,
+				},
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "拉取上游模型失败。");
+		}
+	}
+
+	private async handleProviderSettingsSaveRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		scope: ProviderSettingsScope,
+		revision: string,
+		draft: ProviderSettingsDraft,
+	): Promise<void> {
+		try {
+			await saveProviderConfigDraft(
+				scope,
+				revision,
+				draft,
+				this.getProviderSettingsPathContext(),
+			);
+			try {
+				await this.syncProviderCredential(draft);
+			} catch (error) {
+				const detail = error instanceof Error ? error.message : String(error);
+				throw new Error(`配置文件已保存，但 credential 更新失败：${detail}`);
+			}
+			try {
+				await restartServeForConfigChange();
+			} catch (error) {
+				const detail = error instanceof Error ? error.message : String(error);
+				throw new Error(`配置文件已保存，但 OpenCode 重新载入配置失败：${detail}`);
+			}
+			this.invalidateProviderCaches();
+			const snapshot = await this.buildProviderSettingsSnapshot(scope, true);
+			this.respond(webview, {
+				type: "provider.settings.save.response",
+				requestId,
+				ok: true,
+				payload: snapshot,
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "保存 provider 配置失败。");
+		}
+	}
+
+	private async handleProviderSettingsDeleteRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		scope: ProviderSettingsScope,
+		revision: string,
+		providerId: string,
+	): Promise<void> {
+		try {
+			await deleteProviderConfigDraft(
+				scope,
+				revision,
+				providerId,
+				this.getProviderSettingsPathContext(),
+			);
+			await restartServeForConfigChange();
+			this.invalidateProviderCaches();
+			const snapshot = await this.buildProviderSettingsSnapshot(scope, true);
+			this.respond(webview, {
+				type: "provider.settings.delete.response",
+				requestId,
+				ok: true,
+				payload: snapshot,
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "删除 provider 配置失败。");
+		}
+	}
+
+	private async handleProviderSettingsOpenConfigRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		scope: ProviderSettingsScope,
+	): Promise<void> {
+		try {
+			const document = await ensureProviderConfigFile(
+				scope,
+				this.getProviderSettingsPathContext(),
+			);
+			const textDocument = await vscode.workspace.openTextDocument(
+				vscode.Uri.file(document.path),
+			);
+			await vscode.window.showTextDocument(textDocument, {
+				preview: false,
+				preserveFocus: false,
+			});
+			this.respond(webview, {
+				type: "provider.settings.openConfig.response",
+				requestId,
+				ok: true,
+				payload: { scope, path: document.path },
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "打开 provider 配置失败。");
+		}
+	}
+
+	private async handleProviderAuthApiRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		providerId: string,
+		key: string,
+		metadata: Record<string, string>,
+	): Promise<void> {
+		try {
+			const body = {
+				type: "api",
+				key,
+				...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+			};
+			await this.requestServeNoContent(`/auth/${encodeURIComponent(providerId)}`, {
+				method: "PUT",
+				body: JSON.stringify(body),
+				includeCwd: false,
+			});
+			this.invalidateProviderCaches();
+			this.respond(webview, {
+				type: "provider.auth.api.response",
+				requestId,
+				ok: true,
+				payload: { providerId },
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "保存 Provider API key 失败。");
+		}
+	}
+
+	private async handleProviderAuthOAuthAuthorizeRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		providerId: string,
+		method: number,
+		inputs: Record<string, string>,
+	): Promise<void> {
+		try {
+			const authorization = await this.requestServeJson<ProviderAuthAuthorization | null>(
+				`/provider/${encodeURIComponent(providerId)}/oauth/authorize`,
+				{
+					method: "POST",
+					body: JSON.stringify({ method, inputs }),
+				},
+			);
+			if (!authorization) {
+				throw new Error("OpenCode 未返回 OAuth 授权信息。");
+			}
+			await this.openProviderAuthUrl(authorization.url);
+			this.respond(webview, {
+				type: "provider.auth.oauth.authorize.response",
+				requestId,
+				ok: true,
+				payload: { providerId, method, authorization },
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "启动 Provider OAuth 登录失败。");
+		}
+	}
+
+	private async handleProviderAuthOAuthCallbackRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		providerId: string,
+		method: number,
+		code?: string,
+	): Promise<void> {
+		try {
+			await this.requestServeJson<boolean>(
+				`/provider/${encodeURIComponent(providerId)}/oauth/callback`,
+				{
+					method: "POST",
+					body: JSON.stringify({ method, ...(code ? { code } : {}) }),
+				},
+			);
+			this.invalidateProviderCaches();
+			this.respond(webview, {
+				type: "provider.auth.oauth.callback.response",
+				requestId,
+				ok: true,
+				payload: { providerId },
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "完成 Provider OAuth 登录失败。");
+		}
+	}
+
+	private async handleProviderAuthDisconnectRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		providerId: string,
+	): Promise<void> {
+		try {
+			await this.requestServeNoContent(`/auth/${encodeURIComponent(providerId)}`, {
+				method: "DELETE",
+				includeCwd: false,
+			});
+			this.invalidateProviderCaches();
+			this.respond(webview, {
+				type: "provider.auth.disconnect.response",
+				requestId,
+				ok: true,
+				payload: { providerId },
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "移除 Provider 登录凭据失败。");
+		}
+	}
+
+	private async handleProviderAuthOpenExternalRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		url: string,
+	): Promise<void> {
+		try {
+			await this.openProviderAuthUrl(url);
+			this.respond(webview, {
+				type: "provider.auth.openExternal.response",
+				requestId,
+				ok: true,
+				payload: { url },
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "打开 Provider 授权链接失败。");
+		}
+	}
+
+	private async openProviderAuthUrl(value: string): Promise<void> {
+		let url: URL;
+		try {
+			url = new URL(value);
+		} catch {
+			throw new Error("OpenCode 返回了无效的授权链接。");
+		}
+		if (url.protocol !== "https:" && url.protocol !== "http:") {
+			throw new Error("只允许打开 HTTP 或 HTTPS 授权链接。");
+		}
+		const opened = await vscode.env.openExternal(vscode.Uri.parse(url.toString(), true));
+		if (!opened) {
+			throw new Error("系统未能打开默认浏览器。");
+		}
+	}
+
+	private getProviderSettingsPathContext(): ProviderSettingsPathOptions {
+		return { workspaceFolder: this.getDefaultCwd() };
+	}
+
+	private async buildProviderSettingsSnapshot(
+		scope: ProviderSettingsScope,
+		forceRefresh: boolean,
+	): Promise<ProviderSettingsSnapshot> {
+		const [document, catalog, storedCredentials] = await Promise.all([
+			readProviderConfigDocument(scope, this.getProviderSettingsPathContext()),
+			this.getProviderSettingsCatalog(forceRefresh),
+			this.loadStoredProviderCredentials(),
+		]);
+		const providerIdentities = new Map(
+			catalog.entries.map((entry) => [entry.id, { id: entry.id, label: entry.label }]),
+		);
+		const configuredProviders = isRecord(document.config.provider)
+			? document.config.provider
+			: {};
+		for (const [id, value] of Object.entries(configuredProviders)) {
+			const provider = isRecord(value) ? value : undefined;
+			providerIdentities.set(id, {
+				id,
+				label: typeof provider?.name === "string" && provider.name.trim() ? provider.name : id,
+			});
+		}
+		const storedCredentialProviderIds = resolveStoredCredentialProviderIds(
+			storedCredentials,
+			[...providerIdentities.values()],
+		);
+		const storedCredentialTypes = resolveStoredCredentialTypes(
+			storedCredentials,
+			[...providerIdentities.values()],
+		);
+		const configured = providerConfigToDrafts(document.config, {
+			connectedProviderIds: catalog.connectedProviderIds,
+			storedCredentialProviderIds,
+			knownProviderIds: catalog.builtInProviderIds,
+		});
+		const catalogEntries = catalog.entries.map((entry) => ({
+			...entry,
+			credentialStored: storedCredentialProviderIds.has(entry.id),
+			credentialType: storedCredentialTypes.get(entry.id) ?? null,
+		}));
+		return {
+			scope,
+			path: document.path,
+			exists: document.exists,
+			revision: document.revision,
+			workspaceAvailable: document.workspaceAvailable,
+			customConfigPath: document.customConfigPath,
+			catalog: mergeConfiguredCatalogEntries(catalogEntries, configured),
+			configured,
+		};
+	}
+
+	private async loadStoredProviderCredentials(): Promise<ReturnType<typeof parseAuthList>> {
+		try {
+			const result = await authList({ cwd: this.getDefaultCwd(), timeoutMs: 10_000 });
+			return parseAuthList(result.stdout);
+		} catch {
+			return [];
+		}
+	}
+
+	private async getProviderSettingsCatalog(
+		forceRefresh: boolean,
+	): Promise<NormalizedProviderCatalog> {
+		if (forceRefresh) {
+			this.providerSettingsCatalogCache = undefined;
+		}
+		const cached = this.providerSettingsCatalogCache;
+		if (
+			!forceRefresh
+			&& cached
+			&& Date.now() - cached.loadedAt < PROVIDER_SETTINGS_CATALOG_TTL_MS
+		) {
+			return cached.catalog;
+		}
+		if (this.providerSettingsCatalogInFlight) {
+			return this.providerSettingsCatalogInFlight;
+		}
+
+		const task = this.loadProviderSettingsCatalog();
+		this.providerSettingsCatalogInFlight = task;
+		try {
+			const catalog = await task;
+			this.providerSettingsCatalogCache = { loadedAt: Date.now(), catalog };
+			return catalog;
+		} finally {
+			if (this.providerSettingsCatalogInFlight === task) {
+				this.providerSettingsCatalogInFlight = undefined;
+			}
+		}
+	}
+
+	private async loadProviderSettingsCatalog(): Promise<NormalizedProviderCatalog> {
+		try {
+			const [providerPayload, authResult] = await Promise.all([
+				this.requestServeJson<unknown>("/provider"),
+				this.requestServeJson<unknown>("/provider/auth", { includeCwd: false }).catch((error) => {
+					const message = error instanceof Error ? error.message : String(error);
+					logWarn(`provider auth methods unavailable: ${message}`);
+					return {};
+				}),
+			]);
+			return normalizeProviderCatalog(providerPayload, authResult);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			logWarn(`provider endpoint unavailable, falling back to CLI catalog: ${message}`);
+			return this.loadFallbackProviderSettingsCatalog();
+		}
+	}
+
+	private async loadFallbackProviderSettingsCatalog(): Promise<NormalizedProviderCatalog> {
+		const [models, authResult] = await Promise.all([
+			this.getAllModelsPayload(false),
+			authList({ cwd: this.getDefaultCwd() }).catch(() => undefined),
+		]);
+		const providers = new Map<string, Record<string, unknown>>();
+		for (const entry of models) {
+			const parsed = splitModel(entry.name);
+			const providerId = entry.providerID || parsed?.providerID;
+			const modelId = parsed?.modelID;
+			if (!providerId || !modelId) {
+				continue;
+			}
+			const provider = providers.get(providerId) ?? {
+				id: providerId,
+				name: providerId,
+				source: "cli",
+				models: {},
+			};
+			const providerModels = provider.models as Record<string, unknown>;
+			providerModels[modelId] = {
+				name: modelId,
+				reasoning: entry.supportsThinking === true,
+				variants: entry.variants
+					? Object.fromEntries(entry.variants.map((variant) => [variant, {}]))
+					: undefined,
+			};
+			providers.set(providerId, provider);
+		}
+		const authProviders = authResult ? parseAuthList(authResult.stdout) : [];
+		const authPayload = Object.fromEntries(
+			authProviders.map((provider) => [
+				provider.id,
+				[{ type: "api", label: "Configured credential" }],
+			]),
+		);
+		return normalizeProviderCatalog(
+			{
+				all: [...providers.values()],
+				connected: authProviders.map((provider) => provider.id),
+			},
+			authPayload,
+		);
+	}
+
+	private async syncProviderCredential(draft: ProviderSettingsDraft): Promise<void> {
+		const pathname = `/auth/${encodeURIComponent(draft.id)}`;
+		if (draft.credential.mode === "store" && draft.credential.value) {
+			await this.requestServeNoContent(pathname, {
+				method: "PUT",
+				body: JSON.stringify({ type: "api", key: draft.credential.value }),
+				includeCwd: false,
+			});
+			return;
+		}
+		if (shouldDeleteStoredProviderCredential(draft)) {
+			await this.requestServeNoContent(pathname, {
+				method: "DELETE",
+				includeCwd: false,
+			});
+		}
+	}
+
+	private invalidateProviderCaches(): void {
+		this.providerSettingsCatalogCache = undefined;
+		this.modelsCache.clear();
 	}
 
 	private async handleAgentsListRequest(

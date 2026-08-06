@@ -82,7 +82,7 @@ function formatSessionMarkdown(input) {
     }
     transcript += "\n---\n\n";
     for (const message of input.exportPayload.messages) {
-        const formatted = formatMessage(message.info, message.parts, input.options);
+        const formatted = formatMessage(message.info, message.parts, input.options, input.modelNames);
         if (!formatted) {
             continue;
         }
@@ -91,7 +91,7 @@ function formatSessionMarkdown(input) {
     }
     return transcript;
 }
-function formatMessage(info, parts, options) {
+function formatMessage(info, parts, options, modelNames) {
     const record = asRecord(info);
     const role = readString(record, "role");
     let result = "";
@@ -99,7 +99,7 @@ function formatMessage(info, parts, options) {
         result = "## User\n\n";
     }
     else if (role === "assistant") {
-        result = formatAssistantHeader(record, options.includeAssistantMetadata);
+        result = formatAssistantHeader(record, options.includeAssistantMetadata, modelNames);
     }
     else {
         return "";
@@ -109,16 +109,18 @@ function formatMessage(info, parts, options) {
     }
     return result;
 }
-function formatAssistantHeader(info, includeMetadata) {
+function formatAssistantHeader(info, includeMetadata, modelNames) {
     if (!includeMetadata) {
         return "## Assistant\n\n";
     }
     const agent = titleCase(readString(info, "agent") ?? "assistant");
     const providerId = readString(info, "providerID");
     const modelId = readString(info, "modelID");
-    const model = providerId && modelId
-        ? `${providerId}/${modelId}`
-        : modelId ?? providerId ?? "unknown model";
+    const modelKey = providerId && modelId ? `${providerId}/${modelId}` : undefined;
+    const model = (modelKey ? modelNames?.get(modelKey)?.trim() : undefined) ||
+        modelId ||
+        providerId ||
+        "unknown model";
     const time = asRecord(info?.time);
     const created = readFiniteNumber(time, "created");
     const completed = readFiniteNumber(time, "completed");
@@ -136,7 +138,7 @@ function formatPart(part, options) {
     }
     if (type === "reasoning") {
         const text = readString(record, "text");
-        return options.includeThinking && text
+        return options.includeThinking && text !== undefined
             ? `_Thinking:_\n\n${text}\n\n`
             : "";
     }
@@ -152,14 +154,14 @@ function formatPart(part, options) {
         return `${result}\n`;
     }
     const state = asRecord(record?.state);
-    if (state?.input !== undefined) {
+    if (state?.input) {
         result += `\n**Input:**\n\`\`\`json\n${stringifyJson(state.input)}\n\`\`\`\n`;
     }
     const status = readString(state, "status");
-    if (status === "completed" && state?.output !== undefined) {
+    if (status === "completed" && state?.output) {
         result += `\n**Output:**\n\`\`\`\n${stringifyBlock(state.output)}\n\`\`\`\n`;
     }
-    if (status === "error" && state?.error !== undefined) {
+    if (status === "error" && state?.error) {
         result += `\n**Error:**\n\`\`\`\n${stringifyBlock(state.error)}\n\`\`\`\n`;
     }
     return `${result}\n`;

@@ -4,6 +4,8 @@ webview-ui/**
 .github/**
 docs/**
 github-upload/**
+scripts/**
+.tmp/**
 .vscode-test/**
 .playwright-cli/**
 .vscode/**
@@ -23,5 +25,6 @@ vsix/**
 session-*.md
 out/test/**
 out/**/*.map
+out/**/*.d.ts
 media/**/*.map
 **/*.tsbuildinfo

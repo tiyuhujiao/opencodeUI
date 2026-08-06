@@ -2,10 +2,18 @@ import { describe, expect, it } from 'vitest';
 import {
   buildProviderSummaries,
   extractConfiguredProviderLabels,
+  parseAuthList,
   type AuthProviderEntry
 } from '../src/bridge/parsers';
 
 describe('buildProviderSummaries', () => {
+  it('解析 OpenCode 1.18 的项目符号并保留 credential 类型', () => {
+    expect(parseAuthList('\u001b[34m•\u001b[39m  CPA8317 \u001b[90mapi\u001b[39m\n●  OpenAI oauth')).toEqual([
+      { id: 'cpa8317', label: 'CPA8317', type: 'api' },
+      { id: 'openai', label: 'OpenAI', type: 'oauth' }
+    ]);
+  });
+
   it('只返回 models 中真实存在的 providerID', () => {
     const authProviders: AuthProviderEntry[] = [
       { id: 'openai', label: 'OpenAI' },

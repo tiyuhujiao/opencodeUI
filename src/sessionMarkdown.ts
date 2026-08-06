@@ -12,6 +12,7 @@ export type SessionMarkdownInput = {
 	sessionInfo?: unknown;
 	exportPayload: ExportPayload;
 	options: SessionMarkdownOptions;
+	modelNames?: ReadonlyMap<string, string>;
 };
 
 export function defaultSessionExportFilename(sessionId: string): string {
@@ -70,7 +71,12 @@ export function formatSessionMarkdown(input: SessionMarkdownInput): string {
 	transcript += "\n---\n\n";
 
 	for (const message of input.exportPayload.messages) {
-		const formatted = formatMessage(message.info, message.parts, input.options);
+		const formatted = formatMessage(
+			message.info,
+			message.parts,
+			input.options,
+			input.modelNames,
+		);
 		if (!formatted) {
 			continue;
 		}
@@ -85,6 +91,7 @@ function formatMessage(
 	info: unknown,
 	parts: unknown[],
 	options: SessionMarkdownOptions,
+	modelNames?: ReadonlyMap<string, string>,
 ): string {
 	const record = asRecord(info);
 	const role = readString(record, "role");
@@ -92,7 +99,11 @@ function formatMessage(
 	if (role === "user") {
 		result = "## User\n\n";
 	} else if (role === "assistant") {
-		result = formatAssistantHeader(record, options.includeAssistantMetadata);
+		result = formatAssistantHeader(
+			record,
+			options.includeAssistantMetadata,
+			modelNames,
+		);
 	} else {
 		return "";
 	}
@@ -106,6 +117,7 @@ function formatMessage(
 function formatAssistantHeader(
 	info: Record<string, unknown> | undefined,
 	includeMetadata: boolean,
+	modelNames?: ReadonlyMap<string, string>,
 ): string {
 	if (!includeMetadata) {
 		return "## Assistant\n\n";
@@ -114,10 +126,12 @@ function formatAssistantHeader(
 	const agent = titleCase(readString(info, "agent") ?? "assistant");
 	const providerId = readString(info, "providerID");
 	const modelId = readString(info, "modelID");
+	const modelKey = providerId && modelId ? `${providerId}/${modelId}` : undefined;
 	const model =
-		providerId && modelId
-			? `${providerId}/${modelId}`
-			: modelId ?? providerId ?? "unknown model";
+		(modelKey ? modelNames?.get(modelKey)?.trim() : undefined) ||
+		modelId ||
+		providerId ||
+		"unknown model";
 	const time = asRecord(info?.time);
 	const created = readFiniteNumber(time, "created");
 	const completed = readFiniteNumber(time, "completed");
@@ -137,7 +151,7 @@ function formatPart(part: unknown, options: SessionMarkdownOptions): string {
 	}
 	if (type === "reasoning") {
 		const text = readString(record, "text");
-		return options.includeThinking && text
+		return options.includeThinking && text !== undefined
 			? `_Thinking:_\n\n${text}\n\n`
 			: "";
 	}
@@ -156,14 +170,14 @@ function formatPart(part: unknown, options: SessionMarkdownOptions): string {
 	}
 
 	const state = asRecord(record?.state);
-	if (state?.input !== undefined) {
+	if (state?.input) {
 		result += `\n**Input:**\n\`\`\`json\n${stringifyJson(state.input)}\n\`\`\`\n`;
 	}
 	const status = readString(state, "status");
-	if (status === "completed" && state?.output !== undefined) {
+	if (status === "completed" && state?.output) {
 		result += `\n**Output:**\n\`\`\`\n${stringifyBlock(state.output)}\n\`\`\`\n`;
 	}
-	if (status === "error" && state?.error !== undefined) {
+	if (status === "error" && state?.error) {
 		result += `\n**Error:**\n\`\`\`\n${stringifyBlock(state.error)}\n\`\`\`\n`;
 	}
 	return `${result}\n`;

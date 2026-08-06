@@ -25,6 +25,7 @@ type MockServerScript =
 
 class FakeChildProcess {
   public exitCode: number | null = null;
+  public readonly kill = vi.fn(() => true);
   public readonly stderr = {
     on: vi.fn()
   };
@@ -245,6 +246,40 @@ describe('ensureServeRunning 端口策略', () => {
     expect(calledPorts).toEqual([5111, 4096]);
     expect(setLastPort).toHaveBeenCalledWith(4096);
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('provider 配置变化后启动全新 runtime，并让后续请求避开旧配置缓存', async () => {
+    vi.useFakeTimers();
+    const { serveManager, requestMock, createServerMock, spawnMock, setLastPort } = await setup(5111);
+    const calledPorts = configureHealthResponses(requestMock, {
+      5111: { type: 'status', statusCode: 200 },
+      5522: { type: 'status', statusCode: 200 }
+    });
+    configureNetServers(createServerMock, [{ type: 'listening', addressPort: 5522 }]);
+
+    const child = new FakeChildProcess();
+    spawnMock.mockReturnValue(child as never);
+
+    await expect(serveManager.ensureServeRunning()).resolves.toMatchObject({
+      port: 5111,
+      startedByManager: false
+    });
+
+    const restart = serveManager.restartServeForConfigChange();
+    await vi.advanceTimersByTimeAsync(350);
+    await expect(restart).resolves.toMatchObject({
+      port: 5522,
+      baseUrl: 'http://127.0.0.1:5522',
+      startedByManager: true
+    });
+
+    await expect(serveManager.ensureServeRunning()).resolves.toMatchObject({
+      port: 5522,
+      startedByManager: true
+    });
+    expect(calledPorts).toEqual([5111, 5522, 5522]);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(setLastPort).toHaveBeenLastCalledWith(5522);
   });
 
   it('lastPort/4096 都不可用时使用 free port 启动并持久化', async () => {

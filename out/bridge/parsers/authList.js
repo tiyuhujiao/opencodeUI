@@ -13,7 +13,7 @@ class AuthListParseError extends Error {
 exports.AuthListParseError = AuthListParseError;
 // `opencode auth list` is a human-formatted output (not JSON).
 // We parse provider names from lines like:
-//   [...m[...m●  OpenAI [90moauth
+//   [...m[...m•  OpenAI [90moauth
 //   ●  my8317 api
 function parseAuthList(stdout) {
     if (typeof stdout !== 'string') {
@@ -24,14 +24,16 @@ function parseAuthList(stdout) {
     const seen = new Set();
     for (const rawLine of lines) {
         const line = rawLine.trim();
-        if (!line.startsWith('●')) {
+        if (!/^[●•]\s+/.test(line)) {
             continue;
         }
-        const afterBullet = line.replace(/^●\s+/, '').trim();
+        const afterBullet = line.replace(/^[●•]\s+/, '').trim();
         if (!afterBullet) {
             continue;
         }
         // remove trailing type tags like "oauth" or "api"
+        const typeMatch = afterBullet.match(/\s+(oauth|api)\s*$/i);
+        const type = typeMatch?.[1].toLowerCase();
         const label = afterBullet.replace(/\s+(oauth|api)\s*$/i, '').trim();
         if (!label) {
             continue;
@@ -41,7 +43,7 @@ function parseAuthList(stdout) {
             continue;
         }
         seen.add(id);
-        providers.push({ id, label });
+        providers.push({ id, label, type });
     }
     if (providers.length === 0) {
         throw new AuthListParseError('NO_PROVIDERS', '未找到任何已配置的 provider（opencode auth list）。');

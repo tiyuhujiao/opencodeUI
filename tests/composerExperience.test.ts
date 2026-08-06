@@ -22,8 +22,8 @@ describe('Codex-like composer experience', () => {
     const styles = readFileSync(join(root, 'webview-ui/src/styles.css'), 'utf8');
 
     expect(source).toContain('width="12" height="12" viewBox="0 0 12 12"');
-    expect(source).toContain('<span>Context window:</span>');
-    expect(source).toContain('tokens used`}</span>');
+    expect(source).toContain("<span>{t('Context window')}:</span>");
+    expect(source).toContain("t('{used} / {total} tokens used'");
     expect(styles).toContain('.context-usage__tooltip');
   });
 

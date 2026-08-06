@@ -1,8 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { renderMarkdown } from '../markdown/renderMarkdown'
-import { computeAnchoredScrollTop } from '../transcriptScroll'
+import {
+  computeAnchoredScrollTop,
+  computeRunSpacerHeight,
+  interpolateFastScrollTop,
+  TURN_ANCHOR_SCROLL_DURATION_MS
+} from '../transcriptScroll'
+import { useI18n, type TranslationValues } from '../i18n'
 import type { TranscriptMessage, TranscriptPart, TranscriptPartTool } from '../../../src/shared/protocol'
+
+type Translate = (source: string, values?: TranslationValues) => string
 
 type TranscriptProps = {
   messages: TranscriptMessage[]
@@ -16,6 +24,17 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
   const autoScrollPausedRef = useRef(false)
   const scrollLockRef = useRef<{ top: number; until: number } | null>(null)
   const turnAnchorRef = useRef<HTMLElement | null>(null)
+  const runSpacerRef = useRef<HTMLDivElement | null>(null)
+  const anchorScrollFrameRef = useRef<number | null>(null)
+  const anchorScrollActiveRef = useRef(false)
+
+  const cancelAnchorScroll = useCallback(() => {
+    if (anchorScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(anchorScrollFrameRef.current)
+      anchorScrollFrameRef.current = null
+    }
+    anchorScrollActiveRef.current = false
+  }, [])
 
   const pauseAutoScrollForUserAction = useCallback(() => {
     const el = containerRef.current
@@ -23,6 +42,7 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
       return
     }
 
+    cancelAnchorScroll()
     autoScrollPausedRef.current = true
     scrollLockRef.current = { top: el.scrollTop, until: Date.now() + 450 }
 
@@ -32,9 +52,9 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
         el.scrollTop = lock.top
       }
     })
-  }, [])
+  }, [cancelAnchorScroll])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = containerRef.current
     if (!el) {
       return
@@ -44,6 +64,35 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
       const rows = el.querySelectorAll<HTMLElement>(':scope > .msg-row, :scope > .tool-group')
       const last = rows.item(rows.length - 1)
       return last ? last.offsetTop + last.offsetHeight : 0
+    }
+
+    const updateRunSpacerHeight = () => {
+      const anchor = turnAnchorRef.current
+      const spacer = runSpacerRef.current
+      if (!isRunning || !anchor || !spacer) {
+        return
+      }
+
+      const styles = window.getComputedStyle(el)
+      spacer.style.height = `${computeRunSpacerHeight({
+        clientHeight: el.clientHeight,
+        anchorHeight: anchor.offsetHeight,
+        rowGap: parseCssPixels(styles.rowGap),
+        paddingBottom: parseCssPixels(styles.paddingBottom)
+      })}px`
+    }
+
+    const anchoredScrollTop = () => {
+      const anchor = turnAnchorRef.current
+      if (!anchor || !el.contains(anchor)) {
+        return null
+      }
+      return computeAnchoredScrollTop({
+        anchorTop: anchor.offsetTop,
+        contentBottom: contentBottom(),
+        clientHeight: el.clientHeight,
+        maxScrollTop: Math.max(0, el.scrollHeight - el.clientHeight)
+      })
     }
 
     const scrollIfNeeded = () => {
@@ -60,18 +109,17 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
         return
       }
 
+      if (anchorScrollActiveRef.current) {
+        return
+      }
+
       if (isRunning) {
-        const anchor = turnAnchorRef.current
-        if (!anchor || !el.contains(anchor)) {
+        const target = anchoredScrollTop()
+        if (target === null) {
           el.scrollTop = el.scrollHeight
           return
         }
-        el.scrollTop = computeAnchoredScrollTop({
-          anchorTop: anchor.offsetTop,
-          contentBottom: contentBottom(),
-          clientHeight: el.clientHeight,
-          maxScrollTop: Math.max(0, el.scrollHeight - el.clientHeight)
-        })
+        el.scrollTop = target
         return
       }
 
@@ -81,14 +129,47 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
       }
     }
 
-    if (isRunning) {
-      window.requestAnimationFrame(() => {
-        const userRows = el.querySelectorAll<HTMLElement>(':scope > .msg-row--user')
-        turnAnchorRef.current = userRows.item(userRows.length - 1)
-        autoScrollPausedRef.current = false
-        scrollLockRef.current = null
+    const animateToTurnAnchor = () => {
+      const initialTarget = anchoredScrollTop()
+      if (initialTarget === null) {
         scrollIfNeeded()
-      })
+        return
+      }
+
+      const start = el.scrollTop
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      if (reduceMotion || Math.abs(initialTarget - start) < 0.5) {
+        el.scrollTop = initialTarget
+        return
+      }
+
+      const startedAt = window.performance.now()
+      anchorScrollActiveRef.current = true
+      const step = (now: number) => {
+        if (!anchorScrollActiveRef.current) {
+          return
+        }
+        const target = anchoredScrollTop() ?? initialTarget
+        const elapsed = now - startedAt
+        el.scrollTop = interpolateFastScrollTop(start, target, elapsed)
+        if (elapsed >= TURN_ANCHOR_SCROLL_DURATION_MS) {
+          anchorScrollFrameRef.current = null
+          anchorScrollActiveRef.current = false
+          scrollIfNeeded()
+          return
+        }
+        anchorScrollFrameRef.current = window.requestAnimationFrame(step)
+      }
+      anchorScrollFrameRef.current = window.requestAnimationFrame(step)
+    }
+
+    if (isRunning) {
+      const userRows = el.querySelectorAll<HTMLElement>(':scope > .msg-row--user')
+      turnAnchorRef.current = userRows.item(userRows.length - 1)
+      autoScrollPausedRef.current = false
+      scrollLockRef.current = null
+      updateRunSpacerHeight()
+      animateToTurnAnchor()
     } else {
       turnAnchorRef.current = null
       scrollIfNeeded()
@@ -103,6 +184,12 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
       childList: true,
       characterData: true
     })
+
+    const resizeObserver = new ResizeObserver(() => {
+      updateRunSpacerHeight()
+      scrollIfNeeded()
+    })
+    resizeObserver.observe(el)
 
     const onScroll = () => {
       if (!autoScrollPausedRef.current) {
@@ -119,10 +206,12 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
     el.addEventListener('scroll', onScroll)
 
     return () => {
+      cancelAnchorScroll()
       observer.disconnect()
+      resizeObserver.disconnect()
       el.removeEventListener('scroll', onScroll)
     }
-  }, [isRunning])
+  }, [cancelAnchorScroll, isRunning])
 
   const rendered = buildDisplayBlocks(messages)
 
@@ -133,10 +222,12 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
       aria-live="polite"
       ref={containerRef}
       onWheel={() => {
+        cancelAnchorScroll()
         autoScrollPausedRef.current = true
         scrollLockRef.current = null
       }}
       onTouchStart={() => {
+        cancelAnchorScroll()
         autoScrollPausedRef.current = true
         scrollLockRef.current = null
       }}
@@ -217,9 +308,14 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
           </div>
         )
       })}
-      {isRunning ? <div className="transcript__run-spacer" aria-hidden="true" /> : null}
+      {isRunning ? <div ref={runSpacerRef} className="transcript__run-spacer" aria-hidden="true" /> : null}
     </div>
   )
+}
+
+function parseCssPixels(value: string): number {
+  const parsed = Number.parseFloat(value)
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 function parsePositiveInteger(value: string | undefined): number | undefined {
@@ -418,8 +514,11 @@ function PrefinalWorkBlock({
   onUserToggle: () => void
   onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
 }) {
+  const { t } = useI18n()
   const [open, setOpen] = useState(false)
-  const title = durationLabel ? `Worked for ${durationLabel}` : 'Worked before final answer'
+  const title = durationLabel
+    ? t('Worked for {duration}', { duration: durationLabel })
+    : t('Worked before final answer')
 
   return (
     <section className="prefinal-work">
@@ -515,8 +614,9 @@ function ActivityBlock({
   onUserToggle: () => void
   onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
 }) {
+  const { t } = useI18n()
   const [open, setOpen] = useState(false)
-  const summary = getActivitySummary(entries)
+  const summary = getActivitySummary(entries, t)
   const isLive = isCurrent && summary.isLive
 
   return (
@@ -558,12 +658,13 @@ function ActivityEntryBlock({
   onUserToggle: () => void
   onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
 }) {
+  const { t } = useI18n()
   const part = entry.part
 
   if (part.type === 'reasoning') {
     return (
       <details className="activity-thinking" open onToggle={onUserToggle}>
-        <summary className="activity-thinking__summary">Thinking</summary>
+        <summary className="activity-thinking__summary">{t('Thinking')}</summary>
         <div className="md-body activity-thinking__body stream-thinking">
           <div
             // biome-ignore lint/security/noDangerouslySetInnerHtml: Markdown rendering is sanitized.
@@ -595,7 +696,7 @@ function ActivityEntryBlock({
     return (
       <section className={`activity-entry activity-entry--tool${item.isError ? ' is-error' : ''}`}>
         <div className="activity-entry__head">{item.summary}</div>
-        {item.output ? <pre className="activity-entry__output">{item.output}</pre> : <div className="activity-entry__empty">No output</div>}
+        {item.output ? <pre className="activity-entry__output">{item.output}</pre> : <div className="activity-entry__empty">{t('No output')}</div>}
       </section>
     )
   }
@@ -603,7 +704,7 @@ function ActivityEntryBlock({
   return null
 }
 
-function getActivitySummary(entries: ActivityEntry[]) {
+function getActivitySummary(entries: ActivityEntry[], t: Translate) {
   const thinkingEntries = entries.filter((entry) => entry.part.type === 'reasoning' && entry.part.text.trim().length > 0)
   const toolEntries = getActivityToolEntries(entries)
   const taskEntries = toolEntries.filter((item) => isTaskEntry(item))
@@ -616,14 +717,14 @@ function getActivitySummary(entries: ActivityEntry[]) {
   const latestThinking = thinkingEntries[thinkingEntries.length - 1]
 
   const current = activeTask
-    ? `Subtask: ${summarizeActivityText(activeTask.title || activeTask.summary)} (${formatTaskStatus(activeTask)})`
+    ? `${t('Subtask')}: ${summarizeActivityText(activeTask.title || activeTask.summary)} (${t(formatTaskStatus(activeTask))})`
     : activeTool
-      ? `Tool: ${summarizeActivityText(activeTool.title || activeTool.summary)}`
+      ? `${t('Tool')}: ${summarizeActivityText(activeTool.title || activeTool.summary)}`
       : latestTool
-      ? `Tool: ${summarizeActivityText(latestTool.title || latestTool.summary)}`
+      ? `${t('Tool')}: ${summarizeActivityText(latestTool.title || latestTool.summary)}`
       : latestThinking?.part.type === 'reasoning'
-        ? `Thinking ${summarizeActivityText(latestThinking.part.text)}`
-        : 'Working'
+        ? `${t('Thinking')} ${summarizeActivityText(latestThinking.part.text)}`
+        : t('Working')
 
   return {
     current,
@@ -697,6 +798,7 @@ function ToolGroupBlock({
   defaultExpanded?: boolean
   autoOpenActive?: boolean
 }) {
+  const { t } = useI18n()
   const displayItems = mergeToolGroupEntries(items)
   const indexedTasks = displayItems
     .map((item, index) => ({ item, index }))
@@ -775,8 +877,10 @@ function ToolGroupBlock({
         aria-expanded={expanded}
       >
         <span className="tool-group__chevron" aria-hidden="true">{expanded ? 'v' : '>'}</span>
-        <span>{indexedTasks.length > 0 ? `Subtasks (${indexedTasks.length})` : `Tools (${items.length})`}</span>
-        {indexedTasks.length > 0 ? <span className="tool-group__summaryStats">{formatTaskStats(taskStats)}</span> : null}
+        <span>{indexedTasks.length > 0
+          ? t('Subtasks ({count})', { count: indexedTasks.length })
+          : t('Tools ({count})', { count: items.length })}</span>
+        {indexedTasks.length > 0 ? <span className="tool-group__summaryStats">{formatTaskStats(taskStats, t)}</span> : null}
       </button>
       <div className="tool-group__preview" ref={previewRef}>
         {previewItems.map(({ item, index }) => (
@@ -801,7 +905,7 @@ function ToolGroupBlock({
               })}
             </div>
           ) : null}
-          {otherItems.length > 0 && indexedTasks.length > 0 ? <div className="tool-group__sectionLabel">Other tools</div> : null}
+          {otherItems.length > 0 && indexedTasks.length > 0 ? <div className="tool-group__sectionLabel">{t('Other tools')}</div> : null}
           {otherItems.map(({ item, index }) => (
             <div key={`${item.summary}-all-${String(index)}`} className="tool-group__entry">
               <button
@@ -824,6 +928,7 @@ function ToolGroupBlock({
 }
 
 function TaskSummaryLine({ item, compact }: { item: ToolGroupEntry; compact: boolean }) {
+  const { t } = useI18n()
   const statusKind = getTaskStatusKind(item)
   if (!compact) {
     return (
@@ -837,7 +942,7 @@ function TaskSummaryLine({ item, compact }: { item: ToolGroupEntry; compact: boo
     <div className={`tool-group__line tool-group__line--subtask is-${statusKind}`}>
       <span className="subtask-dot" aria-hidden="true" />
       <span className="tool-group__lineTitle">{item.title || item.summary}</span>
-      <span className="subtask-status">{formatTaskStatus(item)}</span>
+      <span className="subtask-status">{t(formatTaskStatus(item))}</span>
     </div>
   )
 }
@@ -853,14 +958,15 @@ function TaskEntry({
   onToggle: () => void
   onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
 }) {
+  const { t } = useI18n()
   const statusKind = getTaskStatusKind(item)
   const canNavigate = Boolean(item.sessionId && onOpenSubtask)
   const emptyMessage =
     statusKind === 'done'
-      ? 'No output'
+      ? t('No output')
       : statusKind === 'pending'
-        ? 'Queued and waiting to start...'
-        : 'Running subtask...'
+        ? t('Queued and waiting to start...')
+        : t('Running subtask...')
   return (
     <div className={`subtask-entry is-${statusKind}`}>
       <button
@@ -874,11 +980,11 @@ function TaskEntry({
           onToggle()
         }}
         aria-expanded={canNavigate ? undefined : open}
-        aria-label={canNavigate ? `Open subtask: ${item.title || item.summary}` : undefined}
+        aria-label={canNavigate ? t('Open subtask: {title}', { title: item.title || item.summary }) : undefined}
       >
         <span className="subtask-dot" aria-hidden="true" />
         <span className="subtask-entry__title">{item.title || item.summary}</span>
-        <span className="subtask-status">{formatTaskStatus(item)}</span>
+        <span className="subtask-status">{t(formatTaskStatus(item))}</span>
         <span className="subtask-entry__chevron" aria-hidden="true">
           {canNavigate ? <ChevronRight size={14} strokeWidth={1.8} /> : open ? 'v' : '>'}
         </span>
@@ -1192,12 +1298,12 @@ function getActiveTaskKey(tasks: Array<{ item: ToolGroupEntry; index: number }>)
   return pending ? getTaskEntryOpenKey(pending.item, pending.index) : null
 }
 
-function formatTaskStats(stats: ReturnType<typeof getTaskStats>) {
+function formatTaskStats(stats: ReturnType<typeof getTaskStats>, t: Translate) {
   const parts: string[] = []
-  if (stats.running > 0) parts.push(`${String(stats.running)} running`)
-  if (stats.pending > 0) parts.push(`${String(stats.pending)} pending`)
-  if (stats.error > 0) parts.push(`${String(stats.error)} error`)
-  if (stats.done > 0) parts.push(`${String(stats.done)} done`)
+  if (stats.running > 0) parts.push(t('{count} running', { count: stats.running }))
+  if (stats.pending > 0) parts.push(t('{count} pending', { count: stats.pending }))
+  if (stats.error > 0) parts.push(t('{count} error', { count: stats.error }))
+  if (stats.done > 0) parts.push(t('{count} done', { count: stats.done }))
   return parts.join(' / ')
 }
 

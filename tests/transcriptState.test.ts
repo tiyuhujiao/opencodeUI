@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { RunStreamEvent, SessionSummary, TranscriptMessage } from '../src/shared/protocol';
 import {
   applyRunEventToTranscript,
+  clearSettledRunStatus,
   mergeLocalImageParts,
+  mergeLocalRunErrors,
   preserveContextUsage,
   upsertPendingSessionSummary
 } from '../webview-ui/src/transcriptState';
@@ -77,6 +79,48 @@ describe('webview transcript state helpers', () => {
     ];
 
     expect(mergeLocalImageParts(local, exported)[0]?.parts).toEqual(local[0]?.parts);
+  });
+
+  it('后台导出缺少 session.error 时仍把运行错误保留在对应会话轮次', () => {
+    const local: TranscriptMessage[] = [
+      { role: 'user', parts: [{ type: 'text', text: 'first' }] },
+      { role: 'assistant', parts: [{ type: 'text', text: 'done' }] },
+      { role: 'user', parts: [{ type: 'text', text: 'use cpa111' }] },
+      {
+        role: 'assistant',
+        parts: [{ type: 'text', text: '\n\n运行错误：Model not found: cpa111/gpt-5.6-sol.' }]
+      }
+    ];
+    const exported: TranscriptMessage[] = [
+      { role: 'user', parts: [{ type: 'text', text: 'first' }] },
+      { role: 'assistant', parts: [{ type: 'text', text: 'done' }] },
+      { role: 'user', parts: [{ type: 'text', text: 'use cpa111' }] }
+    ];
+
+    const merged = mergeLocalRunErrors(local, exported);
+    expect(merged).toHaveLength(4);
+    expect(merged[3]).toEqual(local[3]);
+    expect(mergeLocalRunErrors(local, merged)[3]?.parts).toHaveLength(1);
+  });
+
+  it('运行错误事件重复到达时不会重复追加同一条正文', () => {
+    const base: TranscriptMessage[] = [
+      { role: 'user', parts: [{ type: 'text', text: 'hello' }] },
+      { role: 'assistant', parts: [] }
+    ];
+    const event: RunStreamEvent = { type: 'error', error: 'upstream unavailable' };
+
+    const first = applyRunEventToTranscript(base, event, 1);
+    const second = applyRunEventToTranscript(first, event, 1);
+
+    expect(second[1]?.parts).toEqual([{ type: 'text', text: '\n\n运行错误：upstream unavailable' }]);
+  });
+
+  it('后续交互只清除已结束的运行图标，不吞掉普通状态消息', () => {
+    expect(clearSettledRunStatus('Failed')).toBeNull();
+    expect(clearSettledRunStatus('Completed')).toBeNull();
+    expect(clearSettledRunStatus('Stopped')).toBeNull();
+    expect(clearSettledRunStatus('Exported to result.md')).toBe('Exported to result.md');
   });
 
   it('updates the same task tool part instead of appending duplicate subtask rows', () => {

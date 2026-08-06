@@ -1,3 +1,5 @@
+import { useI18n } from '../i18n'
+
 type ComposerProps = {
   value: string
   onChange: (next: string) => void
@@ -8,13 +10,15 @@ type ComposerProps = {
 }
 
 export function Composer({ value, onChange, onSend, onStop, isRunning, disabled }: ComposerProps) {
+  const { t } = useI18n()
   return (
     <div className="composer">
       <textarea
         className="composer__input"
+        aria-label={t('Message composer')}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        placeholder="输入消息。Enter 发送，Shift+Enter 换行。"
+        placeholder={t('Type a message...')}
         rows={4}
         onKeyDown={(event) => {
           if (event.key !== 'Enter' || event.shiftKey) {
@@ -42,10 +46,10 @@ export function Composer({ value, onChange, onSend, onStop, isRunning, disabled 
           onClick={onSend}
           disabled={disabled || isRunning || value.trim().length === 0}
         >
-          Send
+          {t('Send')}
         </button>
         <button type="button" onClick={onStop} disabled={!isRunning}>
-          Stop
+          {t('Stop')}
         </button>
       </div>
     </div>

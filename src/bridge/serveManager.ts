@@ -22,7 +22,10 @@ export interface ServePortStorage {
 }
 
 let ensurePromise: Promise<ServeRuntime> | undefined;
+let restartPromise: Promise<ServeRuntime> | undefined;
 let currentPort: number | undefined;
+let managedPort: number | undefined;
+let managedChild: ChildProcess | undefined;
 let portStorage: ServePortStorage | undefined;
 
 export function configureServePortStorage(storage: ServePortStorage): void {
@@ -30,15 +33,29 @@ export function configureServePortStorage(storage: ServePortStorage): void {
 }
 
 export async function ensureServeRunning(): Promise<ServeRuntime> {
-  if (ensurePromise) {
-    return ensurePromise;
-  }
+	if (restartPromise) {
+		return restartPromise;
+	}
+	if (ensurePromise) {
+		return ensurePromise;
+	}
 
   ensurePromise = ensureServeRunningInternal().finally(() => {
     ensurePromise = undefined;
   });
 
-  return ensurePromise;
+	return ensurePromise;
+}
+
+export async function restartServeForConfigChange(): Promise<ServeRuntime> {
+	if (restartPromise) {
+		return restartPromise;
+	}
+
+	restartPromise = restartServeForConfigChangeInternal().finally(() => {
+		restartPromise = undefined;
+	});
+	return restartPromise;
 }
 
 export async function requestServeJson<T>(pathname: string, cwd?: string): Promise<T> {
@@ -62,9 +79,9 @@ export async function requestServeJson<T>(pathname: string, cwd?: string): Promi
 }
 
 async function ensureServeRunningInternal(): Promise<ServeRuntime> {
-  if (currentPort && (await probeHealth(currentPort))) {
-    await persistLastPort(currentPort);
-    return buildRuntime(currentPort, false);
+	if (currentPort && (await probeHealth(currentPort))) {
+		await persistLastPort(currentPort);
+		return buildRuntime(currentPort, isManagedPort(currentPort));
   }
 
   const lastPort = readLastPort();
@@ -90,19 +107,38 @@ async function ensureServeRunningInternal(): Promise<ServeRuntime> {
   let targetPort = preferredUsable ? PREFERRED_PORT : await findFreePort();
 
   try {
-    await startServe(targetPort);
-  } catch (error) {
-    if (targetPort !== PREFERRED_PORT) {
-      throw error;
-    }
+		activateManagedRuntime(await startServe(targetPort), targetPort);
+	} catch (error) {
+		if (targetPort !== PREFERRED_PORT) {
+			throw error;
+		}
 
-    targetPort = await findFreePort();
-    await startServe(targetPort);
-  }
+		targetPort = await findFreePort();
+		activateManagedRuntime(await startServe(targetPort), targetPort);
+	}
 
   currentPort = targetPort;
   await persistLastPort(targetPort);
-  return buildRuntime(targetPort, true);
+	return buildRuntime(targetPort, true);
+}
+
+async function restartServeForConfigChangeInternal(): Promise<ServeRuntime> {
+	if (ensurePromise) {
+		await ensurePromise;
+	}
+
+	const targetPort = await findFreePort();
+	const previousChild = managedChild;
+	const child = await startServe(targetPort);
+	activateManagedRuntime(child, targetPort);
+	currentPort = targetPort;
+	await persistLastPort(targetPort);
+
+	if (previousChild && previousChild !== child) {
+		stopManagedChild(previousChild);
+	}
+
+	return buildRuntime(targetPort, true);
 }
 
 function readLastPort(): number | undefined {
@@ -139,7 +175,7 @@ function buildRuntime(port: number, startedByManager: boolean): ServeRuntime {
   };
 }
 
-async function startServe(port: number): Promise<void> {
+async function startServe(port: number): Promise<ChildProcess> {
   const env = withOpencodeBinInPath();
   const command = resolveOpencodeBinary(env);
   const child = spawn(
@@ -164,8 +200,44 @@ async function startServe(port: number): Promise<void> {
     }
   });
 
-  await waitForSpawnReady(child);
-  await waitForHealthAfterSpawn(child, port, stderrBuffer);
+	try {
+		await waitForSpawnReady(child);
+		await waitForHealthAfterSpawn(child, port, stderrBuffer);
+		return child;
+	} catch (error) {
+		stopManagedChild(child);
+		throw error;
+	}
+}
+
+function activateManagedRuntime(child: ChildProcess, port: number): void {
+	managedChild = child;
+	managedPort = port;
+	child.once("exit", () => {
+		if (managedChild !== child) {
+			return;
+		}
+		managedChild = undefined;
+		managedPort = undefined;
+		if (currentPort === port) {
+			currentPort = undefined;
+		}
+	});
+}
+
+function isManagedPort(port: number): boolean {
+	return managedPort === port && managedChild?.exitCode === null;
+}
+
+function stopManagedChild(child: ChildProcess): void {
+	if (child.exitCode !== null) {
+		return;
+	}
+	try {
+		child.kill();
+	} catch {
+		// The process may already be exiting between the exitCode check and kill().
+	}
 }
 
 function waitForSpawnReady(child: ChildProcess): Promise<void> {

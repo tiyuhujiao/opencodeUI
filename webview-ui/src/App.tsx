@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ArrowUp, History, Moon, Plus, RefreshCw, ShieldCheck, Square, Sun } from 'lucide-react'
+import { ArrowLeft, ArrowUp, History, Languages, Moon, Plus, RefreshCw, Settings2, ShieldCheck, Square, Sun } from 'lucide-react'
 import { createRequestId, getVsCodeApi } from './vscodeApi'
 import { Transcript } from './components/Transcript'
 import { ModelDialog } from './components/dialog/ModelDialog'
@@ -7,13 +7,16 @@ import { SessionDialog } from './components/dialog/SessionDialog'
 import { TimelineDialog } from './components/dialog/TimelineDialog'
 import { ResourceDialog, type ResourceDialogKind } from './components/dialog/ResourceDialog'
 import { ExportDialog, type SessionExportOptions } from './components/dialog/ExportDialog'
+import { ProviderSettingsPage } from './components/provider/ProviderSettingsPage'
 import { resolveSessionSelectionAfterList } from './sessionSelection'
 import {
   applyRunEventToTranscript,
+  clearSettledRunStatus,
   compactTranscript,
   hasAnyAssistantText,
   isExportAtLeastAsComplete,
   mergeLocalImageParts,
+  mergeLocalRunErrors,
   preserveProtectedSessionSummary,
   summarizePendingSessionTitle,
   upsertPendingSessionSummary
@@ -51,6 +54,7 @@ import {
   toThinkingSelection
 } from './thinkingOptions'
 import { readThinkingPreferences, writeThinkingPreferences } from './thinkingPreferences'
+import { useI18n } from './i18n'
 import { isComposerCommandInvocation, resolveComposerCommandInvocation } from './composerCommands'
 import {
   appendWorkspaceMentions,
@@ -74,11 +78,14 @@ function readInitialTheme(): ThemeMode {
 }
 
 function ContextUsageIndicator({ usage, contextWindow }: { usage: ContextUsage; contextWindow: number }) {
+  const { t } = useI18n()
   const percent = Math.max(0, Math.min(100, (usage.usedTokens / contextWindow) * 100))
   const roundedPercent = Math.round(percent)
   const remainingPercent = Math.max(0, 100 - roundedPercent)
-  const status = roundedPercent >= 50 ? `${roundedPercent}% full` : `${roundedPercent}% used (${remainingPercent}% left)`
-  const label = `Context usage: ${roundedPercent}%`
+  const status = roundedPercent >= 50
+    ? t('{percent}% full', { percent: roundedPercent })
+    : t('{percent}% used ({remaining}% left)', { percent: roundedPercent, remaining: remainingPercent })
+  const label = t('Context usage: {percent}%', { percent: roundedPercent })
 
   return (
     <button className="context-usage" type="button" aria-label={label}>
@@ -95,9 +102,12 @@ function ContextUsageIndicator({ usage, contextWindow }: { usage: ContextUsage; 
         />
       </svg>
       <span className="context-usage__tooltip" role="tooltip">
-        <span>Context window:</span>
+        <span>{t('Context window')}:</span>
         <strong>{status}</strong>
-        <span>{`${formatTokenCount(usage.usedTokens)} / ${formatTokenCount(contextWindow)} tokens used`}</span>
+        <span>{t('{used} / {total} tokens used', {
+          used: formatTokenCount(usage.usedTokens),
+          total: formatTokenCount(contextWindow)
+        })}</span>
       </span>
     </button>
   )
@@ -238,50 +248,57 @@ function getDiagnosticsLabel(state: DiagnosticsState): string {
 
 function getRunActivity(status: string): { kind: 'running' | 'completed' | 'stopped' | 'failed'; label: string } | null {
   if (status === 'Running…') {
-    return { kind: 'running', label: '运行中' }
+    return { kind: 'running', label: 'Running' }
   }
 
   if (status === 'Completed') {
-    return { kind: 'completed', label: '已完成' }
+    return { kind: 'completed', label: 'Completed' }
   }
 
   if (status === 'Stopped') {
-    return { kind: 'stopped', label: '已停止' }
+    return { kind: 'stopped', label: 'Stopped' }
   }
 
   if (status === 'Failed') {
-    return { kind: 'failed', label: '运行失败' }
+    return { kind: 'failed', label: 'Failed' }
   }
 
   return null
 }
 
-function RunStatusIndicator({
+function RunActivityIndicator({ status }: { status: string | null }) {
+  const { t } = useI18n()
+  const activity = status ? getRunActivity(status) : null
+  return (
+    <span className={`run-activity-slot${activity ? '' : ' is-empty'}`} aria-hidden={activity ? undefined : 'true'}>
+      {activity ? (
+        <output className={`run-indicator run-indicator--${activity.kind}`} aria-label={t(activity.label)}>
+          <span className="run-indicator__icon" aria-hidden="true" />
+        </output>
+      ) : null}
+    </span>
+  )
+}
+
+function RunStatusDetails({
   status,
   files,
   onOpenFile,
   onDismissFile
 }: {
-  status: string
+  status: string | null
   files: DisplayEditedFile[]
   onOpenFile: (file: DisplayEditedFile) => void
   onDismissFile: (fileId: string) => void
 }) {
-  const activity = getRunActivity(status)
-  if (!activity) {
-    return (
-      <div className="run-status-row">
-        <p className="status-line status-line--message">{status}</p>
-        <EditedFilesSummary files={files} onOpenFile={onOpenFile} onDismissFile={onDismissFile} />
-      </div>
-    )
+  const message = status && !getRunActivity(status) ? status : null
+  if (!message && files.length === 0) {
+    return null
   }
 
   return (
     <div className="run-status-row">
-      <output className={`run-indicator run-indicator--${activity.kind}`} aria-label={activity.label}>
-        <span className="run-indicator__icon" aria-hidden="true" />
-      </output>
+      {message ? <p className="status-line status-line--message">{message}</p> : null}
       <EditedFilesSummary files={files} onOpenFile={onOpenFile} onDismissFile={onDismissFile} />
     </div>
   )
@@ -296,13 +313,14 @@ function EditedFilesSummary({
   onOpenFile: (file: DisplayEditedFile) => void
   onDismissFile: (fileId: string) => void
 }) {
+  const { t } = useI18n()
   if (files.length === 0) {
     return null
   }
 
   const additions = files.reduce((sum, file) => sum + file.additions, 0)
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0)
-  const label = files.length === 1 ? files[0]?.displayPath : `${String(files.length)} files`
+  const label = files.length === 1 ? files[0]?.displayPath : `${String(files.length)} ${t('files')}`
 
   return (
     <details className="edit-summary">
@@ -317,7 +335,7 @@ function EditedFilesSummary({
         {files.map((file) => {
           const fileId = file.fileId
           const canDismiss = Boolean(fileId && file.status && file.status !== 'pending')
-          const actionLabel = fileId ? (file.status === 'pending' ? 'Review' : 'View') : 'Open'
+          const actionLabel = fileId ? (file.status === 'pending' ? t('Review') : t('View')) : t('Open')
           return (
             <div key={fileId ?? file.path} className={`edit-summary__item${file.status ? ` edit-summary__item--${file.status}` : ''}`}>
               <button
@@ -335,7 +353,7 @@ function EditedFilesSummary({
                     <span className="edit-summary__add">+{file.additions}</span>
                     <span className="edit-summary__del">-{file.deletions}</span>
                   </span>
-                  {typeof file.hunks === 'number' && file.hunks > 0 ? <span>{file.hunks} {file.hunks === 1 ? 'hunk' : 'hunks'}</span> : null}
+                  {typeof file.hunks === 'number' && file.hunks > 0 ? <span>{file.hunks} {t(file.hunks === 1 ? 'hunk' : 'hunks')}</span> : null}
                   {file.status && file.status !== 'pending' ? <span className="edit-summary__state">{file.status}</span> : null}
                   <span className="edit-summary__action">{actionLabel}</span>
                 </span>
@@ -347,7 +365,7 @@ function EditedFilesSummary({
                   aria-label={`Dismiss ${file.displayPath}`}
                   onClick={() => onDismissFile(fileId)}
                 >
-                  Dismiss
+                  {t('Dismiss')}
                 </button>
               ) : null}
             </div>
@@ -378,6 +396,7 @@ function normalizeEditedFilePath(filePath: string): string {
 }
 
 function TodoPanel({ todos }: { todos: TodoItem[] }) {
+  const { t } = useI18n()
   const [open, setOpen] = useState(true)
   const todoIdentity = todos.map((todo) => todo.content).join('\u001f')
   const previousTodoIdentityRef = useRef('')
@@ -400,7 +419,7 @@ function TodoPanel({ todos }: { todos: TodoItem[] }) {
 
   const completed = countCompletedTodos(todos)
   const activeTodo = todos.find((todo) => normalizeTodoStatus(todo.status) === 'in_progress')
-  const summaryText = activeTodo?.content ?? todos.find((todo) => normalizeTodoStatus(todo.status) !== 'completed')?.content ?? 'All done'
+  const summaryText = activeTodo?.content ?? todos.find((todo) => normalizeTodoStatus(todo.status) !== 'completed')?.content ?? t('All done')
 
   return (
     <details
@@ -410,7 +429,7 @@ function TodoPanel({ todos }: { todos: TodoItem[] }) {
     >
       <summary className="composer-todo__summary">
         <span className="composer-todo__chevron" aria-hidden="true" />
-        <span className="composer-todo__title">Todos</span>
+        <span className="composer-todo__title">{t('Todos')}</span>
         <span className="composer-todo__progress">
           {completed}/{todos.length}
         </span>
@@ -424,7 +443,7 @@ function TodoPanel({ todos }: { todos: TodoItem[] }) {
             <div key={`${todo.content}-${String(index)}`} className={`composer-todo__item composer-todo__item--${statusKind}`}>
               <span className={`composer-todo__mark composer-todo__mark--${statusKind}`} aria-hidden="true" />
               <span className="composer-todo__content">{todo.content}</span>
-              <span className="composer-todo__state">{todoStatusLabel(todo.status)}</span>
+              <span className="composer-todo__state">{t(todoStatusLabel(todo.status))}</span>
             </div>
           )
         })}
@@ -500,6 +519,7 @@ function AgentMenu({
   loading: boolean
   error: string | null
 }) {
+  const { t } = useI18n()
   const detailsRef = useRef<HTMLDetailsElement | null>(null)
   const options = useMemo(() => getVisibleAgentOptions(agents, selectedAgent), [agents, selectedAgent])
   const selected = options.find((agent) => normalizeAgentName(agent.name) === normalizeAgentName(selectedAgent))?.name ?? options[0]?.name ?? ''
@@ -507,13 +527,13 @@ function AgentMenu({
   return (
     <details className="agent-menu" ref={detailsRef}>
       <summary className="agent-menu__summary" aria-label={`agent mode ${selected || 'not selected'}`}>
-        <span className="agent-menu__value">{selected || (loading ? 'Loading' : 'Agent')}</span>
+        <span className="agent-menu__value">{selected || (loading ? t('Loading') : t('Agent'))}</span>
         <span className="agent-menu__chevron" aria-hidden="true" />
       </summary>
       <div className="agent-menu__panel" role="listbox" aria-label="agent mode">
-        {loading ? <div className="agent-menu__hint">Loading...</div> : null}
-        {error ? <div className="agent-menu__error">{error}</div> : null}
-        {options.length === 0 ? <div className="agent-menu__hint">No agents</div> : null}
+        {loading ? <div className="agent-menu__hint">{t('Loading...')}</div> : null}
+        {error ? <div className="agent-menu__error">{t(error)}</div> : null}
+        {options.length === 0 ? <div className="agent-menu__hint">{t('No agents')}</div> : null}
         {options.map((agent) => {
           const active = agent.name === selected
           return (
@@ -548,6 +568,7 @@ function QuestionBanner({
   onReply: (questionId: string, answers: string[][]) => void
   onReject: (questionId: string) => void
 }) {
+  const { t } = useI18n()
   const [selected, setSelected] = useState<string[][]>(() => pending.questions.map(() => []))
   const [customAnswers, setCustomAnswers] = useState<string[]>(() => pending.questions.map(() => ''))
 
@@ -589,7 +610,7 @@ function QuestionBanner({
 
   return (
     <div className="question-banner" role="alert">
-      <div className="question-banner__header">Question needs input</div>
+      <div className="question-banner__header">{t('Question needs input')}</div>
       <div className="question-banner__body">
         {pending.questions.map((question, questionIndex) => {
           const inputType = question.multiple ? 'checkbox' : 'radio'
@@ -620,7 +641,7 @@ function QuestionBanner({
                 <input
                   className="question-banner__custom"
                   value={customAnswers[questionIndex] ?? ''}
-                  placeholder="Custom answer"
+                  placeholder={t('Custom answer')}
                   onChange={(event) => {
                     const value = event.currentTarget.value
                     setCustomAnswers((current) => {
@@ -637,10 +658,10 @@ function QuestionBanner({
       </div>
       <div className="question-banner__actions">
         <button type="button" onClick={() => onReply(pending.questionId, answers)} disabled={!canReply}>
-          Reply
+          {t('Reply')}
         </button>
         <button type="button" onClick={() => onReject(pending.questionId)}>
-          Dismiss
+          {t('Dismiss')}
         </button>
       </div>
     </div>
@@ -648,6 +669,7 @@ function QuestionBanner({
 }
 
 export default function App() {
+  const { language, setLanguage, t } = useI18n()
   const [status, setStatus] = useState('Connecting...')
   const [workspaceFolderPath, setWorkspaceFolderPath] = useState<string | undefined>(undefined)
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readInitialTheme())
@@ -745,6 +767,7 @@ export default function App() {
   const [pastedImageFilePath, setPastedImageFilePath] = useState<string | null>(null)
   const [isRunning, setIsRunning] = useState(false)
   const [runStatus, setRunStatus] = useState<string | null>(null)
+  const clearSettledRunIndicator = useCallback(() => setRunStatus(clearSettledRunStatus), [])
   const [editedFiles, setEditedFiles] = useState<EditedFileSummary[]>([])
   const [reviewFiles, setReviewFiles] = useState<InlineDiffFileSummary[]>([])
   const displayedEditedFiles = useMemo(() => mergeEditedFileSummaries(editedFiles, reviewFiles), [editedFiles, reviewFiles])
@@ -779,6 +802,7 @@ export default function App() {
   }, [models, selectedModelSummary, transcript])
 
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
+  const [providerSettingsOpen, setProviderSettingsOpen] = useState(false)
   const [sessionDialogOpen, setSessionDialogOpen] = useState(false)
   const [timelineDialogOpen, setTimelineDialogOpen] = useState(false)
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
@@ -842,6 +866,7 @@ export default function App() {
     localTranscript: TranscriptMessage[]
     exportAttempts: number
   } | null>(null)
+  const runErrorTranscriptsRef = useRef<Map<string, TranscriptMessage[]>>(new Map())
 
   const allowAutoSelectSessionRef = useRef(true)
   const isRunningRef = useRef(false)
@@ -1164,18 +1189,22 @@ export default function App() {
 
     if (completion.type === 'done') {
       setRunStatus('Completed')
-      if (completion.sessionId) {
-        lastCompletedRunRef.current = {
-          sessionId: completion.sessionId,
-          completedAt: Date.now(),
-          localTranscript: transcriptRef.current,
-          exportAttempts: 0
-        }
-      }
     } else if (completion.type === 'stopped') {
       setRunStatus('Stopped')
     } else {
       setRunStatus('Failed')
+      if (completion.sessionId) {
+        runErrorTranscriptsRef.current.set(completion.sessionId, transcriptRef.current)
+      }
+    }
+
+    if (completion.sessionId && completion.type !== 'stopped') {
+      lastCompletedRunRef.current = {
+        sessionId: completion.sessionId,
+        completedAt: Date.now(),
+        localTranscript: transcriptRef.current,
+        exportAttempts: 0
+      }
     }
 
     activeRunRef.current = null
@@ -1199,8 +1228,9 @@ export default function App() {
     setActiveSubtask(null)
     setSubtaskTranscript([])
     setSubtaskTranscriptError(null)
+    clearSettledRunIndicator()
     setSelectedSessionId(sessionId)
-  }, [])
+  }, [clearSettledRunIndicator])
 
   const requestSessionDelete = useCallback(
     (sessionId: string) => {
@@ -2433,7 +2463,10 @@ export default function App() {
         // a streamed answer with an older export that has not caught up yet.
         const lastCompleted = lastCompletedRunRef.current
         if (lastCompleted && lastCompleted.sessionId === targetSessionId) {
-          const exported = mergeLocalImageParts(lastCompleted.localTranscript, compactTranscript(message.payload.messages))
+          const exported = mergeLocalRunErrors(
+            runErrorTranscriptsRef.current.get(targetSessionId) ?? lastCompleted.localTranscript,
+            mergeLocalImageParts(lastCompleted.localTranscript, compactTranscript(message.payload.messages))
+          )
           const hasLocalAssistantText = hasAnyAssistantText(lastCompleted.localTranscript)
           const exportCaughtUp = isExportAtLeastAsComplete(exported, lastCompleted.localTranscript)
 
@@ -2458,7 +2491,10 @@ export default function App() {
           transcriptRef.current = exported
           setTranscript(exported)
         } else {
-          const exported = mergeLocalImageParts(transcriptRef.current, compactTranscript(message.payload.messages))
+          const exported = mergeLocalRunErrors(
+            runErrorTranscriptsRef.current.get(targetSessionId) ?? transcriptRef.current,
+            mergeLocalImageParts(transcriptRef.current, compactTranscript(message.payload.messages))
+          )
           transcriptRef.current = exported
           setTranscript(exported)
         }
@@ -2563,6 +2599,7 @@ export default function App() {
           return
         }
         deleteRequestIdsRef.current.delete(message.requestId)
+        runErrorTranscriptsRef.current.delete(targetSessionId)
         pushDebug({
           at: new Date().toISOString(),
           kind: 'rx',
@@ -3156,13 +3193,16 @@ export default function App() {
           setRunStatus(`Failed: ${message.error}`)
           const active = activeRunRef.current
           if (active) {
-            applyLiveRunEvent(
+            const failedTranscript = applyLiveRunEvent(
               {
                 type: 'error',
                 error: message.error
               },
               active.assistantIndex
             )
+            if (active.sessionId) {
+              runErrorTranscriptsRef.current.set(active.sessionId, failedTranscript)
+            }
           }
           activeRunRef.current = null
           return
@@ -3243,7 +3283,7 @@ export default function App() {
   }, [models, selectedProviderId])
   const activeTodos = useMemo(() => extractLatestTodosFromTranscript(transcript), [transcript])
   const diagnosticsState = getDiagnosticsState(selfcheck)
-  const diagnosticsLabel = getDiagnosticsLabel(diagnosticsState)
+  const diagnosticsLabel = t(getDiagnosticsLabel(diagnosticsState))
   const diagnosticsTriggerClass = [
     'diagnostics-trigger',
     `diagnostics-trigger--${diagnosticsState}`,
@@ -3278,8 +3318,26 @@ export default function App() {
     requestSessionExport(selectedSessionId)
   }, [isRunning, requestSessionExport, selectedSessionId])
 
+  const handleProviderSettingsChanged = useCallback(() => {
+    requestProviders({ forceRefresh: true })
+    requestModels({ forceRefresh: true })
+  }, [requestModels, requestProviders])
+
+  if (providerSettingsOpen) {
+    return (
+      <ProviderSettingsPage
+        onClose={() => setProviderSettingsOpen(false)}
+        onCatalogChanged={handleProviderSettingsChanged}
+      />
+    )
+  }
+
   return (
-    <main className="app">
+    <main
+      className="app"
+      onPointerDownCapture={clearSettledRunIndicator}
+      onKeyDownCapture={clearSettledRunIndicator}
+    >
       <header className="topbar">
         <div className="topbar__brand">
           <div className="topbar__title">OpenCode</div>
@@ -3288,14 +3346,25 @@ export default function App() {
               type="button"
               className="theme-toggle"
               onClick={() => setThemeMode((current) => (current === 'light' ? 'dark' : 'light'))}
-              aria-label={themeMode === 'light' ? '切换到黑色主题' : '切换到白色主题'}
-              title={themeMode === 'light' ? '切换到黑色主题' : '切换到白色主题'}
+              aria-label={themeMode === 'light' ? t('Switch to dark theme') : t('Switch to light theme')}
+              title={themeMode === 'light' ? t('Switch to dark theme') : t('Switch to light theme')}
             >
               <span className="theme-toggle__icon" aria-hidden="true">
                 {themeMode === 'light' ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
               </span>
             </button>
-            <div className="topbar__status">{status}</div>
+            <label className="language-selector" title={t('Interface language')}>
+              <Languages size={14} aria-hidden="true" />
+              <select
+                value={language}
+                onChange={(event) => setLanguage(event.target.value === 'zh-CN' ? 'zh-CN' : 'en')}
+                aria-label={t('Interface language')}
+              >
+                <option value="zh-CN">简体中文</option>
+                <option value="en">English</option>
+              </select>
+            </label>
+            <div className="topbar__status">{t(status)}</div>
             <div className="topbar__diagnostics">
               <button
                 type="button"
@@ -3309,9 +3378,9 @@ export default function App() {
                 <span className="diagnostics-trigger__dot" aria-hidden="true" />
               </button>
               {debugPopoverOpen ? (
-                <div className="diagnostics-popover" id="diagnostics-popover" role="dialog" aria-label="Diagnostics">
+                <div className="diagnostics-popover" id="diagnostics-popover" role="dialog" aria-label={t('Diagnostics')}>
                   <div className="diagnostics-popover__header">
-                    <h2>Self-check</h2>
+                    <h2>{t('Self-check')}</h2>
                     <div className="diagnostics-popover__actions">
                       <label className="debug-toggle">
                         <input
@@ -3321,13 +3390,13 @@ export default function App() {
                             setDebugEnabled(event.target.checked)
                           }}
                         />
-                        Enable
+                        {t('Enable')}
                       </label>
                       <button type="button" onClick={requestSelfcheck}>
-                        Run
+                        {t('Run')}
                       </button>
                       <button type="button" onClick={() => setDebugLog([])}>
-                        Clear
+                        {t('Clear')}
                       </button>
                     </div>
                   </div>
@@ -3368,7 +3437,7 @@ export default function App() {
                         .join('\n')}
                     </pre>
                   ) : (
-                    <p className="empty-line">Enable to capture request/response logs.</p>
+                    <p className="empty-line">{t('Enable to capture request/response logs.')}</p>
                   )}
                 </div>
               ) : null}
@@ -3378,14 +3447,25 @@ export default function App() {
 
         <div className="topbar__session">
           <div className="session-chip">
-            <div className="session-chip__label">Session</div>
+            <div className="session-chip__label">{t('Session')}</div>
             <div className="session-chip__value">
               {selectedSessionId
                 ? (sessions.find((s) => s.id === selectedSessionId)?.title ?? selectedSessionId)
-                : 'None'}
+                : t('None')}
             </div>
           </div>
           <div className="topbar__actions">
+            <RunActivityIndicator status={runStatus} />
+            <button
+              type="button"
+              className="topbar__icon-button"
+              onClick={() => setProviderSettingsOpen(true)}
+              disabled={isRunning}
+              aria-label={t('Provider settings')}
+              title={t('Provider settings')}
+            >
+              <Settings2 size={16} aria-hidden="true" />
+            </button>
             <button
               type="button"
               className="topbar__icon-button"
@@ -3404,8 +3484,8 @@ export default function App() {
                 setPendingPermission(null)
                 setPendingQuestion(null)
               }}
-              aria-label="New session"
-              title="New session"
+              aria-label={t('New session')}
+              title={t('New session')}
             >
               <Plus size={16} aria-hidden="true" />
             </button>
@@ -3414,8 +3494,8 @@ export default function App() {
               className="topbar__icon-button"
               onClick={() => setSessionDialogOpen(true)}
               disabled={sessions.length === 0}
-              aria-label="Switch session"
-              title="Switch session"
+              aria-label={t('Switch session')}
+              title={t('Switch session')}
             >
               <History size={16} aria-hidden="true" />
             </button>
@@ -3424,8 +3504,8 @@ export default function App() {
               className={`topbar__icon-button${loadingSessions ? ' is-loading' : ''}`}
               onClick={() => requestSessions()}
               disabled={loadingSessions}
-              aria-label={loadingSessions ? 'Refreshing sessions' : 'Refresh sessions'}
-              title={loadingSessions ? 'Refreshing sessions' : 'Refresh sessions'}
+              aria-label={loadingSessions ? t('Refreshing sessions') : t('Refresh sessions')}
+              title={loadingSessions ? t('Refreshing sessions') : t('Refresh sessions')}
             >
               <RefreshCw size={15} aria-hidden="true" />
             </button>
@@ -3433,15 +3513,13 @@ export default function App() {
         </div>
       </header>
 
-      {sessionsError ? <p className="error-line">{sessionsError}</p> : null}
-      {runStatus || displayedEditedFiles.length > 0 ? (
-        <RunStatusIndicator
-          status={runStatus ?? 'Changes ready'}
-          files={displayedEditedFiles}
-          onOpenFile={openEditedFile}
-          onDismissFile={dismissEditedFile}
-        />
-      ) : null}
+      {sessionsError ? <p className="error-line">{t(sessionsError)}</p> : null}
+      <RunStatusDetails
+        status={runStatus}
+        files={displayedEditedFiles}
+        onOpenFile={openEditedFile}
+        onDismissFile={dismissEditedFile}
+      />
 
       <section className={`main-shell${activeSubtask ? ' has-subtask' : ''}`} aria-label="main">
         {activeSubtask ? (
@@ -3458,13 +3536,13 @@ export default function App() {
                   setSubtaskTranscriptError(null)
                   setLoadingSubtaskTranscript(false)
                 }}
-                aria-label="Back to parent task"
-                title="Back to parent task"
+                aria-label={t('Back to parent task')}
+                title={t('Back to parent task')}
               >
                 <ArrowLeft size={16} aria-hidden="true" />
               </button>
               <div className="subtask-detail__heading">
-                <span className="subtask-detail__eyebrow">Subtask</span>
+                <span className="subtask-detail__eyebrow">{t('Subtask')}</span>
                 <strong>{activeSubtask.title}</strong>
               </div>
               <button
@@ -3472,16 +3550,16 @@ export default function App() {
                 className={`subtask-detail__iconButton${loadingSubtaskTranscript ? ' is-loading' : ''}`}
                 onClick={() => requestSubtaskTranscript(activeSubtask.sessionId)}
                 disabled={loadingSubtaskTranscript}
-                aria-label="Refresh subtask"
-                title="Refresh subtask"
+                aria-label={t('Refresh subtask')}
+                title={t('Refresh subtask')}
               >
                 <RefreshCw size={15} aria-hidden="true" />
               </button>
             </header>
             <div className="subtask-detail__body">
-              {subtaskTranscriptError ? <p className="error-panel">{subtaskTranscriptError}</p> : null}
+              {subtaskTranscriptError ? <p className="error-panel">{t(subtaskTranscriptError)}</p> : null}
               {!subtaskTranscriptError && subtaskTranscript.length === 0 ? (
-                <p className="empty-line">{loadingSubtaskTranscript ? 'Loading subtask...' : 'No subtask messages yet'}</p>
+                <p className="empty-line">{loadingSubtaskTranscript ? t('Loading subtask...') : t('No subtask messages yet')}</p>
               ) : null}
               {!subtaskTranscriptError && subtaskTranscript.length > 0 ? (
                 <Transcript
@@ -3498,8 +3576,8 @@ export default function App() {
           {pendingQuestion ? (
             <QuestionBanner pending={pendingQuestion} onReply={requestQuestionReply} onReject={requestQuestionReject} />
           ) : null}
-          {transcriptError ? <p className="error-panel">{transcriptError}</p> : null}
-          {!loadingTranscript && !transcriptError && transcript.length === 0 ? <p className="empty-line">No messages</p> : null}
+          {transcriptError ? <p className="error-panel">{t(transcriptError)}</p> : null}
+          {!loadingTranscript && !transcriptError && transcript.length === 0 ? <p className="empty-line">{t('No messages')}</p> : null}
           {!transcriptError && transcript.length > 0 ? (
             <Transcript
               messages={compactTranscript(transcript)}
@@ -3521,16 +3599,16 @@ export default function App() {
             <div className="permission-banner__body">
               <div className="permission-banner__header">
                 <ShieldCheck size={14} aria-hidden="true" />
-                <span>Permission request</span>
+                <span>{t('Permission request')}</span>
               </div>
               <strong className="permission-banner__title" id="permission-title">
-                {`Allow ${pendingPermission.toolName}?`}
+                {t('Allow {tool}?', { tool: pendingPermission.toolName })}
               </strong>
               <div className="permission-banner__text" id="permission-detail">
                 {pendingPermission.message ||
                   (pendingPermission.patterns.length > 0
                     ? pendingPermission.patterns.join(', ')
-                    : 'OpenCode needs permission to continue this task.')}
+                    : t('OpenCode needs permission to continue this task.'))}
               </div>
             </div>
             <div className="permission-banner__actions">
@@ -3539,7 +3617,7 @@ export default function App() {
                 className="permission-banner__button permission-banner__button--secondary permission-banner__button--always"
                 onClick={() => requestPermissionReply(pendingPermission.permissionId, 'always')}
               >
-                Always allow
+                {t('Always allow')}
               </button>
               <div className="permission-banner__primary-actions">
                 <button
@@ -3547,7 +3625,7 @@ export default function App() {
                   className="permission-banner__button permission-banner__button--secondary"
                   onClick={() => requestPermissionReply(pendingPermission.permissionId, 'reject')}
                 >
-                  Deny
+                  {t('Deny')}
                 </button>
                 <button
                   ref={permissionAllowButtonRef}
@@ -3555,7 +3633,7 @@ export default function App() {
                   className="permission-banner__button permission-banner__button--primary"
                   onClick={() => requestPermissionReply(pendingPermission.permissionId, 'once')}
                 >
-                  Allow once
+                  {t('Allow once')}
                 </button>
               </div>
             </div>
@@ -3564,11 +3642,11 @@ export default function App() {
 
         <section
           className={`composer-stack${pastedImage ? ' has-preview' : ''}${activeTodos.length > 0 ? ' has-todos' : ''}`}
-          aria-label="composer"
+          aria-label={t('Message composer')}
         >
           {pastedImage ? (
             <div className="composer-stack__preview">
-              <img className="composer-stack__thumb" src={pastedImage.previewUrl} alt="pasted" />
+              <img className="composer-stack__thumb" src={pastedImage.previewUrl} alt={t('Pasted image')} />
               <button
                 type="button"
                 className="composer-stack__thumbRemove"
@@ -3576,7 +3654,7 @@ export default function App() {
                   setPastedImage(null)
                   setPastedImageFilePath(null)
                 }}
-                aria-label="remove image"
+                aria-label={t('Remove image')}
               >
                 ×
               </button>
@@ -3610,7 +3688,7 @@ export default function App() {
                   ? `command-option-${String(commandIndex)}`
                   : undefined
             }
-            placeholder="输入消息…"
+            placeholder={t('Type a message...')}
             rows={2}
             onPaste={(e) => {
               const items = e.clipboardData?.items
@@ -3777,10 +3855,10 @@ export default function App() {
             id="composer-workspace-menu"
             className="command-menu workspace-menu"
             role="listbox"
-            aria-label="workspace files and folders"
+            aria-label={t('workspace files and folders')}
           >
             {workspaceResources.length === 0 ? (
-              <div className="command-menu__empty">No matching files</div>
+              <div className="command-menu__empty">{t('No matching files')}</div>
             ) : (
               workspaceResources.map((resource, index) => (
                 <button
@@ -3811,10 +3889,10 @@ export default function App() {
             id="composer-command-menu"
             className="command-menu"
             role="listbox"
-            aria-label="commands"
+            aria-label={t('commands')}
           >
             {filteredCommands.length === 0 ? (
-              <div className="command-menu__empty">No commands</div>
+              <div className="command-menu__empty">{t('No commands')}</div>
             ) : (
               filteredCommands.map((cmd, idx) => (
                 <button
@@ -3855,14 +3933,14 @@ export default function App() {
             onClick={openModelDialog}
             disabled={providers.length === 0}
           >
-            {selectedModel || 'Model'}
+            {selectedModel || t('Model')}
           </button>
 
           <select
             className="composer-chip composer-chip--depth"
             value={selectedThinkingOption}
             onChange={(e) => selectThinkingOption(e.target.value)}
-            aria-label="thinking depth"
+            aria-label={t('thinking depth')}
             disabled={thinkingOptions.length <= 1}
           >
             {thinkingOptions.map((option) => (
@@ -3879,8 +3957,8 @@ export default function App() {
             className={`composer-stack__send${isRunning ? ' composer-stack__send--running' : ''}`}
             onClick={isRunning ? stopRun : submitComposer}
             disabled={!isRunning && (composerValue.trim().length === 0 || (!commandState.open && (!selectedModel || !selectedAgent)))}
-            aria-label={isRunning ? 'stop' : 'send'}
-            title={isRunning ? 'Stop' : 'Send'}
+            aria-label={isRunning ? t('Stop') : t('Send')}
+            title={isRunning ? t('Stop') : t('Send')}
           >
             {isRunning ? (
               <span className="composer-stack__stop-icon" aria-hidden="true">

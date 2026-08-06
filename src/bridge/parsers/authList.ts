@@ -15,11 +15,12 @@ export class AuthListParseError extends Error {
 export type AuthProviderEntry = {
   id: string;
   label: string;
+  type?: 'api' | 'oauth';
 };
 
 // `opencode auth list` is a human-formatted output (not JSON).
 // We parse provider names from lines like:
-//   [...m[...m●  OpenAI [90moauth
+//   [...m[...m•  OpenAI [90moauth
 //   ●  my8317 api
 export function parseAuthList(stdout: string): AuthProviderEntry[] {
   if (typeof stdout !== 'string') {
@@ -32,16 +33,18 @@ export function parseAuthList(stdout: string): AuthProviderEntry[] {
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
-    if (!line.startsWith('●')) {
+    if (!/^[●•]\s+/.test(line)) {
       continue;
     }
 
-    const afterBullet = line.replace(/^●\s+/, '').trim();
+    const afterBullet = line.replace(/^[●•]\s+/, '').trim();
     if (!afterBullet) {
       continue;
     }
 
     // remove trailing type tags like "oauth" or "api"
+    const typeMatch = afterBullet.match(/\s+(oauth|api)\s*$/i);
+    const type = typeMatch?.[1].toLowerCase() as AuthProviderEntry['type'];
     const label = afterBullet.replace(/\s+(oauth|api)\s*$/i, '').trim();
     if (!label) {
       continue;
@@ -53,7 +56,7 @@ export function parseAuthList(stdout: string): AuthProviderEntry[] {
     }
 
     seen.add(id);
-    providers.push({ id, label });
+    providers.push({ id, label, type });
   }
 
   if (providers.length === 0) {

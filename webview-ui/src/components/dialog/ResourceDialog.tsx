@@ -5,6 +5,7 @@ import type {
   ComposerMcpServerSummary,
   ComposerSkillSummary
 } from '../../../../src/shared/protocol'
+import { useI18n } from '../../i18n'
 
 export type ResourceDialogKind = 'mcp' | 'skills' | 'agents' | 'thinking'
 
@@ -48,6 +49,7 @@ function ResourceKindIcon({ kind }: { kind: ResourceDialogKind }) {
 }
 
 export function ResourceDialog(props: ResourceDialogProps) {
+  const { t } = useI18n()
   const { kind, onClose } = props
 
   useEffect(() => {
@@ -69,15 +71,15 @@ export function ResourceDialog(props: ResourceDialogProps) {
   }
 
   return (
-    <div className="overlay" role="dialog" aria-modal="true" aria-label={`${kind} dialog`}>
-      <button type="button" className="overlay__backdrop" onClick={onClose} aria-label="close" />
+    <div className="overlay" role="dialog" aria-modal="true" aria-label={t(titles[kind])}>
+      <button type="button" className="overlay__backdrop" onClick={onClose} aria-label={t('Close')} />
       <div className="dialog resource-dialog">
         <header className="dialog__header">
           <div className="resource-dialog__heading">
             <span className={`resource-dialog__kindIcon resource-dialog__kindIcon--${kind}`} aria-hidden="true">
               <ResourceKindIcon kind={kind} />
             </span>
-            <div className="dialog__title">{titles[kind]}</div>
+            <div className="dialog__title">{t(titles[kind])}</div>
           </div>
           <div className="resource-dialog__headerActions">
             {(kind === 'mcp' || kind === 'skills') ? (
@@ -85,15 +87,15 @@ export function ResourceDialog(props: ResourceDialogProps) {
                 type="button"
                 className={`icon-button resource-dialog__refresh${props.refreshing ? ' is-loading' : ''}`}
                 onClick={props.onRefresh}
-                aria-label={props.refreshing ? 'Refreshing' : 'Refresh'}
+                aria-label={props.refreshing ? t('Refreshing') : t('Refresh')}
                 aria-busy={props.refreshing}
-                title={props.refreshing ? 'Refreshing' : 'Refresh'}
+                title={props.refreshing ? t('Refreshing') : t('Refresh')}
                 disabled={props.refreshing}
               >
                 <RefreshCw size={14} strokeWidth={1.8} />
               </button>
             ) : null}
-            <button type="button" className="icon-button" onClick={onClose} aria-label="Close" title="Close">
+            <button type="button" className="icon-button" onClick={onClose} aria-label={t('Close')} title={t('Close')}>
               <X size={15} strokeWidth={1.8} />
             </button>
           </div>
@@ -109,11 +111,12 @@ export function ResourceDialog(props: ResourceDialogProps) {
 }
 
 function McpList(props: ResourceDialogProps) {
+  const { t } = useI18n()
   return (
     <div className="resource-dialog__list" aria-live="polite">
-      {props.mcpError ? <div className="dialog__error resource-dialog__error" role="alert">{props.mcpError}</div> : null}
+      {props.mcpError ? <div className="dialog__error resource-dialog__error" role="alert">{t(props.mcpError)}</div> : null}
       {props.mcpServers.length === 0 ? (
-        <div className="dialog__empty">{props.refreshing ? 'Loading MCP servers...' : 'No MCP servers'}</div>
+        <div className="dialog__empty">{props.refreshing ? t('Loading MCP servers...') : t('No MCP servers')}</div>
       ) : null}
       {props.mcpServers.map((server) => {
         const pending = props.pendingMcpTargets.has(server.name)
@@ -145,7 +148,7 @@ function McpList(props: ResourceDialogProps) {
                 ) : (
                   <span className="resource-dialog__statusDot" aria-hidden="true" />
                 )}
-                <span>{statusLabel}</span>
+                <span>{t(statusLabel)}</span>
               </div>
             </div>
             <button
@@ -168,9 +171,10 @@ function McpList(props: ResourceDialogProps) {
 }
 
 function SkillList(props: ResourceDialogProps) {
+  const { t } = useI18n()
   return (
     <div className="resource-dialog__list">
-      {props.skills.length === 0 ? <div className="dialog__empty">{props.refreshing ? 'Loading skills...' : 'No skills'}</div> : null}
+      {props.skills.length === 0 ? <div className="dialog__empty">{props.refreshing ? t('Loading skills...') : t('No skills')}</div> : null}
       {props.skills.map((skill) => (
         <button type="button" className="resource-dialog__item" key={skill.name} onClick={() => props.onSelectSkill(skill)}>
           <span className="resource-dialog__main">

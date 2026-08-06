@@ -45,13 +45,14 @@ describe('session markdown export', () => {
         includeThinking: true,
         includeToolDetails: true,
         includeAssistantMetadata: true
-      }
+      },
+      modelNames: new Map([['openai/gpt-5', 'GPT-5']])
     });
 
     expect(markdown).toContain('# Export example');
     expect(markdown).toContain('**Session ID:** ses_1234567890');
     expect(markdown).toContain('## User\n\nHello');
-    expect(markdown).toContain('## Assistant (Build · openai/gpt-5 · 2.5s)');
+    expect(markdown).toContain('## Assistant (Build · GPT-5 · 2.5s)');
     expect(markdown).toContain('_Thinking:_\n\nCheck the request.');
     expect(markdown).toContain('**Tool: read**');
     expect(markdown).toContain('**Input:**\n```json');
@@ -89,5 +90,31 @@ describe('session markdown export', () => {
     expect(defaultSessionExportFilename('ses_1234567890')).toBe('session-ses_1234.md');
     expect(resolveSessionExportPath('C:\\work', 'exports/session-1')).toBe(path.resolve('C:\\work', 'exports/session-1.md'));
     expect(() => resolveSessionExportPath('C:\\work', '..\\outside.md')).toThrow(/工作区/);
+  });
+
+  it('没有 provider catalog 时与上游一致回退到原始 model id', () => {
+    const markdown = formatSessionMarkdown({
+      sessionId: 'ses_test',
+      exportPayload: {
+        messages: [{
+          info: {
+            role: 'assistant',
+            agent: 'build',
+            providerID: 'openai',
+            modelID: 'gpt-5',
+            time: { created: 1, completed: 1001 }
+          },
+          parts: [{ type: 'text', text: 'Done' }]
+        }]
+      },
+      options: {
+        includeThinking: true,
+        includeToolDetails: true,
+        includeAssistantMetadata: true
+      }
+    });
+
+    expect(markdown).toContain('## Assistant (Build · gpt-5 · 1.0s)');
+    expect(markdown).not.toContain('openai/gpt-5');
   });
 });

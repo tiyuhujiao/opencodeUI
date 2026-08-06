@@ -1,168 +1,71 @@
 # opencode-ui
 
-Language: English | [简体中文](./README.zh-CN.md)
+English | [简体中文](./README.zh-CN.md)
 
-`opencode-ui` is a VS Code-compatible extension that brings an OpenCode chat interface into the IDE sidebar. It connects the extension host to the local or remote `opencode` CLI, starts `opencode serve` when needed, and renders sessions, streaming replies, tools, permissions, models, agents, todos, and image attachments in a React/Vite webview.
+[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/tiyuhujiao.opencode-ui-vscode?label=VS%20Code%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=tiyuhujiao.opencode-ui-vscode)
+[![GitHub release](https://img.shields.io/github/v/release/tiyuhujiao/opencodeUI)](https://github.com/tiyuhujiao/opencodeUI/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](./LICENSE)
 
-The extension is designed for VS Code and compatible IDEs such as Cursor.
+OpenCode is powerful, but using it should not mean constantly moving between the editor, terminal, and configuration files. We built `opencode-ui` to give OpenCode a clear visual home inside VS Code, so conversations, tools, model choices, and code changes stay close to the work they belong to.
+
+Version `1.0.0` is a thorough redesign and rebuild of the earlier extension. The interface is calmer, everyday flows are shorter, and the extension now covers much more of the OpenCode experience without hiding the underlying CLI.
 
 ## Preview
 
-![opencode-ui chat sidebar](./docs/images/opencode-ui-chat.png)
+![OpenCode running in the VS Code sidebar](./docs/images/opencode-ui-preview.png)
 
-| Todo planning | Thinking details |
+## What's New In 1.0.0
+
+### Quick Custom Providers
+
+Connect built-in providers or create your own directly in VS Code. The visual editor supports multiple models, reasoning levels, context and output limits, pricing, headers, credentials, and upstream model discovery, while keeping advanced configuration available when you need it.
+
+| Browse and manage providers | Create a provider quickly |
 | --- | --- |
-| ![Todo panel in opencode-ui](./docs/images/opencode-ui-models.png) | ![Thinking details in opencode-ui](./docs/images/opencode-ui-diagnostics.png) |
+| ![Provider list with connection status](./docs/images/provider-list.png) | ![Quick custom provider editor](./docs/images/provider-quick-setup.png) |
 
-## Features
+### Inline Diff In VS Code
 
-- Sidebar chat UI for OpenCode inside the IDE activity bar.
-- Automatic `opencode serve` startup on `127.0.0.1`, preferring port `4096` and falling back to a free port.
-- Automatic `opencode` binary discovery across common Windows, Linux, WSL, and Remote-SSH install locations.
-- Session listing, switching, export, deletion, timeline, undo, and redo.
-- Model, provider, and agent selection with refresh support.
-- Streaming transcript rendering for text, reasoning, tools, subtasks, todos, permission prompts, and question prompts.
-- Temporary image/file prompt support with host-aware path normalization.
-- Diagnostics popover and `/debug` support for self-checking sessions, models, agents, and request logs.
+Review OpenCode edits where they matter: inside the editor. Added and removed lines are shown as an inline diff, with controls to accept or reject a hunk, a file, or the complete change set.
 
-## Requirements
+![OpenCode inline diff review inside VS Code](./docs/images/inline-diff.png)
 
-- VS Code-compatible host with extension API `>=1.105.0`.
-- Node.js `>=20.0.0` and npm `>=10.0.0` for development.
-- `opencode >=1.15.10` installed in the same host environment where the extension runs.
+### English And Simplified Chinese
 
-Check your CLI with:
+Switch the interface between English and Simplified Chinese at any time. Settings, prompts, dialogs, and status feedback follow your language choice, while familiar technical terms such as `Thinking` and `Tools` stay recognizable.
 
-```powershell
+## What You Can Do
+
+- Chat with OpenCode in the VS Code sidebar with streaming text, `Thinking`, tool activity, subtasks, todos, permissions, and questions.
+- Create and manage providers and models without hand-editing every configuration field.
+- Review code edits with inline diff controls before accepting them.
+- Work with sessions, history, export, undo/redo, files, images, MCP servers, skills, and agents.
+- Use the extension on Windows, Linux, Remote-WSL, and Remote-SSH Linux hosts. Cursor and other compatible VS Code hosts are supported too.
+
+## Before You Start
+
+Install the [OpenCode CLI](https://opencode.ai/) in the same local or remote environment where VS Code runs the extension:
+
+```bash
 opencode --version
 ```
 
-## Supported Hosts
+That is the only required runtime dependency. `opencode-ui` will find the CLI and start `opencode serve` when needed.
 
-| Host | Status | Notes |
-| --- | --- | --- |
-| Windows local | Supported | Finds `.exe`, `.cmd`, and `.bat` shims from npm, Volta, Scoop, Chocolatey, pnpm, Yarn, Bun, Mise, PATH, and common user install directories. |
-| Linux local | Supported | Finds common user-level install directories such as `~/.opencode/bin`, `~/.local/bin`, Bun, pnpm, Volta, and Mise. |
-| Remote-WSL | Supported | `opencode` must be installed inside the WSL distro, because the extension host runs there. |
-| Remote-SSH Linux | Supported | `opencode` must be installed on the remote Linux machine. |
-| Generic Linux remote | Supported | Treated like a Linux remote host. |
-| macOS or non-Linux remotes | Not supported yet | The extension warns and skips `opencode serve` startup. |
+## Install
 
-You can override discovery with:
+**From VS Code Marketplace**
 
-```powershell
-$env:OPENCODE_BINARY = "C:\path\to\opencode.exe"
-```
+Open Extensions in VS Code, search for **opencode-ui**, and install the extension published by **tiyuhujiao**. You can also open the [Marketplace page](https://marketplace.visualstudio.com/items?itemName=tiyuhujiao.opencode-ui-vscode) directly.
 
-or on Linux/WSL:
+**From GitHub Releases**
 
-```bash
-export OPENCODE_BINARY=/path/to/opencode
-```
-
-## Install From Source
-
-Install dependencies:
-
-```bash
-npm ci
-npm --prefix webview-ui ci
-```
-
-Build and verify:
-
-```bash
-npm run check
-```
-
-Package a VSIX:
-
-```bash
-npm run package
-```
-
-Install the generated package into VS Code:
-
-```bash
-code --install-extension vsix/opencode-ui-vscode-0.0.89.vsix --force
-```
-
-Or into Cursor:
-
-```bash
-cursor --install-extension vsix/opencode-ui-vscode-0.0.89.vsix --force
-```
-
-Adjust the VSIX filename to match the current `package.json` version.
-
-## Development
-
-Useful commands:
-
-```bash
-npm run build
-npm --prefix webview-ui run build
-npm run watch
-npm --prefix webview-ui run dev
-npm test
-npm run test:extension
-```
-
-The practical preflight before opening a PR or building a release is:
-
-```bash
-npm run check
-```
-
-Run the VS Code smoke test when extension activation or packaged behavior changes:
-
-```bash
-npm run test:extension
-```
-
-## Repository Layout
-
-- `src/extension.ts` - extension activation, host detection, commands, and sidebar registration.
-- `src/bridge/` - `opencode` CLI wrappers, serve manager, compatibility checks, and parsers.
-- `src/shared/protocol.ts` - typed webview/extension message contract.
-- `src/webview/SidebarProvider.ts` - bridge between VS Code, `opencode serve`, CLI helpers, and the webview.
-- `webview-ui/` - React/Vite webview application.
-- `tests/` - Vitest coverage for parsers, host detection, serve startup, run streams, UI state helpers, and regressions.
-- `out/` and `media/` - generated extension runtime artifacts included in the VSIX.
-- `vsix/` - local package output, ignored by git.
-
-Do not hand-edit generated files in `out/` or `media/`; rebuild them with `npm run build`.
-
-## CI
-
-GitHub Actions runs the repository preflight and packages a VSIX artifact on pushes and pull requests:
-
-```bash
-npm run check
-npm run package
-```
-
-Maintainers can publish the Marketplace package through the `Publish Marketplace` workflow after adding repository secrets named `AZURE_CLIENT_ID` and `AZURE_TENANT_ID`. The workflow runs automatically when a GitHub Release is published and uses the release tag as the Marketplace version, for example `v0.1.0` publishes `0.1.0`. It can also be started manually with an optional version input, falling back to `github-upload/release.json`. Each run rebuilds and verifies the project, generates the public VSIX, uploads the VSIX artifact, signs in with GitHub Actions OIDC, and publishes it with `vsce --azure-credential --skip-duplicate`.
+Download the latest `.vsix` from [GitHub Releases](https://github.com/tiyuhujiao/opencodeUI/releases/latest), then run **Extensions: Install from VSIX...** in VS Code.
 
 ## Feedback
 
-Bug reports, host-specific setup notes, UI ideas, and feature requests are welcome. Please open an issue through [GitHub Issues](https://github.com/tiyuhujiao/opencodeUI/issues), and include your host environment, IDE, `opencode --version`, and any sanitized diagnostics that help reproduce the problem.
-
-## Troubleshooting
-
-If the sidebar reports that `opencode` cannot be found:
-
-- Run `opencode --version` in the same host where the extension runs.
-- In Remote-WSL or Remote-SSH, install `opencode` in the remote environment, not only on Windows.
-- Set `OPENCODE_BINARY` to an absolute executable path if your install location is unusual.
-- Open the diagnostics popover in the sidebar and run the self-check.
-
-If `4096` is occupied, the extension automatically starts `opencode serve` on another free port and caches that port per host kind.
-
-## Release Notes
-
-Release notes can be published through GitHub releases or the VSIX artifact description.
+Ideas, bug reports, and UI suggestions are very welcome. Please [open an issue](https://github.com/tiyuhujiao/opencodeUI/issues) so we can keep improving the extension together. If `opencode-ui` makes your OpenCode workflow a little easier, consider giving the project a star.
 
 ## License
 
-MIT. See [`LICENSE`](./LICENSE).
+MIT. See [LICENSE](./LICENSE).

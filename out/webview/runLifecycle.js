@@ -537,22 +537,40 @@ function getServePartKey(partRecord) {
     const type = typeof partRecord.type === "string" ? partRecord.type : "part";
     return `${messageId}:${type}`;
 }
-function extractEventErrorMessage(value) {
+function extractEventErrorMessage(value, visited = new Set()) {
     if (typeof value === "string") {
         return stripAnsi(value).trim() || null;
     }
     if (!isRecord(value)) {
         return null;
     }
-    const direct = [value.message, value.text, value.name]
+    if (visited.has(value)) {
+        return null;
+    }
+    visited.add(value);
+    const direct = [value.message, value.text]
         .map((entry) => (typeof entry === "string" ? stripAnsi(entry).trim() : ""))
         .find((entry) => entry.length > 0);
     if (direct) {
         return direct;
     }
-    return (extractEventErrorMessage(value.data) ??
-        extractEventErrorMessage(value.error) ??
-        null);
+    for (const nested of [value.data, value.error, value.cause]) {
+        const message = extractEventErrorMessage(nested, visited);
+        if (message) {
+            return message;
+        }
+    }
+    const errorName = [value.name, value._tag]
+        .map((entry) => (typeof entry === "string" ? stripAnsi(entry).trim() : ""))
+        .find((entry) => entry.length > 0);
+    if (errorName === "ProviderModelNotFoundError") {
+        const providerId = typeof value.providerID === "string" ? value.providerID : "";
+        const modelId = typeof value.modelID === "string" ? value.modelID : "";
+        if (providerId && modelId) {
+            return `Model not found: ${providerId}/${modelId}.`;
+        }
+    }
+    return errorName || null;
 }
 function stripAnsi(value) {
     return value.replace(new RegExp(String.fromCharCode(27) + "\\[[0-9;]*m", "g"), "");

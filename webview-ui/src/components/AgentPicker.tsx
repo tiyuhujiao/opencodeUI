@@ -1,4 +1,5 @@
 import type { AgentSummary } from '../../../src/shared/protocol'
+import { useI18n } from '../i18n'
 
 type AgentPickerProps = {
   agents: AgentSummary[]
@@ -9,11 +10,12 @@ type AgentPickerProps = {
 }
 
 export function AgentPicker({ agents, selectedAgent, onSelect, loading, error }: AgentPickerProps) {
+  const { t } = useI18n()
   return (
-    <section className="picker" aria-label="agent picker">
+    <section className="picker" aria-label={t('Agent picker')}>
       <header className="picker__header">
-        <h3>Agent</h3>
-        {loading ? <span>Loading…</span> : null}
+        <h3>{t('Agent')}</h3>
+        {loading ? <span>{t('Loading...')}</span> : null}
       </header>
 
       {error ? <p className="error-line">{error}</p> : null}
@@ -25,7 +27,7 @@ export function AgentPicker({ agents, selectedAgent, onSelect, loading, error }:
       >
         {agents.map((agent) => (
           <option key={agent.name} value={agent.name}>
-            {agent.name}{agent.isPrimary ? ' (primary)' : ''}
+            {agent.name}{agent.isPrimary ? ` (${t('primary')})` : ''}
           </option>
         ))}
       </select>

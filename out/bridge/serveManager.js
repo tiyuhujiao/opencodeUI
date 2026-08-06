@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.configureServePortStorage = configureServePortStorage;
 exports.ensureServeRunning = ensureServeRunning;
+exports.restartServeForConfigChange = restartServeForConfigChange;
 exports.requestServeJson = requestServeJson;
 exports.probeHealth = probeHealth;
 const node_child_process_1 = require("node:child_process");
@@ -48,12 +49,18 @@ const HEALTH_CHECK_TIMEOUT_MS = 1000;
 const STARTUP_TIMEOUT_MS = 12000;
 const POLL_INTERVAL_MS = 250;
 let ensurePromise;
+let restartPromise;
 let currentPort;
+let managedPort;
+let managedChild;
 let portStorage;
 function configureServePortStorage(storage) {
     portStorage = storage;
 }
 async function ensureServeRunning() {
+    if (restartPromise) {
+        return restartPromise;
+    }
     if (ensurePromise) {
         return ensurePromise;
     }
@@ -61,6 +68,15 @@ async function ensureServeRunning() {
         ensurePromise = undefined;
     });
     return ensurePromise;
+}
+async function restartServeForConfigChange() {
+    if (restartPromise) {
+        return restartPromise;
+    }
+    restartPromise = restartServeForConfigChangeInternal().finally(() => {
+        restartPromise = undefined;
+    });
+    return restartPromise;
 }
 async function requestServeJson(pathname, cwd) {
     const runtime = await ensureServeRunning();
@@ -82,7 +98,7 @@ async function requestServeJson(pathname, cwd) {
 async function ensureServeRunningInternal() {
     if (currentPort && (await probeHealth(currentPort))) {
         await persistLastPort(currentPort);
-        return buildRuntime(currentPort, false);
+        return buildRuntime(currentPort, isManagedPort(currentPort));
     }
     const lastPort = readLastPort();
     const candidatePorts = [];
@@ -102,17 +118,32 @@ async function ensureServeRunningInternal() {
     const preferredUsable = await isPortUsable(PREFERRED_PORT);
     let targetPort = preferredUsable ? PREFERRED_PORT : await findFreePort();
     try {
-        await startServe(targetPort);
+        activateManagedRuntime(await startServe(targetPort), targetPort);
     }
     catch (error) {
         if (targetPort !== PREFERRED_PORT) {
             throw error;
         }
         targetPort = await findFreePort();
-        await startServe(targetPort);
+        activateManagedRuntime(await startServe(targetPort), targetPort);
     }
     currentPort = targetPort;
     await persistLastPort(targetPort);
+    return buildRuntime(targetPort, true);
+}
+async function restartServeForConfigChangeInternal() {
+    if (ensurePromise) {
+        await ensurePromise;
+    }
+    const targetPort = await findFreePort();
+    const previousChild = managedChild;
+    const child = await startServe(targetPort);
+    activateManagedRuntime(child, targetPort);
+    currentPort = targetPort;
+    await persistLastPort(targetPort);
+    if (previousChild && previousChild !== child) {
+        stopManagedChild(previousChild);
+    }
     return buildRuntime(targetPort, true);
 }
 function readLastPort() {
@@ -165,8 +196,43 @@ async function startServe(port) {
             }
         }
     });
-    await waitForSpawnReady(child);
-    await waitForHealthAfterSpawn(child, port, stderrBuffer);
+    try {
+        await waitForSpawnReady(child);
+        await waitForHealthAfterSpawn(child, port, stderrBuffer);
+        return child;
+    }
+    catch (error) {
+        stopManagedChild(child);
+        throw error;
+    }
+}
+function activateManagedRuntime(child, port) {
+    managedChild = child;
+    managedPort = port;
+    child.once("exit", () => {
+        if (managedChild !== child) {
+            return;
+        }
+        managedChild = undefined;
+        managedPort = undefined;
+        if (currentPort === port) {
+            currentPort = undefined;
+        }
+    });
+}
+function isManagedPort(port) {
+    return managedPort === port && managedChild?.exitCode === null;
+}
+function stopManagedChild(child) {
+    if (child.exitCode !== null) {
+        return;
+    }
+    try {
+        child.kill();
+    }
+    catch {
+        // The process may already be exiting between the exitCode check and kill().
+    }
 }
 function waitForSpawnReady(child) {
     return new Promise((resolve, reject) => {

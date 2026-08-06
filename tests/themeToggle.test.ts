@@ -21,7 +21,7 @@ describe('webview theme toggle', () => {
 
     expect(source).toContain('className="theme-toggle"')
     expect(source).toContain("setThemeMode((current) => (current === 'light' ? 'dark' : 'light'))")
-    expect(source).toContain("aria-label={themeMode === 'light' ? '切换到黑色主题' : '切换到白色主题'}")
+    expect(source).toContain("aria-label={themeMode === 'light' ? t('Switch to dark theme') : t('Switch to light theme')}")
     expect(source).toContain('Moon')
     expect(source).toContain('Sun')
     expect(source).toContain("themeMode === 'light' ? <Moon size={14}")

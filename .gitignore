@@ -8,6 +8,7 @@ webview-ui/node_modules/
 # Playwright CLI verification artifacts
 .playwright-cli/
 output/
+.tmp/
 
 # Local package artifacts
 /vsix/

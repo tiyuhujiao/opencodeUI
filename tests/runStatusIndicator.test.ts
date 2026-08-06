@@ -5,20 +5,25 @@ import { describe, expect, it } from 'vitest'
 const root = process.cwd()
 
 describe('webview run status indicator', () => {
-  it('运行与完成状态使用图标组件渲染，不再直接显示状态文字', () => {
+  it('运行状态固定在顶栏槽位，生命周期变化不再增删独立状态行', () => {
     const source = readFileSync(join(root, 'webview-ui/src/App.tsx'), 'utf8')
 
-    expect(source).toContain('function RunStatusIndicator')
+    expect(source).toContain('function RunActivityIndicator')
+    expect(source).toContain('function RunStatusDetails')
     expect(source).toContain("status === 'Running…'")
     expect(source).toContain("status === 'Completed'")
     expect(source).toContain('className={`run-indicator run-indicator--${activity.kind}`}')
-    expect(source).toContain('aria-label={activity.label}')
+    expect(source).toContain('aria-label={t(activity.label)}')
     expect(source).toContain('<EditedFilesSummary files={files} onOpenFile={onOpenFile} onDismissFile={onDismissFile} />')
     expect(source).toContain('mergeEditedFileSummaries(editedFiles, reviewFiles)')
     expect(source).toContain("type: 'inlineDiff.open'")
     expect(source).toContain("type: 'inlineDiff.dismiss'")
     expect(source).toContain("message.type === 'inlineDiff.state'")
-    expect(source).toContain('status={runStatus ?? \'Changes ready\'}')
+    expect(source).toContain('<RunActivityIndicator status={runStatus} />')
+    expect(source).toContain('<RunStatusDetails')
+    expect(source).toContain('const message = status && !getRunActivity(status) ? status : null')
+    expect(source).toContain('onPointerDownCapture={clearSettledRunIndicator}')
+    expect(source).toContain('onKeyDownCapture={clearSettledRunIndicator}')
     expect(source).toContain('function QuestionBanner')
     expect(source).toContain("type: 'question.reply'")
     expect(source).toContain("type: 'question.reject'")
@@ -31,6 +36,10 @@ describe('webview run status indicator', () => {
     const styles = readFileSync(join(root, 'webview-ui/src/styles.css'), 'utf8')
 
     expect(styles).toContain('.run-indicator--running .run-indicator__icon')
+    expect(styles).toContain('.run-activity-slot')
+    expect(styles).toContain('flex: 0 0 1.75rem')
+    expect(styles).toContain('.run-activity-slot.is-empty')
+    expect(styles).toContain('visibility: hidden')
     expect(styles).toContain('animation: run-status-spin')
     expect(styles).toContain('.run-indicator--completed .run-indicator__icon::after')
     expect(styles).toContain('animation: run-status-check')

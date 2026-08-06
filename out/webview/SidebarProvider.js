@@ -53,9 +53,13 @@ const parsers_1 = require("../bridge/parsers");
 const protocol_1 = require("../shared/protocol");
 const runLifecycle_1 = require("./runLifecycle");
 const sessionMarkdown_1 = require("../sessionMarkdown");
+const providerSettings_1 = require("../providerSettings");
+const providerUpstreamModels_1 = require("../providerUpstreamModels");
+const providerCatalog_1 = require("../providerCatalog");
 const SESSION_EXPORT_CACHE_TTL_MS = 8000;
 const EMPTY_SESSION_EXPORT_CACHE_TTL_MS = 750;
 const MODELS_CACHE_TTL_MS = 15 * 60000;
+const PROVIDER_SETTINGS_CATALOG_TTL_MS = 5 * 60000;
 const TEMPFILE_MAX_BYTES = 10 * 1024 * 1024;
 const TEMPFILE_MAX_BASE64_CHARS = Math.ceil(TEMPFILE_MAX_BYTES / 3) * 4 + 4;
 const TEMPFILE_TTL_MS = 30 * 60000;
@@ -281,6 +285,39 @@ class SidebarProvider {
                 case "models.list.byProvider":
                     void this.handleModelsListByProviderRequest(webview, message.requestId, message.payload.providerId, message.payload.forceRefresh === true);
                     return;
+                case "provider.settings.get":
+                    void this.handleProviderSettingsGetRequest(webview, message.requestId, message.payload.scope, message.payload.forceRefresh === true);
+                    return;
+                case "provider.settings.models":
+                    void this.handleProviderSettingsModelsRequest(webview, message.requestId, message.payload.providerId, message.payload.forceRefresh === true);
+                    return;
+                case "provider.settings.upstreamModels":
+                    void this.handleProviderSettingsUpstreamModelsRequest(webview, message.requestId, message.payload.scope, message.payload.draft, message.payload.endpoint);
+                    return;
+                case "provider.settings.save":
+                    void this.handleProviderSettingsSaveRequest(webview, message.requestId, message.payload.scope, message.payload.revision, message.payload.draft);
+                    return;
+                case "provider.settings.delete":
+                    void this.handleProviderSettingsDeleteRequest(webview, message.requestId, message.payload.scope, message.payload.revision, message.payload.providerId);
+                    return;
+                case "provider.settings.openConfig":
+                    void this.handleProviderSettingsOpenConfigRequest(webview, message.requestId, message.payload.scope);
+                    return;
+                case "provider.auth.api":
+                    void this.handleProviderAuthApiRequest(webview, message.requestId, message.payload.providerId, message.payload.key, message.payload.metadata);
+                    return;
+                case "provider.auth.oauth.authorize":
+                    void this.handleProviderAuthOAuthAuthorizeRequest(webview, message.requestId, message.payload.providerId, message.payload.method, message.payload.inputs);
+                    return;
+                case "provider.auth.oauth.callback":
+                    void this.handleProviderAuthOAuthCallbackRequest(webview, message.requestId, message.payload.providerId, message.payload.method, message.payload.code);
+                    return;
+                case "provider.auth.disconnect":
+                    void this.handleProviderAuthDisconnectRequest(webview, message.requestId, message.payload.providerId);
+                    return;
+                case "provider.auth.openExternal":
+                    void this.handleProviderAuthOpenExternalRequest(webview, message.requestId, message.payload.url);
+                    return;
                 case "agents.list":
                     void this.handleAgentsListRequest(webview, message.requestId);
                     return;
@@ -413,14 +450,19 @@ class SidebarProvider {
     }
     async handleSessionMarkdownExportRequest(webview, requestId, payload) {
         try {
-            const [cachedExport, sessionInfo] = await Promise.all([
+            const [cachedExport, sessionInfo, providerCatalog] = await Promise.all([
                 this.getSessionExportData(payload.sessionId),
                 this.getSessionInfoForRead(payload.sessionId),
+                this.getProviderSettingsCatalog(false).catch(() => undefined),
             ]);
+            const modelNames = providerCatalog
+                ? new Map([...providerCatalog.modelsByProvider].flatMap(([providerId, models]) => models.map((model) => [`${providerId}/${model.id}`, model.name])))
+                : undefined;
             const markdown = (0, sessionMarkdown_1.formatSessionMarkdown)({
                 sessionId: payload.sessionId,
                 sessionInfo,
                 exportPayload: cachedExport.data,
+                modelNames,
                 options: {
                     includeThinking: payload.includeThinking,
                     includeToolDetails: payload.includeToolDetails,
@@ -827,6 +869,390 @@ class SidebarProvider {
         catch (error) {
             this.respondError(webview, requestId, error, `获取 models 失败（provider=${providerId}）。`);
         }
+    }
+    async handleProviderSettingsGetRequest(webview, requestId, scope, forceRefresh) {
+        try {
+            const snapshot = await this.buildProviderSettingsSnapshot(scope, forceRefresh);
+            this.respond(webview, {
+                type: "provider.settings.get.response",
+                requestId,
+                ok: true,
+                payload: snapshot,
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "读取 provider 配置失败。");
+        }
+    }
+    async handleProviderSettingsModelsRequest(webview, requestId, providerId, forceRefresh) {
+        try {
+            const catalog = await this.getProviderSettingsCatalog(forceRefresh);
+            this.respond(webview, {
+                type: "provider.settings.models.response",
+                requestId,
+                ok: true,
+                payload: {
+                    providerId,
+                    models: catalog.modelsByProvider.get(providerId) ?? [],
+                },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "读取 provider 模型目录失败。");
+        }
+    }
+    async handleProviderSettingsUpstreamModelsRequest(webview, requestId, scope, draft, endpoint) {
+        try {
+            const result = await (0, providerUpstreamModels_1.fetchProviderUpstreamModels)(scope, draft, endpoint, {
+                ...this.getProviderSettingsPathContext(),
+            });
+            this.respond(webview, {
+                type: "provider.settings.upstreamModels.response",
+                requestId,
+                ok: true,
+                payload: {
+                    providerId: draft.id,
+                    endpoint: result.endpoint,
+                    models: result.models,
+                },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "拉取上游模型失败。");
+        }
+    }
+    async handleProviderSettingsSaveRequest(webview, requestId, scope, revision, draft) {
+        try {
+            await (0, providerSettings_1.saveProviderConfigDraft)(scope, revision, draft, this.getProviderSettingsPathContext());
+            try {
+                await this.syncProviderCredential(draft);
+            }
+            catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
+                throw new Error(`配置文件已保存，但 credential 更新失败：${detail}`);
+            }
+            try {
+                await (0, serveManager_1.restartServeForConfigChange)();
+            }
+            catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
+                throw new Error(`配置文件已保存，但 OpenCode 重新载入配置失败：${detail}`);
+            }
+            this.invalidateProviderCaches();
+            const snapshot = await this.buildProviderSettingsSnapshot(scope, true);
+            this.respond(webview, {
+                type: "provider.settings.save.response",
+                requestId,
+                ok: true,
+                payload: snapshot,
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "保存 provider 配置失败。");
+        }
+    }
+    async handleProviderSettingsDeleteRequest(webview, requestId, scope, revision, providerId) {
+        try {
+            await (0, providerSettings_1.deleteProviderConfigDraft)(scope, revision, providerId, this.getProviderSettingsPathContext());
+            await (0, serveManager_1.restartServeForConfigChange)();
+            this.invalidateProviderCaches();
+            const snapshot = await this.buildProviderSettingsSnapshot(scope, true);
+            this.respond(webview, {
+                type: "provider.settings.delete.response",
+                requestId,
+                ok: true,
+                payload: snapshot,
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "删除 provider 配置失败。");
+        }
+    }
+    async handleProviderSettingsOpenConfigRequest(webview, requestId, scope) {
+        try {
+            const document = await (0, providerSettings_1.ensureProviderConfigFile)(scope, this.getProviderSettingsPathContext());
+            const textDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(document.path));
+            await vscode.window.showTextDocument(textDocument, {
+                preview: false,
+                preserveFocus: false,
+            });
+            this.respond(webview, {
+                type: "provider.settings.openConfig.response",
+                requestId,
+                ok: true,
+                payload: { scope, path: document.path },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "打开 provider 配置失败。");
+        }
+    }
+    async handleProviderAuthApiRequest(webview, requestId, providerId, key, metadata) {
+        try {
+            const body = {
+                type: "api",
+                key,
+                ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+            };
+            await this.requestServeNoContent(`/auth/${encodeURIComponent(providerId)}`, {
+                method: "PUT",
+                body: JSON.stringify(body),
+                includeCwd: false,
+            });
+            this.invalidateProviderCaches();
+            this.respond(webview, {
+                type: "provider.auth.api.response",
+                requestId,
+                ok: true,
+                payload: { providerId },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "保存 Provider API key 失败。");
+        }
+    }
+    async handleProviderAuthOAuthAuthorizeRequest(webview, requestId, providerId, method, inputs) {
+        try {
+            const authorization = await this.requestServeJson(`/provider/${encodeURIComponent(providerId)}/oauth/authorize`, {
+                method: "POST",
+                body: JSON.stringify({ method, inputs }),
+            });
+            if (!authorization) {
+                throw new Error("OpenCode 未返回 OAuth 授权信息。");
+            }
+            await this.openProviderAuthUrl(authorization.url);
+            this.respond(webview, {
+                type: "provider.auth.oauth.authorize.response",
+                requestId,
+                ok: true,
+                payload: { providerId, method, authorization },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "启动 Provider OAuth 登录失败。");
+        }
+    }
+    async handleProviderAuthOAuthCallbackRequest(webview, requestId, providerId, method, code) {
+        try {
+            await this.requestServeJson(`/provider/${encodeURIComponent(providerId)}/oauth/callback`, {
+                method: "POST",
+                body: JSON.stringify({ method, ...(code ? { code } : {}) }),
+            });
+            this.invalidateProviderCaches();
+            this.respond(webview, {
+                type: "provider.auth.oauth.callback.response",
+                requestId,
+                ok: true,
+                payload: { providerId },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "完成 Provider OAuth 登录失败。");
+        }
+    }
+    async handleProviderAuthDisconnectRequest(webview, requestId, providerId) {
+        try {
+            await this.requestServeNoContent(`/auth/${encodeURIComponent(providerId)}`, {
+                method: "DELETE",
+                includeCwd: false,
+            });
+            this.invalidateProviderCaches();
+            this.respond(webview, {
+                type: "provider.auth.disconnect.response",
+                requestId,
+                ok: true,
+                payload: { providerId },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "移除 Provider 登录凭据失败。");
+        }
+    }
+    async handleProviderAuthOpenExternalRequest(webview, requestId, url) {
+        try {
+            await this.openProviderAuthUrl(url);
+            this.respond(webview, {
+                type: "provider.auth.openExternal.response",
+                requestId,
+                ok: true,
+                payload: { url },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "打开 Provider 授权链接失败。");
+        }
+    }
+    async openProviderAuthUrl(value) {
+        let url;
+        try {
+            url = new URL(value);
+        }
+        catch {
+            throw new Error("OpenCode 返回了无效的授权链接。");
+        }
+        if (url.protocol !== "https:" && url.protocol !== "http:") {
+            throw new Error("只允许打开 HTTP 或 HTTPS 授权链接。");
+        }
+        const opened = await vscode.env.openExternal(vscode.Uri.parse(url.toString(), true));
+        if (!opened) {
+            throw new Error("系统未能打开默认浏览器。");
+        }
+    }
+    getProviderSettingsPathContext() {
+        return { workspaceFolder: this.getDefaultCwd() };
+    }
+    async buildProviderSettingsSnapshot(scope, forceRefresh) {
+        const [document, catalog, storedCredentials] = await Promise.all([
+            (0, providerSettings_1.readProviderConfigDocument)(scope, this.getProviderSettingsPathContext()),
+            this.getProviderSettingsCatalog(forceRefresh),
+            this.loadStoredProviderCredentials(),
+        ]);
+        const providerIdentities = new Map(catalog.entries.map((entry) => [entry.id, { id: entry.id, label: entry.label }]));
+        const configuredProviders = isRecord(document.config.provider)
+            ? document.config.provider
+            : {};
+        for (const [id, value] of Object.entries(configuredProviders)) {
+            const provider = isRecord(value) ? value : undefined;
+            providerIdentities.set(id, {
+                id,
+                label: typeof provider?.name === "string" && provider.name.trim() ? provider.name : id,
+            });
+        }
+        const storedCredentialProviderIds = (0, providerCatalog_1.resolveStoredCredentialProviderIds)(storedCredentials, [...providerIdentities.values()]);
+        const storedCredentialTypes = (0, providerCatalog_1.resolveStoredCredentialTypes)(storedCredentials, [...providerIdentities.values()]);
+        const configured = (0, providerSettings_1.providerConfigToDrafts)(document.config, {
+            connectedProviderIds: catalog.connectedProviderIds,
+            storedCredentialProviderIds,
+            knownProviderIds: catalog.builtInProviderIds,
+        });
+        const catalogEntries = catalog.entries.map((entry) => ({
+            ...entry,
+            credentialStored: storedCredentialProviderIds.has(entry.id),
+            credentialType: storedCredentialTypes.get(entry.id) ?? null,
+        }));
+        return {
+            scope,
+            path: document.path,
+            exists: document.exists,
+            revision: document.revision,
+            workspaceAvailable: document.workspaceAvailable,
+            customConfigPath: document.customConfigPath,
+            catalog: (0, providerCatalog_1.mergeConfiguredCatalogEntries)(catalogEntries, configured),
+            configured,
+        };
+    }
+    async loadStoredProviderCredentials() {
+        try {
+            const result = await (0, opencodeCli_1.authList)({ cwd: this.getDefaultCwd(), timeoutMs: 10000 });
+            return (0, parsers_1.parseAuthList)(result.stdout);
+        }
+        catch {
+            return [];
+        }
+    }
+    async getProviderSettingsCatalog(forceRefresh) {
+        if (forceRefresh) {
+            this.providerSettingsCatalogCache = undefined;
+        }
+        const cached = this.providerSettingsCatalogCache;
+        if (!forceRefresh
+            && cached
+            && Date.now() - cached.loadedAt < PROVIDER_SETTINGS_CATALOG_TTL_MS) {
+            return cached.catalog;
+        }
+        if (this.providerSettingsCatalogInFlight) {
+            return this.providerSettingsCatalogInFlight;
+        }
+        const task = this.loadProviderSettingsCatalog();
+        this.providerSettingsCatalogInFlight = task;
+        try {
+            const catalog = await task;
+            this.providerSettingsCatalogCache = { loadedAt: Date.now(), catalog };
+            return catalog;
+        }
+        finally {
+            if (this.providerSettingsCatalogInFlight === task) {
+                this.providerSettingsCatalogInFlight = undefined;
+            }
+        }
+    }
+    async loadProviderSettingsCatalog() {
+        try {
+            const [providerPayload, authResult] = await Promise.all([
+                this.requestServeJson("/provider"),
+                this.requestServeJson("/provider/auth", { includeCwd: false }).catch((error) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    (0, diagnostics_1.logWarn)(`provider auth methods unavailable: ${message}`);
+                    return {};
+                }),
+            ]);
+            return (0, providerCatalog_1.normalizeProviderCatalog)(providerPayload, authResult);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            (0, diagnostics_1.logWarn)(`provider endpoint unavailable, falling back to CLI catalog: ${message}`);
+            return this.loadFallbackProviderSettingsCatalog();
+        }
+    }
+    async loadFallbackProviderSettingsCatalog() {
+        const [models, authResult] = await Promise.all([
+            this.getAllModelsPayload(false),
+            (0, opencodeCli_1.authList)({ cwd: this.getDefaultCwd() }).catch(() => undefined),
+        ]);
+        const providers = new Map();
+        for (const entry of models) {
+            const parsed = splitModel(entry.name);
+            const providerId = entry.providerID || parsed?.providerID;
+            const modelId = parsed?.modelID;
+            if (!providerId || !modelId) {
+                continue;
+            }
+            const provider = providers.get(providerId) ?? {
+                id: providerId,
+                name: providerId,
+                source: "cli",
+                models: {},
+            };
+            const providerModels = provider.models;
+            providerModels[modelId] = {
+                name: modelId,
+                reasoning: entry.supportsThinking === true,
+                variants: entry.variants
+                    ? Object.fromEntries(entry.variants.map((variant) => [variant, {}]))
+                    : undefined,
+            };
+            providers.set(providerId, provider);
+        }
+        const authProviders = authResult ? (0, parsers_1.parseAuthList)(authResult.stdout) : [];
+        const authPayload = Object.fromEntries(authProviders.map((provider) => [
+            provider.id,
+            [{ type: "api", label: "Configured credential" }],
+        ]));
+        return (0, providerCatalog_1.normalizeProviderCatalog)({
+            all: [...providers.values()],
+            connected: authProviders.map((provider) => provider.id),
+        }, authPayload);
+    }
+    async syncProviderCredential(draft) {
+        const pathname = `/auth/${encodeURIComponent(draft.id)}`;
+        if (draft.credential.mode === "store" && draft.credential.value) {
+            await this.requestServeNoContent(pathname, {
+                method: "PUT",
+                body: JSON.stringify({ type: "api", key: draft.credential.value }),
+                includeCwd: false,
+            });
+            return;
+        }
+        if ((0, providerSettings_1.shouldDeleteStoredProviderCredential)(draft)) {
+            await this.requestServeNoContent(pathname, {
+                method: "DELETE",
+                includeCwd: false,
+            });
+        }
+    }
+    invalidateProviderCaches() {
+        this.providerSettingsCatalogCache = undefined;
+        this.modelsCache.clear();
     }
     async handleAgentsListRequest(webview, requestId) {
         try {

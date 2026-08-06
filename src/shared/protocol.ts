@@ -18,6 +18,17 @@ export const WEBVIEW_REQUEST_WHITELIST = [
   'providers.list',
   'models.list',
   'models.list.byProvider',
+  'provider.settings.get',
+  'provider.settings.models',
+  'provider.settings.upstreamModels',
+  'provider.settings.save',
+  'provider.settings.delete',
+  'provider.settings.openConfig',
+  'provider.auth.api',
+  'provider.auth.oauth.authorize',
+  'provider.auth.oauth.callback',
+  'provider.auth.disconnect',
+  'provider.auth.openExternal',
   'agents.list',
   'composer.resources.list',
   'mcp.setEnabled',
@@ -136,6 +147,108 @@ export type ModelsListByProviderRequest = {
   };
 };
 
+export type ProviderSettingsGetRequest = {
+  type: 'provider.settings.get';
+  requestId: string;
+  payload: {
+    scope: ProviderSettingsScope;
+    forceRefresh?: boolean;
+  };
+};
+
+export type ProviderSettingsModelsRequest = {
+  type: 'provider.settings.models';
+  requestId: string;
+  payload: {
+    providerId: string;
+    forceRefresh?: boolean;
+  };
+};
+
+export type ProviderSettingsUpstreamModelsRequest = {
+  type: 'provider.settings.upstreamModels';
+  requestId: string;
+  payload: {
+    scope: ProviderSettingsScope;
+    draft: ProviderSettingsDraft;
+    endpoint: string;
+  };
+};
+
+export type ProviderSettingsSaveRequest = {
+  type: 'provider.settings.save';
+  requestId: string;
+  payload: {
+    scope: ProviderSettingsScope;
+    revision: string;
+    draft: ProviderSettingsDraft;
+  };
+};
+
+export type ProviderSettingsDeleteRequest = {
+  type: 'provider.settings.delete';
+  requestId: string;
+  payload: {
+    scope: ProviderSettingsScope;
+    revision: string;
+    providerId: string;
+  };
+};
+
+export type ProviderSettingsOpenConfigRequest = {
+  type: 'provider.settings.openConfig';
+  requestId: string;
+  payload: {
+    scope: ProviderSettingsScope;
+  };
+};
+
+export type ProviderAuthApiRequest = {
+  type: 'provider.auth.api';
+  requestId: string;
+  payload: {
+    providerId: string;
+    key: string;
+    metadata: Record<string, string>;
+  };
+};
+
+export type ProviderAuthOAuthAuthorizeRequest = {
+  type: 'provider.auth.oauth.authorize';
+  requestId: string;
+  payload: {
+    providerId: string;
+    method: number;
+    inputs: Record<string, string>;
+  };
+};
+
+export type ProviderAuthOAuthCallbackRequest = {
+  type: 'provider.auth.oauth.callback';
+  requestId: string;
+  payload: {
+    providerId: string;
+    method: number;
+    code?: string;
+  };
+};
+
+export type ProviderAuthDisconnectRequest = {
+  type: 'provider.auth.disconnect';
+  requestId: string;
+  payload: {
+    providerId: string;
+  };
+};
+
+export type ProviderAuthOpenExternalRequest = {
+  type: 'provider.auth.openExternal';
+  requestId: string;
+  payload: {
+    url: string;
+  };
+};
+
 export type AgentsListRequest = {
   type: 'agents.list';
   requestId: string;
@@ -220,6 +333,17 @@ export type WebviewRequestMessage =
   | ProvidersListRequest
   | ModelsListRequest
   | ModelsListByProviderRequest
+  | ProviderSettingsGetRequest
+  | ProviderSettingsModelsRequest
+  | ProviderSettingsUpstreamModelsRequest
+  | ProviderSettingsSaveRequest
+  | ProviderSettingsDeleteRequest
+  | ProviderSettingsOpenConfigRequest
+  | ProviderAuthApiRequest
+  | ProviderAuthOAuthAuthorizeRequest
+  | ProviderAuthOAuthCallbackRequest
+  | ProviderAuthDisconnectRequest
+  | ProviderAuthOpenExternalRequest
   | AgentsListRequest
   | ComposerResourcesListRequest
   | McpSetEnabledRequest
@@ -429,6 +553,156 @@ export type ProviderSummary = {
   label: string;
 };
 
+export type ProviderSettingsScope = 'workspace' | 'global';
+
+export type ProviderCredentialMode = 'store' | 'env' | 'config' | 'none';
+
+export type ProviderSettingsHeader = {
+  name: string;
+  value: string;
+  hasStoredValue: boolean;
+};
+
+export type ProviderSettingsCostDraft = {
+  input: number | null;
+  output: number | null;
+  cacheRead: number | null;
+  cacheWrite: number | null;
+};
+
+export type ProviderSettingsModelDraft = {
+  id: string;
+  apiModelId: string;
+  name: string;
+  description: string;
+  api: string;
+  npm: string;
+  family: string;
+  releaseDate: string;
+  status: '' | 'alpha' | 'beta' | 'deprecated' | 'active';
+  experimental: boolean | null;
+  attachment: boolean | null;
+  reasoning: boolean | null;
+  temperature: boolean | null;
+  toolCall: boolean | null;
+  interleaved: boolean | string | { field: string } | null;
+  limit: {
+    context: number | null;
+    input: number | null;
+    output: number | null;
+  };
+  cost: ProviderSettingsCostDraft & {
+    contextOver200k: ProviderSettingsCostDraft;
+  };
+  modalities: {
+    input: Array<'text' | 'audio' | 'image' | 'video' | 'pdf'> | null;
+    output: Array<'text' | 'audio' | 'image' | 'video' | 'pdf'> | null;
+  };
+  headers: ProviderSettingsHeader[];
+  optionsJson: string;
+  variantsJson: string;
+  extrasJson: string;
+};
+
+export type ProviderSettingsDraft = {
+  originalId: string | null;
+  id: string;
+  configId: string;
+  custom: boolean;
+  name: string;
+  api: string;
+  npm: string;
+  env: string[];
+  whitelist: string[];
+  blacklist: string[];
+  baseURL: string;
+  enterpriseUrl: string;
+  setCacheKey: boolean | null;
+  timeout: number | false | null;
+  headerTimeout: number | false | null;
+  chunkTimeout: number | null;
+  headers: ProviderSettingsHeader[];
+  credential: {
+    mode: ProviderCredentialMode;
+    initialMode: ProviderCredentialMode;
+    value: string;
+    env: string;
+    hasConfigValue: boolean;
+    hasStoreValue: boolean;
+    connected: boolean;
+  };
+  optionExtrasJson: string;
+  providerExtrasJson: string;
+  models: ProviderSettingsModelDraft[];
+};
+
+export type ProviderSettingsAuthPromptWhen = {
+  key: string;
+  op: 'eq' | 'neq';
+  value: string;
+};
+
+export type ProviderSettingsAuthPrompt =
+  | {
+      type: 'text';
+      key: string;
+      message: string;
+      placeholder?: string;
+      when?: ProviderSettingsAuthPromptWhen;
+    }
+  | {
+      type: 'select';
+      key: string;
+      message: string;
+      options: Array<{ label: string; value: string; hint?: string }>;
+      when?: ProviderSettingsAuthPromptWhen;
+    };
+
+export type ProviderSettingsAuthMethod = {
+  type: 'oauth' | 'api';
+  label: string;
+  prompts: ProviderSettingsAuthPrompt[];
+};
+
+export type ProviderSettingsCatalogEntry = {
+  id: string;
+  label: string;
+  source: string;
+  api: string;
+  npm: string;
+  builtIn: boolean;
+  connected: boolean;
+  credentialStored: boolean;
+  credentialType: 'api' | 'oauth' | null;
+  configuredInScope: boolean;
+  env: string[];
+  modelCount: number;
+  authMethods: ProviderSettingsAuthMethod[];
+};
+
+export type ProviderSettingsCatalogModel = ProviderSettingsModelDraft;
+
+export type ProviderUpstreamModel = {
+  id: string;
+  name: string;
+  description: string;
+  ownedBy: string;
+  createdAt: string;
+  contextWindow: number | null;
+  maxOutputTokens: number | null;
+};
+
+export type ProviderSettingsSnapshot = {
+  scope: ProviderSettingsScope;
+  path: string;
+  exists: boolean;
+  revision: string;
+  workspaceAvailable: boolean;
+  customConfigPath?: string;
+  catalog: ProviderSettingsCatalogEntry[];
+  configured: ProviderSettingsDraft[];
+};
+
 export type ProvidersListResponseMessage = {
   type: 'providers.list.response';
   requestId: string;
@@ -436,6 +710,103 @@ export type ProvidersListResponseMessage = {
   payload: {
     providers: ProviderSummary[];
   };
+};
+
+export type ProviderSettingsGetResponseMessage = {
+  type: 'provider.settings.get.response';
+  requestId: string;
+  ok: true;
+  payload: ProviderSettingsSnapshot;
+};
+
+export type ProviderSettingsModelsResponseMessage = {
+  type: 'provider.settings.models.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    providerId: string;
+    models: ProviderSettingsCatalogModel[];
+  };
+};
+
+export type ProviderSettingsUpstreamModelsResponseMessage = {
+  type: 'provider.settings.upstreamModels.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    providerId: string;
+    endpoint: string;
+    models: ProviderUpstreamModel[];
+  };
+};
+
+export type ProviderSettingsSaveResponseMessage = {
+  type: 'provider.settings.save.response';
+  requestId: string;
+  ok: true;
+  payload: ProviderSettingsSnapshot;
+};
+
+export type ProviderSettingsDeleteResponseMessage = {
+  type: 'provider.settings.delete.response';
+  requestId: string;
+  ok: true;
+  payload: ProviderSettingsSnapshot;
+};
+
+export type ProviderSettingsOpenConfigResponseMessage = {
+  type: 'provider.settings.openConfig.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    scope: ProviderSettingsScope;
+    path: string;
+  };
+};
+
+export type ProviderAuthAuthorization = {
+  url: string;
+  method: 'auto' | 'code';
+  instructions: string;
+};
+
+export type ProviderAuthApiResponseMessage = {
+  type: 'provider.auth.api.response';
+  requestId: string;
+  ok: true;
+  payload: { providerId: string };
+};
+
+export type ProviderAuthOAuthAuthorizeResponseMessage = {
+  type: 'provider.auth.oauth.authorize.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    providerId: string;
+    method: number;
+    authorization: ProviderAuthAuthorization;
+  };
+};
+
+export type ProviderAuthOAuthCallbackResponseMessage = {
+  type: 'provider.auth.oauth.callback.response';
+  requestId: string;
+  ok: true;
+  payload: { providerId: string };
+};
+
+export type ProviderAuthDisconnectResponseMessage = {
+  type: 'provider.auth.disconnect.response';
+  requestId: string;
+  ok: true;
+  payload: { providerId: string };
+};
+
+export type ProviderAuthOpenExternalResponseMessage = {
+  type: 'provider.auth.openExternal.response';
+  requestId: string;
+  ok: true;
+  payload: { url: string };
 };
 
 export type AgentSummary = {
@@ -768,6 +1139,17 @@ export type ExtensionResponseMessage =
   | TempfileWriteResponseMessage
   | ProvidersListResponseMessage
   | ModelsListResponseMessage
+  | ProviderSettingsGetResponseMessage
+  | ProviderSettingsModelsResponseMessage
+  | ProviderSettingsUpstreamModelsResponseMessage
+  | ProviderSettingsSaveResponseMessage
+  | ProviderSettingsDeleteResponseMessage
+  | ProviderSettingsOpenConfigResponseMessage
+  | ProviderAuthApiResponseMessage
+  | ProviderAuthOAuthAuthorizeResponseMessage
+  | ProviderAuthOAuthCallbackResponseMessage
+  | ProviderAuthDisconnectResponseMessage
+  | ProviderAuthOpenExternalResponseMessage
   | AgentsListResponseMessage
   | ComposerResourcesListResponseMessage
   | McpSetEnabledResponseMessage
@@ -799,6 +1181,17 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set<string>([
   'tempfile.write.response',
   'providers.list.response',
   'models.list.response',
+  'provider.settings.get.response',
+  'provider.settings.models.response',
+  'provider.settings.upstreamModels.response',
+  'provider.settings.save.response',
+  'provider.settings.delete.response',
+  'provider.settings.openConfig.response',
+  'provider.auth.api.response',
+  'provider.auth.oauth.authorize.response',
+  'provider.auth.oauth.callback.response',
+  'provider.auth.disconnect.response',
+  'provider.auth.openExternal.response',
   'agents.list.response',
   'composer.resources.list.response',
   'mcp.setEnabled.response',
@@ -816,6 +1209,252 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set<string>([
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function isProviderSettingsScope(value: unknown): value is ProviderSettingsScope {
+  return value === 'workspace' || value === 'global';
+}
+
+function isBoundedString(value: unknown, maxLength = 100_000): value is string {
+  return typeof value === 'string' && value.length <= maxLength;
+}
+
+function isStringArray(value: unknown, maxItems = 500, maxItemLength = 2048): value is string[] {
+  return Array.isArray(value)
+    && value.length <= maxItems
+    && value.every((item) => isBoundedString(item, maxItemLength));
+}
+
+function isStringRecord(
+  value: unknown,
+  maxEntries = 50,
+  maxKeyLength = 256,
+  maxValueLength = 16_384
+): value is Record<string, string> {
+  return isObject(value)
+    && Object.entries(value).length <= maxEntries
+    && Object.entries(value).every(([key, entry]) => key.length <= maxKeyLength && isBoundedString(entry, maxValueLength));
+}
+
+function isProviderSettingsAuthPromptWhen(value: unknown): value is ProviderSettingsAuthPromptWhen {
+  return isObject(value)
+    && isBoundedString(value.key, 256)
+    && (value.op === 'eq' || value.op === 'neq')
+    && isBoundedString(value.value, 2048);
+}
+
+function isProviderSettingsAuthPrompt(value: unknown): value is ProviderSettingsAuthPrompt {
+  if (
+    !isObject(value)
+    || (value.type !== 'text' && value.type !== 'select')
+    || !isBoundedString(value.key, 256)
+    || !isBoundedString(value.message, 4096)
+    || (value.when !== undefined && !isProviderSettingsAuthPromptWhen(value.when))
+  ) {
+    return false;
+  }
+  if (value.type === 'text') {
+    return value.placeholder === undefined || isBoundedString(value.placeholder, 4096);
+  }
+  return Array.isArray(value.options)
+    && value.options.length <= 100
+    && value.options.every((option) => isObject(option)
+      && isBoundedString(option.label, 2048)
+      && isBoundedString(option.value, 2048)
+      && (option.hint === undefined || isBoundedString(option.hint, 2048)));
+}
+
+function isNullableFiniteNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === 'number' && Number.isFinite(value));
+}
+
+function isProviderSettingsHeader(value: unknown): value is ProviderSettingsHeader {
+  return isObject(value)
+    && isBoundedString(value.name, 512)
+    && isBoundedString(value.value, 16_384)
+    && typeof value.hasStoredValue === 'boolean';
+}
+
+function isProviderSettingsHeaders(value: unknown): value is ProviderSettingsHeader[] {
+  return Array.isArray(value)
+    && value.length <= 100
+    && value.every(isProviderSettingsHeader);
+}
+
+function isProviderSettingsModelDraft(value: unknown): value is ProviderSettingsModelDraft {
+  if (!isObject(value)) {
+    return false;
+  }
+
+  for (const key of ['id', 'apiModelId', 'name', 'description', 'api', 'npm', 'family', 'releaseDate', 'optionsJson', 'variantsJson', 'extrasJson'] as const) {
+    if (!isBoundedString(value[key], key.endsWith('Json') ? 200_000 : 2048)) {
+      return false;
+    }
+  }
+
+  if (!['', 'alpha', 'beta', 'deprecated', 'active'].includes(String(value.status))) {
+    return false;
+  }
+
+  for (const key of ['experimental', 'attachment', 'reasoning', 'temperature', 'toolCall'] as const) {
+    if (value[key] !== null && typeof value[key] !== 'boolean') {
+      return false;
+    }
+  }
+
+  if (
+    value.interleaved !== null
+    && typeof value.interleaved !== 'boolean'
+    && !isBoundedString(value.interleaved, 512)
+    && !(isObject(value.interleaved) && isBoundedString(value.interleaved.field, 512))
+  ) {
+    return false;
+  }
+
+  if (!isObject(value.limit) || !isObject(value.cost) || !isObject(value.modalities)) {
+    return false;
+  }
+
+  for (const key of ['context', 'input', 'output'] as const) {
+    if (!isNullableFiniteNumber(value.limit[key])) {
+      return false;
+    }
+  }
+  for (const key of ['input', 'output', 'cacheRead', 'cacheWrite'] as const) {
+    if (!isNullableFiniteNumber(value.cost[key])) {
+      return false;
+    }
+  }
+  if (!isObject(value.cost.contextOver200k)) {
+    return false;
+  }
+  for (const key of ['input', 'output', 'cacheRead', 'cacheWrite'] as const) {
+    if (!isNullableFiniteNumber(value.cost.contextOver200k[key])) {
+      return false;
+    }
+  }
+
+  const modalitySet = new Set(['text', 'audio', 'image', 'video', 'pdf']);
+  for (const key of ['input', 'output'] as const) {
+    const list = value.modalities[key];
+    if (list !== null && (!Array.isArray(list) || list.length > 5 || !list.every((item) => typeof item === 'string' && modalitySet.has(item)))) {
+      return false;
+    }
+  }
+
+  return isProviderSettingsHeaders(value.headers);
+}
+
+function isProviderSettingsDraft(value: unknown): value is ProviderSettingsDraft {
+  if (!isObject(value)) {
+    return false;
+  }
+  if (value.originalId !== null && !isBoundedString(value.originalId, 256)) {
+    return false;
+  }
+
+  for (const key of ['id', 'configId', 'name', 'api', 'npm', 'baseURL', 'enterpriseUrl'] as const) {
+    if (!isBoundedString(value[key], 4096)) {
+      return false;
+    }
+  }
+  if (!isBoundedString(value.optionExtrasJson, 200_000) || !isBoundedString(value.providerExtrasJson, 200_000)) {
+    return false;
+  }
+  if (typeof value.custom !== 'boolean' || !isStringArray(value.env) || !isStringArray(value.whitelist) || !isStringArray(value.blacklist)) {
+    return false;
+  }
+  if (value.setCacheKey !== null && typeof value.setCacheKey !== 'boolean') {
+    return false;
+  }
+  for (const key of ['timeout', 'headerTimeout'] as const) {
+    const candidate = value[key];
+    if (candidate !== null && candidate !== false && (typeof candidate !== 'number' || !Number.isFinite(candidate))) {
+      return false;
+    }
+  }
+  if (!isNullableFiniteNumber(value.chunkTimeout) || !isProviderSettingsHeaders(value.headers)) {
+    return false;
+  }
+
+  if (!isObject(value.credential)) {
+    return false;
+  }
+  if (!['store', 'env', 'config', 'none'].includes(String(value.credential.mode))) {
+    return false;
+  }
+  if (!['store', 'env', 'config', 'none'].includes(String(value.credential.initialMode))) {
+    return false;
+  }
+  if (
+    !isBoundedString(value.credential.value, 32_768)
+    || !isBoundedString(value.credential.env, 512)
+    || typeof value.credential.hasConfigValue !== 'boolean'
+    || typeof value.credential.hasStoreValue !== 'boolean'
+    || typeof value.credential.connected !== 'boolean'
+  ) {
+    return false;
+  }
+
+  return Array.isArray(value.models)
+    && value.models.length <= 200
+    && value.models.every(isProviderSettingsModelDraft);
+}
+
+function isProviderSettingsCatalogEntry(value: unknown): value is ProviderSettingsCatalogEntry {
+  return isObject(value)
+    && isNonEmptyString(value.id)
+    && isBoundedString(value.label, 2048)
+    && isBoundedString(value.source, 128)
+    && isBoundedString(value.api, 4096)
+    && isBoundedString(value.npm, 4096)
+    && typeof value.builtIn === 'boolean'
+    && typeof value.connected === 'boolean'
+    && typeof value.credentialStored === 'boolean'
+    && (value.credentialType === null || value.credentialType === 'api' || value.credentialType === 'oauth')
+    && typeof value.configuredInScope === 'boolean'
+    && isStringArray(value.env, 100, 512)
+    && isNonNegativeInteger(value.modelCount)
+    && Array.isArray(value.authMethods)
+    && value.authMethods.length <= 20
+    && value.authMethods.every((method) => isObject(method)
+      && (method.type === 'api' || method.type === 'oauth')
+      && isBoundedString(method.label, 2048)
+      && Array.isArray(method.prompts)
+      && method.prompts.length <= 50
+      && method.prompts.every(isProviderSettingsAuthPrompt));
+}
+
+function isProviderSettingsCatalogModel(value: unknown): value is ProviderSettingsCatalogModel {
+  return isProviderSettingsModelDraft(value);
+}
+
+function isProviderUpstreamModel(value: unknown): value is ProviderUpstreamModel {
+  return isObject(value)
+    && isNonEmptyString(value.id)
+    && isBoundedString(value.id, 512)
+    && isBoundedString(value.name, 1024)
+    && isBoundedString(value.description, 4096)
+    && isBoundedString(value.ownedBy, 512)
+    && isBoundedString(value.createdAt, 128)
+    && (value.contextWindow === null || (isNonNegativeInteger(value.contextWindow) && value.contextWindow > 0))
+    && (value.maxOutputTokens === null || (isNonNegativeInteger(value.maxOutputTokens) && value.maxOutputTokens > 0));
+}
+
+function isProviderSettingsSnapshot(value: unknown): value is ProviderSettingsSnapshot {
+  return isObject(value)
+    && isProviderSettingsScope(value.scope)
+    && isBoundedString(value.path, 16_384)
+    && typeof value.exists === 'boolean'
+    && isBoundedString(value.revision, 256)
+    && typeof value.workspaceAvailable === 'boolean'
+    && (value.customConfigPath === undefined || isBoundedString(value.customConfigPath, 16_384))
+    && Array.isArray(value.catalog)
+    && value.catalog.length <= 1000
+    && value.catalog.every(isProviderSettingsCatalogEntry)
+    && Array.isArray(value.configured)
+    && value.configured.length <= 500
+    && value.configured.every(isProviderSettingsDraft);
 }
 
 export function isWhitelistedWebviewRequestType(type: unknown): type is WebviewRequestType {
@@ -866,6 +1505,67 @@ export function isExtensionResponseMessage(message: unknown): message is Extensi
     return message.payload.files.every(isInlineDiffFileSummary);
   }
 
+  if (
+    message.type === 'provider.settings.get.response'
+    || message.type === 'provider.settings.save.response'
+    || message.type === 'provider.settings.delete.response'
+  ) {
+    return message.ok === true && isProviderSettingsSnapshot(message.payload);
+  }
+
+  if (message.type === 'provider.settings.models.response') {
+    return message.ok === true
+      && isObject(message.payload)
+      && isNonEmptyString(message.payload.providerId)
+      && Array.isArray(message.payload.models)
+      && message.payload.models.length <= 1000
+      && message.payload.models.every(isProviderSettingsCatalogModel);
+  }
+
+  if (message.type === 'provider.settings.upstreamModels.response') {
+    return message.ok === true
+      && isObject(message.payload)
+      && isNonEmptyString(message.payload.providerId)
+      && isBoundedString(message.payload.endpoint, 16_384)
+      && Array.isArray(message.payload.models)
+      && message.payload.models.length <= 5_000
+      && message.payload.models.every(isProviderUpstreamModel);
+  }
+
+  if (message.type === 'provider.settings.openConfig.response') {
+    return message.ok === true
+      && isObject(message.payload)
+      && isProviderSettingsScope(message.payload.scope)
+      && isBoundedString(message.payload.path, 16_384);
+  }
+
+  if (
+    message.type === 'provider.auth.api.response'
+    || message.type === 'provider.auth.oauth.callback.response'
+    || message.type === 'provider.auth.disconnect.response'
+  ) {
+    return message.ok === true
+      && isObject(message.payload)
+      && isNonEmptyString(message.payload.providerId);
+  }
+
+  if (message.type === 'provider.auth.oauth.authorize.response') {
+    return message.ok === true
+      && isObject(message.payload)
+      && isNonEmptyString(message.payload.providerId)
+      && isNonNegativeInteger(message.payload.method)
+      && isObject(message.payload.authorization)
+      && isBoundedString(message.payload.authorization.url, 16_384)
+      && (message.payload.authorization.method === 'auto' || message.payload.authorization.method === 'code')
+      && isBoundedString(message.payload.authorization.instructions, 16_384);
+  }
+
+  if (message.type === 'provider.auth.openExternal.response') {
+    return message.ok === true
+      && isObject(message.payload)
+      && isBoundedString(message.payload.url, 16_384);
+  }
+
   return true;
 }
 
@@ -897,7 +1597,7 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
       return false;
     }
 
-    if (!isNonEmptyString(message.payload.sessionId) || !isNonEmptyString(message.payload.filename)) {
+    if (!isNonEmptyString(message.payload.sessionId) || !isBoundedString(message.payload.filename, 4096)) {
       return false;
     }
 
@@ -907,6 +1607,10 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
       || typeof message.payload.includeAssistantMetadata !== 'boolean'
       || typeof message.payload.openWithoutSaving !== 'boolean'
     ) {
+      return false;
+    }
+
+    if (!message.payload.openWithoutSaving && message.payload.filename.trim().length === 0) {
       return false;
     }
   }
@@ -1048,6 +1752,112 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
       if (typeof message.payload.forceRefresh !== 'undefined' && typeof message.payload.forceRefresh !== 'boolean') {
         return false;
       }
+    }
+  }
+
+  if (message.type === 'provider.settings.get') {
+    if (!isObject(message.payload) || !isProviderSettingsScope(message.payload.scope)) {
+      return false;
+    }
+    if (message.payload.forceRefresh !== undefined && typeof message.payload.forceRefresh !== 'boolean') {
+      return false;
+    }
+  }
+
+  if (message.type === 'provider.settings.models') {
+    if (!isObject(message.payload) || !isNonEmptyString(message.payload.providerId)) {
+      return false;
+    }
+    if (message.payload.forceRefresh !== undefined && typeof message.payload.forceRefresh !== 'boolean') {
+      return false;
+    }
+  }
+
+  if (message.type === 'provider.settings.upstreamModels') {
+    if (
+      !isObject(message.payload)
+      || !isProviderSettingsScope(message.payload.scope)
+      || !isProviderSettingsDraft(message.payload.draft)
+      || !isNonEmptyString(message.payload.endpoint)
+      || !isBoundedString(message.payload.endpoint, 16_384)
+    ) {
+      return false;
+    }
+  }
+
+  if (message.type === 'provider.settings.save') {
+    if (
+      !isObject(message.payload)
+      || !isProviderSettingsScope(message.payload.scope)
+      || !isBoundedString(message.payload.revision, 256)
+      || !isProviderSettingsDraft(message.payload.draft)
+    ) {
+      return false;
+    }
+  }
+
+  if (message.type === 'provider.settings.delete') {
+    if (
+      !isObject(message.payload)
+      || !isProviderSettingsScope(message.payload.scope)
+      || !isBoundedString(message.payload.revision, 256)
+      || !isNonEmptyString(message.payload.providerId)
+    ) {
+      return false;
+    }
+  }
+
+  if (message.type === 'provider.settings.openConfig') {
+    if (!isObject(message.payload) || !isProviderSettingsScope(message.payload.scope)) {
+      return false;
+    }
+  }
+
+  if (message.type === 'provider.auth.api') {
+    if (
+      !isObject(message.payload)
+      || !isNonEmptyString(message.payload.providerId)
+      || !isBoundedString(message.payload.key, 32_768)
+      || message.payload.key.trim().length === 0
+      || !isStringRecord(message.payload.metadata)
+    ) {
+      return false;
+    }
+  }
+
+  if (message.type === 'provider.auth.oauth.authorize') {
+    if (
+      !isObject(message.payload)
+      || !isNonEmptyString(message.payload.providerId)
+      || !isNonNegativeInteger(message.payload.method)
+      || message.payload.method > 100
+      || !isStringRecord(message.payload.inputs)
+    ) {
+      return false;
+    }
+  }
+
+  if (message.type === 'provider.auth.oauth.callback') {
+    if (
+      !isObject(message.payload)
+      || !isNonEmptyString(message.payload.providerId)
+      || !isNonNegativeInteger(message.payload.method)
+      || message.payload.method > 100
+      || (message.payload.code !== undefined && !isBoundedString(message.payload.code, 16_384))
+    ) {
+      return false;
+    }
+  }
+
+  if (message.type === 'provider.auth.disconnect') {
+    if (!isObject(message.payload) || !isNonEmptyString(message.payload.providerId)) {
+      return false;
+    }
+  }
+
+  if (message.type === 'provider.auth.openExternal') {
+    if (!isObject(message.payload) || !isBoundedString(message.payload.url, 16_384)) {
+      return false;
     }
   }
 

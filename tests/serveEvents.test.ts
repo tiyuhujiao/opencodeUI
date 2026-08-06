@@ -40,6 +40,43 @@ function createLifecycle(
 }
 
 describe("run lifecycle serve event dispatch", () => {
+	it("优先展示 session.error 的嵌套真实消息，而不是 UnknownError 名称", () => {
+		const posted: unknown[] = [];
+		const lifecycle = createLifecycle({ posted });
+		const streamState = createServeStreamState();
+
+		const result = dispatchServeEvent(
+			lifecycle,
+			"request-1",
+			"session-1",
+			{
+				type: "session.error",
+				properties: {
+					sessionID: "session-1",
+					error: {
+						name: "UnknownError",
+						data: {
+							message: "Model not found: cpa111/gpt-5.6-sol.",
+						},
+					},
+				},
+			},
+			streamState,
+		);
+
+		expect(result).toEqual({ done: true });
+		expect(posted).toContainEqual(
+			expect.objectContaining({
+				payload: {
+					event: {
+						type: "error",
+						error: "Model not found: cpa111/gpt-5.6-sol.",
+					},
+				},
+			}),
+		);
+	});
+
 	it("只转发当前 session 的权限请求，并过滤非字符串 pattern", () => {
 		const posted: unknown[] = [];
 		const lifecycle = createLifecycle({ posted });

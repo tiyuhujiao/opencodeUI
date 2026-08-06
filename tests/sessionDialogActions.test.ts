@@ -9,8 +9,8 @@ describe('session dialog actions', () => {
     const source = readFileSync(join(root, 'webview-ui/src/components/dialog/SessionDialog.tsx'), 'utf8');
 
     expect(source).toContain('className="dialog__itemDelete"');
-    expect(source).toContain('aria-label={`Delete ${session.title}`}');
-    expect(source).toContain('title="Delete session"');
+    expect(source).toContain("aria-label={`${t('Delete session')}: ${session.title}`}");
+    expect(source).toContain("title={t('Delete session')}");
     expect(source).toContain('event.stopPropagation()');
     expect(source).toContain('setDeleteCandidate(session)');
     expect(source).toContain("import { Trash2 } from 'lucide-react'");
@@ -53,10 +53,10 @@ describe('session dialog actions', () => {
   it('formats session timestamps into a readable local date time', () => {
     const source = readFileSync(join(root, 'webview-ui/src/components/dialog/SessionDialog.tsx'), 'utf8');
 
-    expect(source).toContain('function formatSessionUpdated(updated: string)');
+    expect(source).toContain('function formatSessionUpdated(updated: string, unknownLabel: string)');
     expect(source).toContain("replace('T', ' ')");
     expect(source).toContain("replace(/Z$/, '')");
-    expect(source).toContain('formatSessionUpdated(session.updated)');
+    expect(source).toContain("formatSessionUpdated(session.updated, t('Unknown time'))");
     expect(source).not.toContain('<span className="dialog__itemMeta">{session.updated}</span>');
   });
 

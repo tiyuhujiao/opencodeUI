@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Trash2 } from 'lucide-react'
 import type { SessionSummary } from '../../../../src/shared/protocol'
+import { useI18n } from '../../i18n'
 
 type SessionDialogProps = {
   open: boolean
@@ -11,7 +12,7 @@ type SessionDialogProps = {
   onClose: () => void
 }
 
-function formatSessionUpdated(updated: string) {
+function formatSessionUpdated(updated: string, unknownLabel: string) {
   const date = new Date(updated)
 
   if (!Number.isNaN(date.getTime())) {
@@ -20,10 +21,11 @@ function formatSessionUpdated(updated: string) {
   }
 
   const readable = updated.replace('T', ' ').replace(/\.\d{1,3}Z?$/, '').replace(/Z$/, '').trim()
-  return readable || 'Unknown time'
+  return readable || unknownLabel
 }
 
 export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessionId, onDeleteSessionId, onClose }: SessionDialogProps) {
+  const { t } = useI18n()
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [deleteCandidate, setDeleteCandidate] = useState<SessionSummary | null>(null)
   const [contextMenu, setContextMenu] = useState<null | { x: number; y: number; id: string }>(null)
@@ -128,14 +130,14 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
   }
 
   return (
-    <div className="overlay" role="dialog" aria-modal="true" aria-label="session dialog">
-      <button type="button" className="overlay__backdrop" onClick={onClose} aria-label="close" />
+    <div className="overlay" role="dialog" aria-modal="true" aria-label={t('Switch Session')}>
+      <button type="button" className="overlay__backdrop" onClick={onClose} aria-label={t('Close')} />
       <div className="dialog" ref={dialogRef} aria-hidden={deleteCandidate ? true : undefined}>
         <header className="dialog__header">
-          <div className="dialog__title">Switch Session</div>
+          <div className="dialog__title">{t('Switch Session')}</div>
         </header>
 
-        {sessions.length === 0 ? <div className="dialog__empty">No sessions</div> : null}
+        {sessions.length === 0 ? <div className="dialog__empty">{t('No sessions')}</div> : null}
 
         <div className="dialog__list" ref={listRef} role="listbox" aria-label="sessions">
           {sessions.map((session, index) => {
@@ -172,14 +174,14 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
                   }}
                 >
                   <span className="dialog__itemTitle">{session.title}</span>
-                  <span className="dialog__itemMeta">{formatSessionUpdated(session.updated)}</span>
+                  <span className="dialog__itemMeta">{formatSessionUpdated(session.updated, t('Unknown time'))}</span>
                 </button>
                 {onDeleteSessionId ? (
                   <button
                     type="button"
                     className="dialog__itemDelete"
-                    aria-label={`Delete ${session.title}`}
-                    title="Delete session"
+                    aria-label={`${t('Delete session')}: ${session.title}`}
+                    title={t('Delete session')}
                     onClick={(event) => {
                       event.preventDefault()
                       event.stopPropagation()
@@ -208,10 +210,10 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
                 }
               }}
             >
-              Delete
+              {t('Delete')}
             </button>
             <button type="button" className="context-menu__item" onClick={() => setContextMenu(null)}>
-              Cancel
+              {t('Cancel')}
             </button>
           </div>
         ) : null}
@@ -223,7 +225,7 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
             type="button"
             className="delete-confirm__backdrop"
             tabIndex={-1}
-            aria-label="Cancel session deletion"
+            aria-label={t('Cancel session deletion')}
             onClick={() => setDeleteCandidate(null)}
           />
           <div
@@ -246,9 +248,9 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
             }}
           >
             <div className="delete-confirm__body">
-              <h2 id="delete-session-title" className="delete-confirm__title">Delete session?</h2>
+              <h2 id="delete-session-title" className="delete-confirm__title">{t('Delete session?')}</h2>
               <p id="delete-session-description" className="delete-confirm__message">
-                This session will be permanently deleted. This action cannot be undone.
+                {t('This session will be permanently deleted. This action cannot be undone.')}
                 <span className="delete-confirm__session">{deleteCandidate.title}</span>
               </p>
             </div>
@@ -259,7 +261,7 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
                 className="delete-confirm__button"
                 onClick={() => setDeleteCandidate(null)}
               >
-                Cancel
+                {t('Cancel')}
               </button>
               <button
                 type="button"
@@ -270,7 +272,7 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
                   onDeleteSessionId?.(id)
                 }}
               >
-                Delete
+                {t('Delete')}
               </button>
             </div>
           </div>
