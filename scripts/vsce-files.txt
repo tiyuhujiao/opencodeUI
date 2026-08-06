@@ -12,6 +12,7 @@ scripts/**
 output/**
 .gitignore
 .vscodeignore
+SECURITY.md
 AGENTS.md
 package-lock.json
 tsconfig.json

@@ -10,7 +10,11 @@ describe('release hardening', () => {
       scripts: Record<string, string>;
     };
     const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
-    const vscodeIgnore = readFileSync(join(root, '.vscodeignore'), 'utf8');
+    const vsceIgnore = readFileSync(join(root, 'scripts/vsce-files.txt'), 'utf8');
+    const githubPackager = readFileSync(
+      join(root, 'github-upload/package-github-release.js'),
+      'utf8',
+    );
 
     expect(packageJson.scripts.check).toContain('npm run lint');
     expect(packageJson.scripts.check).toContain('npm run build');
@@ -18,9 +22,17 @@ describe('release hardening', () => {
     expect(packageJson.scripts.ci).toContain('npm run package');
     expect(ci).toContain('npm run check');
     expect(ci).toContain('npm run package');
-    expect(vscodeIgnore).toContain('out/test/**');
-    expect(vscodeIgnore).toContain('out/**/*.map');
-    expect(vscodeIgnore).toContain('out/**/*.d.ts');
+    expect(packageJson.scripts.package).toContain(
+      '--ignoreFile scripts/vsce-files.txt',
+    );
+    expect(githubPackager).toContain('"--ignoreFile"');
+    expect(githubPackager).toContain('ignoreFilePath');
+    expect(vsceIgnore).toContain('.gitignore');
+    expect(vsceIgnore).toContain('.vscodeignore');
+    expect(vsceIgnore).toContain('SECURITY.md');
+    expect(vsceIgnore).toContain('out/test/**');
+    expect(vsceIgnore).toContain('out/**/*.map');
+    expect(vsceIgnore).toContain('out/**/*.d.ts');
   });
 
   it('注册本地诊断输出通道命令', () => {

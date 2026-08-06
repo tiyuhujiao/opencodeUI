@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, "..");
 const configPath = path.join(__dirname, "release.json");
 const outputDir = path.join(__dirname, "vsix");
 const packagePath = path.join(root, "package.json");
+const ignoreFilePath = path.join(root, "scripts", "vsce-files.txt");
 const vsceBin = path.join(root, "node_modules", "@vscode", "vsce", "vsce");
 
 function readJson(filePath) {
@@ -49,6 +50,10 @@ if (!fs.existsSync(vsceBin)) {
 	throw new Error("Missing local @vscode/vsce dependency. Run npm ci first.");
 }
 
+if (!fs.existsSync(ignoreFilePath)) {
+	throw new Error("Missing scripts/vsce-files.txt packaging boundary.");
+}
+
 fs.mkdirSync(outputDir, { recursive: true });
 const outputBaseName = `${sourcePackage.name}-${publicVersion}`;
 const outputPath = path.join(outputDir, `${outputBaseName}.vsix`);
@@ -69,10 +74,6 @@ try {
 		path.join(staging, "package.json"),
 		`${JSON.stringify(publicPackage, null, 2)}\n`,
 	);
-	copyIfExists(
-		path.join(root, ".vscodeignore"),
-		path.join(staging, ".vscodeignore"),
-	);
 	copyIfExists(path.join(root, "README.md"), path.join(staging, "README.md"));
 	copyIfExists(
 		path.join(root, "README.zh-CN.md"),
@@ -88,7 +89,15 @@ try {
 
 	execFileSync(
 		process.execPath,
-		[vsceBin, "package", "--no-dependencies", "--out", outputPath],
+		[
+			vsceBin,
+			"package",
+			"--no-dependencies",
+			"--ignoreFile",
+			ignoreFilePath,
+			"--out",
+			outputPath,
+		],
 		{
 			cwd: staging,
 			stdio: "inherit",

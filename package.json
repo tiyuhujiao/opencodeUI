@@ -81,7 +81,7 @@
     "watch": "tsc -w -p .",
     "test": "vitest run",
     "test:extension": "npm run build && node ./out/test/runTest.js",
-    "package": "node -e \"require('fs').mkdirSync('vsix',{recursive:true})\" && vsce package --no-dependencies --out vsix",
+    "package": "node -e \"require('fs').mkdirSync('vsix',{recursive:true})\" && vsce package --no-dependencies --ignoreFile scripts/vsce-files.txt --out vsix",
     "package:github": "node github-upload/package-github-release.js",
     "vscode:prepublish": "npm run build"
   },
