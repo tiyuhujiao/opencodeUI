@@ -87,9 +87,11 @@ describe('session markdown export', () => {
   });
 
   it('生成上游默认文件名并拒绝写出工作区', () => {
+    const workspaceRoot = path.resolve('workspace');
     expect(defaultSessionExportFilename('ses_1234567890')).toBe('session-ses_1234.md');
-    expect(resolveSessionExportPath('C:\\work', 'exports/session-1')).toBe(path.resolve('C:\\work', 'exports/session-1.md'));
-    expect(() => resolveSessionExportPath('C:\\work', '..\\outside.md')).toThrow(/工作区/);
+    expect(resolveSessionExportPath(workspaceRoot, path.join('exports', 'session-1')))
+      .toBe(path.join(workspaceRoot, 'exports', 'session-1.md'));
+    expect(() => resolveSessionExportPath(workspaceRoot, path.join('..', 'outside.md'))).toThrow(/工作区/);
   });
 
   it('没有 provider catalog 时与上游一致回退到原始 model id', () => {
