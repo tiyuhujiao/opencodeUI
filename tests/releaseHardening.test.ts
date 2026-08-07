@@ -24,16 +24,16 @@ describe('release hardening', () => {
     expect(packageJson.scripts.ci).toContain('npm run package');
     expect(ci).toContain('npm run check');
     expect(ci).toContain('npm run package');
-    expect(ci).toContain('actions/checkout@v5');
-    expect(ci).toContain('actions/setup-node@v5');
-    expect(ci).toContain('actions/upload-artifact@v5');
+    expect(ci).toContain('actions/checkout@v7');
+    expect(ci).toContain('actions/setup-node@v7');
+    expect(ci).toContain('actions/upload-artifact@v7');
     expect(ci).toContain('node-version: 22');
     expect(ci).toContain('ubuntu-latest');
     expect(ci).toContain('windows-latest');
     expect(ci).toContain('macos-latest');
     expect(ci).toContain("if: runner.os == 'macOS'");
     expect(ci).toContain('npm run test:extension');
-    expect(ci).toContain('https://opencode.ai/install');
+    expect(ci).toContain('npm install --global opencode-ai@1.18.15');
     expect(packageJson.engines.node).toBe('>=22.0.0');
     expect(packageJson.devDependencies['@vscode/test-electron']).toBe('^3.1.0');
     expect(packageJson.scripts.package).toContain(

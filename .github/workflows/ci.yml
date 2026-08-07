@@ -22,10 +22,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -44,8 +44,7 @@ jobs:
 
       - name: Install OpenCode on macOS
         if: runner.os == 'macOS'
-        shell: bash
-        run: curl -fsSL https://opencode.ai/install | bash
+        run: npm install --global opencode-ai@1.18.15
 
       - name: Verify OpenCode on macOS
         if: runner.os == 'macOS'
@@ -61,7 +60,7 @@ jobs:
 
       - name: Upload VSIX
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: opencode-ui-vsix
           path: vsix/*.vsix
