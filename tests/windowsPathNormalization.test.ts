@@ -11,9 +11,11 @@ describe('normalizePromptFilePath', () => {
     expect(normalizePromptFilePath('\\\\wsl$\\Ubuntu-20.04\\home\\ww\\demo\\file.pdf', 'wsl')).toBe('/home/ww/demo/file.pdf');
   });
 
-  it('Linux 与 Remote-SSH Linux 使用 POSIX 路径，并拒绝 Windows 路径', () => {
+  it('Linux、macOS 与 POSIX 远端使用 POSIX 路径，并拒绝 Windows 路径', () => {
     expect(normalizePromptFilePath('/home/ww/demo/../file.pdf', 'local-linux')).toBe('/home/ww/file.pdf');
+    expect(normalizePromptFilePath('/Users/ww/demo/../file.pdf', 'local-macos')).toBe('/Users/ww/file.pdf');
     expect(normalizePromptFilePath('/srv/project/file.pdf', 'remote-ssh-linux')).toBe('/srv/project/file.pdf');
+    expect(normalizePromptFilePath('/Users/remote/project/file.pdf', 'remote-ssh-macos')).toBe('/Users/remote/project/file.pdf');
     expect(normalizePromptFilePath('/workspace/file.pdf', 'remote-linux')).toBe('/workspace/file.pdf');
 
     expect(() => normalizePromptFilePath('C:\\Users\\ww\\file.pdf', 'local-linux')).toThrow(/无法直接读取 Windows 路径/);
@@ -47,6 +49,18 @@ describe('normalizePromptFilePath', () => {
         type: 'text',
         text: '看图'
       }
+    ]);
+  });
+
+  it('macOS 图片 prompt part 使用宿主可读 file URL', () => {
+    expect(buildPromptParts('看图', ['/Users/ww/Pictures/pasted image.png'], 'local-macos')).toEqual([
+      {
+        type: 'file',
+        url: 'file:///Users/ww/Pictures/pasted%20image.png',
+        filename: 'pasted image.png',
+        mime: 'image/png'
+      },
+      { type: 'text', text: '看图' }
     ]);
   });
 

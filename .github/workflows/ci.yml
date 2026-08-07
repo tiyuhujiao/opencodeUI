@@ -9,7 +9,16 @@ on:
 
 jobs:
   build-test-package:
-    runs-on: ubuntu-latest
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
 
     steps:
       - name: Checkout
@@ -33,10 +42,25 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Install OpenCode on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: curl -fsSL https://opencode.ai/install | bash
+
+      - name: Verify OpenCode on macOS
+        if: runner.os == 'macOS'
+        run: opencode --version
+
+      - name: Run VS Code extension smoke test on macOS
+        if: runner.os == 'macOS'
+        run: npm run test:extension
+
       - name: Package VSIX
+        if: runner.os == 'Linux'
         run: npm run package
 
       - name: Upload VSIX
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: opencode-ui-vsix

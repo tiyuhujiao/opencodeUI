@@ -10,9 +10,17 @@ OpenCode 很强大，但使用它不应该意味着反复切换编辑器、终�
 
 `1.0.0` 对之前的扩展进行了彻底的设计与重构。界面更安静，常用操作更直接，也把更多 OpenCode 能力自然地带进了编辑器，同时仍然以 OpenCode CLI 作为可靠的运行核心。
 
+`1.1.0` 正式加入 macOS 支持，同时覆盖 Apple Silicon 与 Intel Mac，并可自动发现 OpenCode 官方安装目录、Homebrew 和 MacPorts。现在每次改动都会在 GitHub Actions 中分别经过 Windows、Linux 与 macOS 验证，macOS 还会运行真实的 VS Code 扩展冒烟测试。
+
 ## 界面预览
 
 ![在 VS Code 侧边栏中运行 OpenCode](./docs/images/opencode-ui-preview.png)
+
+## 1.1.0 新增内容
+
+### macOS 支持
+
+现在可以在 macOS 上直接使用完整的侧边栏工作流，不需要额外配置扩展。无论通过官方安装脚本、Homebrew、npm、Bun、pnpm、Yarn、Mise 或 MacPorts 安装 OpenCode，`opencode-ui` 都会查找常见的 CLI 位置；即使从 Finder 打开 VS Code、环境中的 `PATH` 较短，也能正确找到 OpenCode。
 
 ## 1.0.0 的重点更新
 
@@ -40,7 +48,7 @@ OpenCode 修改代码后，可以直接在编辑器里查看 inline diff。新�
 - 不必逐项手写配置，即可创建和管理供应商与模型。
 - 在接受代码改动前，通过 inline diff 完成审阅。
 - 管理会话、历史、导出、撤销与重做，并使用文件、图片、MCP、skills 和 agents。
-- 支持 Windows、Linux、Remote-WSL 与 Remote-SSH Linux，也可用于 Cursor 等兼容 VS Code 的 IDE。
+- 支持 macOS、Windows、Linux、Remote-WSL，以及 Remote-SSH Linux/macOS，也可用于 Cursor 等兼容 VS Code 的 IDE。
 
 ## 使用前提
 

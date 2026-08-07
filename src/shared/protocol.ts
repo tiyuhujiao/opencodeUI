@@ -359,7 +359,16 @@ export type SessionSummary = {
   updated: string;
 };
 
-export type HostKind = 'local-windows' | 'local-linux' | 'wsl' | 'remote-ssh-linux' | 'remote-linux' | 'unsupported';
+export type HostKind =
+  | 'local-windows'
+  | 'local-linux'
+  | 'local-macos'
+  | 'wsl'
+  | 'remote-ssh-linux'
+  | 'remote-linux'
+  | 'remote-ssh-macos'
+  | 'remote-macos'
+  | 'unsupported';
 
 export type OpencodeCompatibility = {
   binary: string;

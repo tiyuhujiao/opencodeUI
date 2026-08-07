@@ -69,7 +69,7 @@ function activate(context) {
         }
     });
     if (hostKind === 'unsupported') {
-        void vscode.window.showWarningMessage('OpenCode UI 当前支持 Windows 本机、Linux 本机、Remote-WSL 和 Remote-SSH Linux 环境。');
+        void vscode.window.showWarningMessage('OpenCode UI 当前支持 Windows、macOS、Linux、Remote-WSL 与 Remote-SSH 环境。');
     }
     else {
         void (0, serveManager_1.ensureServeRunning)().catch((error) => {
@@ -99,11 +99,20 @@ function resolveHostKind(remoteName, platform = process.platform) {
     if (!remoteName && platform === 'linux') {
         return 'local-linux';
     }
+    if (!remoteName && platform === 'darwin') {
+        return 'local-macos';
+    }
     if (remoteName === 'ssh-remote' && platform === 'linux') {
         return 'remote-ssh-linux';
     }
     if (remoteName && platform === 'linux') {
         return 'remote-linux';
+    }
+    if (remoteName === 'ssh-remote' && platform === 'darwin') {
+        return 'remote-ssh-macos';
+    }
+    if (remoteName && platform === 'darwin') {
+        return 'remote-macos';
     }
     return 'unsupported';
 }

@@ -10,9 +10,17 @@ OpenCode is powerful, but using it should not mean constantly moving between the
 
 Version `1.0.0` is a thorough redesign and rebuild of the earlier extension. The interface is calmer, everyday flows are shorter, and the extension now covers much more of the OpenCode experience without hiding the underlying CLI.
 
+Version `1.1.0` adds first-class macOS support for both Apple Silicon and Intel Macs, including automatic discovery of the official OpenCode install, Homebrew, and MacPorts. Every change is now checked on Windows, Linux, and macOS in GitHub Actions, with a real VS Code extension smoke test on macOS.
+
 ## Preview
 
 ![OpenCode running in the VS Code sidebar](./docs/images/opencode-ui-preview.png)
+
+## New In 1.1.0
+
+### macOS Support
+
+Use the same sidebar workflow on macOS without extra extension settings. Install OpenCode with its official installer, Homebrew, npm, Bun, pnpm, Yarn, Mise, or MacPorts; `opencode-ui` will resolve the usual CLI locations even when VS Code was opened from Finder and received a shorter shell `PATH`.
 
 ## What's New In 1.0.0
 
@@ -40,7 +48,7 @@ Switch the interface between English and Simplified Chinese at any time. Setting
 - Create and manage providers and models without hand-editing every configuration field.
 - Review code edits with inline diff controls before accepting them.
 - Work with sessions, history, export, undo/redo, files, images, MCP servers, skills, and agents.
-- Use the extension on Windows, Linux, Remote-WSL, and Remote-SSH Linux hosts. Cursor and other compatible VS Code hosts are supported too.
+- Use the extension on macOS, Windows, Linux, Remote-WSL, and Remote-SSH Linux/macOS hosts. Cursor and other compatible VS Code hosts are supported too.
 
 ## Before You Start
 

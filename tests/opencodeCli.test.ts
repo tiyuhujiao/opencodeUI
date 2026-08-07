@@ -208,6 +208,75 @@ describe('opencodeCli', () => {
     expect(calls[0]?.command).toBe('/home/remote-user/.opencode/bin/opencode');
   });
 
+  it.each([
+    ['官方安装目录', '/Users/mac-user/.opencode/bin/opencode'],
+    ['Apple Silicon Homebrew', '/opt/homebrew/bin/opencode'],
+    ['Intel Homebrew', '/usr/local/bin/opencode'],
+    ['MacPorts', '/opt/local/bin/opencode']
+  ])('macOS 可自动发现%s中的 opencode', async (_source, expectedBinary) => {
+    __setPlatformForTests('darwin');
+    __setExistsSyncImplementationForTests((target) => String(target) === expectedBinary);
+    const child = new FakeChild();
+    const calls: SpawnCall[] = [];
+
+    __setSpawnImplementationForTests(
+      ((command: string, args: readonly string[], options: Record<string, unknown>) => {
+        calls.push({ command, args, options });
+        return child as never;
+      }) as never
+    );
+
+    const completion = spawnOpencode(['agent', 'list'], {
+      env: {
+        HOME: '/Users/mac-user',
+        PATH: '/usr/bin:/bin'
+      }
+    }).completion;
+    child.emit('close', 0);
+    await expect(completion).resolves.toMatchObject({ exitCode: 0 });
+
+    expect(calls[0]?.command).toBe(expectedBinary);
+    expect(calls[0]?.options.shell).toBe(false);
+    expect(calls[0]?.options.windowsHide).toBe(false);
+  });
+
+  it('macOS PATH 会预置自定义 Homebrew 与常见包管理器目录', async () => {
+    __setPlatformForTests('darwin');
+    __setExistsSyncImplementationForTests(() => false);
+    const child = new FakeChild();
+    const calls: SpawnCall[] = [];
+
+    __setSpawnImplementationForTests(
+      ((command: string, args: readonly string[], options: Record<string, unknown>) => {
+        calls.push({ command, args, options });
+        return child as never;
+      }) as never
+    );
+
+    const completion = spawnOpencode(['models', '--verbose'], {
+      env: {
+        HOME: '/Users/mac-user',
+        HOMEBREW_PREFIX: '/Applications/Homebrew',
+        PATH: '/usr/bin:/bin'
+      }
+    }).completion;
+
+    child.emit('close', 0);
+    await expect(completion).resolves.toMatchObject({ exitCode: 0 });
+
+    const calledPath = ((calls[0]?.options.env as NodeJS.ProcessEnv | undefined)?.PATH ?? '').toString();
+    const entries = calledPath.split(':');
+    expect(entries[0]).toBe('/Users/mac-user/.opencode/bin');
+    expect(entries).toEqual(expect.arrayContaining([
+      '/Applications/Homebrew/bin',
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      '/opt/local/bin',
+      '/usr/bin',
+      '/bin'
+    ]));
+  });
+
   it('设置 OPENCODE_BINARY 时优先使用该值', async () => {
     __setPlatformForTests('linux');
     __setExistsSyncImplementationForTests(() => true);

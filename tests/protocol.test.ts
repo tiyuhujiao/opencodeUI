@@ -6,18 +6,24 @@ describe('webview request protocol guards', () => {
     const hostKinds = [
       'local-windows',
       'local-linux',
+      'local-macos',
       'wsl',
       'remote-ssh-linux',
       'remote-linux',
+      'remote-ssh-macos',
+      'remote-macos',
       'unsupported'
     ] satisfies HostKind[];
 
     expect(hostKinds).toEqual([
       'local-windows',
       'local-linux',
+      'local-macos',
       'wsl',
       'remote-ssh-linux',
       'remote-linux',
+      'remote-ssh-macos',
+      'remote-macos',
       'unsupported'
     ]);
   });

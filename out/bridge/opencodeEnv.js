@@ -157,6 +157,7 @@ function getBundledBinaryCandidates(env) {
     const xdgBinDir = getEnvValue(env, 'XDG_BIN_DIR');
     const pnpmHome = getEnvValue(env, 'PNPM_HOME');
     const voltaHome = getEnvValue(env, 'VOLTA_HOME') ?? node_path_1.posix.join(userHome, '.volta');
+    const macosPackageManagerBinDirs = getMacosPackageManagerBinDirectories(env);
     return compactUnique([
         installDirOverride ? node_path_1.posix.join(installDirOverride, 'opencode') : undefined,
         xdgBinDir ? node_path_1.posix.join(xdgBinDir, 'opencode') : undefined,
@@ -167,7 +168,8 @@ function getBundledBinaryCandidates(env) {
         pnpmHome ? node_path_1.posix.join(pnpmHome, 'opencode') : undefined,
         node_path_1.posix.join(userHome, '.local', 'share', 'pnpm', 'opencode'),
         voltaHome ? node_path_1.posix.join(voltaHome, 'bin', 'opencode') : undefined,
-        node_path_1.posix.join(userHome, '.local', 'share', 'mise', 'shims', 'opencode')
+        node_path_1.posix.join(userHome, '.local', 'share', 'mise', 'shims', 'opencode'),
+        ...macosPackageManagerBinDirs.map((dir) => node_path_1.posix.join(dir, 'opencode'))
     ]);
 }
 function getPreferredBinDirectories(env) {
@@ -177,6 +179,7 @@ function getPreferredBinDirectories(env) {
         const xdgBinDir = getEnvValue(env, 'XDG_BIN_DIR');
         const pnpmHome = getEnvValue(env, 'PNPM_HOME');
         const voltaHome = getEnvValue(env, 'VOLTA_HOME') ?? node_path_1.posix.join(userHome, '.volta');
+        const macosPackageManagerBinDirs = getMacosPackageManagerBinDirectories(env);
         return compactUnique([
             installDirOverride,
             xdgBinDir,
@@ -187,7 +190,8 @@ function getPreferredBinDirectories(env) {
             pnpmHome,
             node_path_1.posix.join(userHome, '.local', 'share', 'pnpm'),
             voltaHome ? node_path_1.posix.join(voltaHome, 'bin') : undefined,
-            node_path_1.posix.join(userHome, '.local', 'share', 'mise', 'shims')
+            node_path_1.posix.join(userHome, '.local', 'share', 'mise', 'shims'),
+            ...macosPackageManagerBinDirs
         ]);
     }
     const userHome = resolveUserHome(env);
@@ -218,6 +222,18 @@ function getPreferredBinDirectories(env) {
 }
 function getHomeBinDir(env) {
     return resolvePlatform() === 'win32' ? node_path_1.win32.join(resolveUserHome(env), 'bin') : node_path_1.posix.join(resolveUserHome(env), 'bin');
+}
+function getMacosPackageManagerBinDirectories(env) {
+    if (resolvePlatform() !== 'darwin') {
+        return [];
+    }
+    const homebrewPrefix = getEnvValue(env, 'HOMEBREW_PREFIX');
+    return compactUnique([
+        homebrewPrefix ? node_path_1.posix.join(homebrewPrefix, 'bin') : undefined,
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+        '/opt/local/bin'
+    ]);
 }
 function getDefaultInstallDir(env) {
     const userHome = resolveUserHome(env);

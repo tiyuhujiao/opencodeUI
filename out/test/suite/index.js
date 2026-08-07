@@ -36,6 +36,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.run = run;
 const assert = __importStar(require("node:assert"));
 const vscode = __importStar(require("vscode"));
+const serveManager_1 = require("../../bridge/serveManager");
+const extension_1 = require("../../extension");
 const inlineDiff_1 = require("../../inlineDiff");
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -45,6 +47,12 @@ async function run() {
     assert.ok(extension, '应能找到扩展 tiyuhujiao.opencode-ui-vscode');
     await extension?.activate();
     assert.ok(extension?.isActive, '扩展应能成功激活');
+    if (process.platform === 'darwin') {
+        assert.equal((0, extension_1.resolveHostKind)(undefined, 'darwin'), 'local-macos', 'macOS 扩展宿主应被识别为受支持的本机环境');
+        const runtime = await (0, serveManager_1.ensureServeRunning)();
+        assert.ok(runtime.port > 0, 'macOS 扩展宿主应能启动并连接 opencode serve');
+        assert.match(runtime.baseUrl, /^http:\/\/127\.0\.0\.1:\d+$/, 'macOS serve 应仅监听本机回环地址');
+    }
     await assert.doesNotReject(async () => {
         await vscode.commands.executeCommand('opencodeUI.openSidebar');
         await delay(300);

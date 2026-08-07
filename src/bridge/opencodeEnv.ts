@@ -134,6 +134,7 @@ function getBundledBinaryCandidates(env: NodeJS.ProcessEnv): string[] {
   const xdgBinDir = getEnvValue(env, 'XDG_BIN_DIR');
   const pnpmHome = getEnvValue(env, 'PNPM_HOME');
   const voltaHome = getEnvValue(env, 'VOLTA_HOME') ?? posix.join(userHome, '.volta');
+  const macosPackageManagerBinDirs = getMacosPackageManagerBinDirectories(env);
 
   return compactUnique([
     installDirOverride ? posix.join(installDirOverride, 'opencode') : undefined,
@@ -145,7 +146,8 @@ function getBundledBinaryCandidates(env: NodeJS.ProcessEnv): string[] {
     pnpmHome ? posix.join(pnpmHome, 'opencode') : undefined,
     posix.join(userHome, '.local', 'share', 'pnpm', 'opencode'),
     voltaHome ? posix.join(voltaHome, 'bin', 'opencode') : undefined,
-    posix.join(userHome, '.local', 'share', 'mise', 'shims', 'opencode')
+    posix.join(userHome, '.local', 'share', 'mise', 'shims', 'opencode'),
+    ...macosPackageManagerBinDirs.map((dir) => posix.join(dir, 'opencode'))
   ]);
 }
 
@@ -156,6 +158,7 @@ function getPreferredBinDirectories(env: NodeJS.ProcessEnv): string[] {
     const xdgBinDir = getEnvValue(env, 'XDG_BIN_DIR');
     const pnpmHome = getEnvValue(env, 'PNPM_HOME');
     const voltaHome = getEnvValue(env, 'VOLTA_HOME') ?? posix.join(userHome, '.volta');
+    const macosPackageManagerBinDirs = getMacosPackageManagerBinDirectories(env);
 
     return compactUnique([
       installDirOverride,
@@ -167,7 +170,8 @@ function getPreferredBinDirectories(env: NodeJS.ProcessEnv): string[] {
       pnpmHome,
       posix.join(userHome, '.local', 'share', 'pnpm'),
       voltaHome ? posix.join(voltaHome, 'bin') : undefined,
-      posix.join(userHome, '.local', 'share', 'mise', 'shims')
+      posix.join(userHome, '.local', 'share', 'mise', 'shims'),
+      ...macosPackageManagerBinDirs
     ]);
   }
 
@@ -201,6 +205,20 @@ function getPreferredBinDirectories(env: NodeJS.ProcessEnv): string[] {
 
 function getHomeBinDir(env: NodeJS.ProcessEnv): string {
   return resolvePlatform() === 'win32' ? win32.join(resolveUserHome(env), 'bin') : posix.join(resolveUserHome(env), 'bin');
+}
+
+function getMacosPackageManagerBinDirectories(env: NodeJS.ProcessEnv): string[] {
+  if (resolvePlatform() !== 'darwin') {
+    return [];
+  }
+
+  const homebrewPrefix = getEnvValue(env, 'HOMEBREW_PREFIX');
+  return compactUnique([
+    homebrewPrefix ? posix.join(homebrewPrefix, 'bin') : undefined,
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/opt/local/bin'
+  ]);
 }
 
 function getDefaultInstallDir(env: NodeJS.ProcessEnv): string {

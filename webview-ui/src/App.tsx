@@ -187,6 +187,10 @@ function formatHostLabel(hostKind: HostKind, remoteName?: string): string {
     return 'Linux'
   }
 
+  if (hostKind === 'local-macos') {
+    return 'macOS'
+  }
+
   if (hostKind === 'wsl') {
     return 'WSL'
   }
@@ -197,6 +201,14 @@ function formatHostLabel(hostKind: HostKind, remoteName?: string): string {
 
   if (hostKind === 'remote-linux') {
     return remoteName ? `Remote Linux (${remoteName})` : 'Remote Linux'
+  }
+
+  if (hostKind === 'remote-ssh-macos') {
+    return 'Remote-SSH macOS'
+  }
+
+  if (hostKind === 'remote-macos') {
+    return remoteName ? `Remote macOS (${remoteName})` : 'Remote macOS'
   }
 
   return remoteName ?? 'Unsupported'

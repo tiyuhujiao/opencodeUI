@@ -22,6 +22,12 @@ describe('release hardening', () => {
     expect(packageJson.scripts.ci).toContain('npm run package');
     expect(ci).toContain('npm run check');
     expect(ci).toContain('npm run package');
+    expect(ci).toContain('ubuntu-latest');
+    expect(ci).toContain('windows-latest');
+    expect(ci).toContain('macos-latest');
+    expect(ci).toContain("if: runner.os == 'macOS'");
+    expect(ci).toContain('npm run test:extension');
+    expect(ci).toContain('https://opencode.ai/install');
     expect(packageJson.scripts.package).toContain(
       '--ignoreFile scripts/vsce-files.txt',
     );
