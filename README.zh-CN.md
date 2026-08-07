@@ -8,17 +8,30 @@
 
 OpenCode 很强大，但使用它不应该意味着反复切换编辑器、终端和配置文件。我们设计 `opencode-ui`，是希望在 VS Code 中提供一个清晰、顺手的可视化界面，让对话、工具、模型选择与代码改动都留在工作发生的地方。
 
-`1.0.0` 对之前的扩展进行了彻底的设计与重构。界面更安静，常用操作更直接，也把更多 OpenCode 能力自然地带进了编辑器，同时仍然以 OpenCode CLI 作为可靠的运行核心。这一版本也正式加入 macOS 支持，同时覆盖 Apple Silicon 与 Intel Mac，并可自动发现 OpenCode 官方安装目录、Homebrew 和 MacPorts。
+`1.0.1` 在彻底设计与重构后的扩展基础上，正式加入对 Apple Silicon 与 Intel Mac 的完整支持。扩展可以自动发现通过官方安装脚本、Homebrew、MacPorts 和常见 JavaScript 包管理器安装的 OpenCode，并在所有受支持的宿主环境中保持一致的可视化工作流。
 
 ## 界面预览
 
 ![在 VS Code 侧边栏中运行 OpenCode](./docs/images/opencode-ui-preview.png)
 
-## 1.0.0 的重点更新
+## 支持平台
+
+| 宿主环境 | 支持方式 |
+| --- | --- |
+| Windows | 本机 |
+| Linux | 本机、Remote-SSH 与其他 Linux 远端宿主 |
+| macOS | Apple Silicon 或 Intel 本机、Remote-SSH 与其他 macOS 远端宿主 |
+| WSL | Remote-WSL |
+
+扩展可运行于 VS Code、Cursor 及其他兼容 VS Code 的宿主。请将 OpenCode CLI 安装在扩展实际运行的同一本机或远端环境中。
+
+## 1.0.1 新增内容
 
 ### macOS 支持
 
 现在可以在 macOS 上直接使用完整的侧边栏工作流，不需要额外配置扩展。无论通过官方安装脚本、Homebrew、npm、Bun、pnpm、Yarn、Mise 或 MacPorts 安装 OpenCode，`opencode-ui` 都会查找常见的 CLI 位置；即使从 Finder 打开 VS Code、环境中的 `PATH` 较短，也能正确找到 OpenCode。
+
+## 核心功能
 
 ### 快捷自定义供应商
 

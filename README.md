@@ -8,17 +8,30 @@ English | [简体中文](./README.zh-CN.md)
 
 OpenCode is powerful, but using it should not mean constantly moving between the editor, terminal, and configuration files. We built `opencode-ui` to give OpenCode a clear visual home inside VS Code, so conversations, tools, model choices, and code changes stay close to the work they belong to.
 
-Version `1.0.0` is a thorough redesign and rebuild of the earlier extension. The interface is calmer, everyday flows are shorter, and the extension now covers much more of the OpenCode experience without hiding the underlying CLI. It also adds first-class macOS support for both Apple Silicon and Intel Macs, including automatic discovery of the official OpenCode install, Homebrew, and MacPorts.
+Version `1.0.1` builds on the thoroughly redesigned extension with first-class macOS support for both Apple Silicon and Intel Macs. It automatically discovers OpenCode installations from the official installer, Homebrew, MacPorts, and common JavaScript package managers, while keeping the same visual workflow across supported hosts.
 
 ## Preview
 
 ![OpenCode running in the VS Code sidebar](./docs/images/opencode-ui-preview.png)
 
-## What's New In 1.0.0
+## Supported Platforms
+
+| Host environment | Supported modes |
+| --- | --- |
+| Windows | Local |
+| Linux | Local, Remote-SSH, and other Linux remote hosts |
+| macOS | Local on Apple Silicon or Intel, Remote-SSH, and other macOS remote hosts |
+| WSL | Remote-WSL |
+
+The extension runs in VS Code, Cursor, and compatible VS Code hosts. Install the OpenCode CLI in the same local or remote environment where the extension runs.
+
+## What's New In 1.0.1
 
 ### macOS Support
 
 Use the same sidebar workflow on macOS without extra extension settings. Install OpenCode with its official installer, Homebrew, npm, Bun, pnpm, Yarn, Mise, or MacPorts; `opencode-ui` will resolve the usual CLI locations even when VS Code was opened from Finder and received a shorter shell `PATH`.
+
+## Core Highlights
 
 ### Quick Custom Providers
 
