@@ -28,6 +28,7 @@ describe('release hardening', () => {
     expect(ci).toContain('actions/setup-node@v7');
     expect(ci).toContain('actions/upload-artifact@v7');
     expect(ci).toContain('node-version: 22');
+    expect(ci).toContain('path: vsix/opencode-ui-vscode-*.vsix');
     expect(ci).toContain('ubuntu-latest');
     expect(ci).toContain('windows-latest');
     expect(ci).toContain('macos-latest');

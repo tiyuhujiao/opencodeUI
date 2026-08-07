@@ -63,5 +63,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: opencode-ui-vsix
-          path: vsix/*.vsix
+          path: vsix/opencode-ui-vscode-*.vsix
           if-no-files-found: error
