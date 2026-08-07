@@ -8,21 +8,17 @@ English | [简体中文](./README.zh-CN.md)
 
 OpenCode is powerful, but using it should not mean constantly moving between the editor, terminal, and configuration files. We built `opencode-ui` to give OpenCode a clear visual home inside VS Code, so conversations, tools, model choices, and code changes stay close to the work they belong to.
 
-Version `1.0.0` is a thorough redesign and rebuild of the earlier extension. The interface is calmer, everyday flows are shorter, and the extension now covers much more of the OpenCode experience without hiding the underlying CLI.
-
-Version `1.1.0` adds first-class macOS support for both Apple Silicon and Intel Macs, including automatic discovery of the official OpenCode install, Homebrew, and MacPorts. Every change is now checked on Windows, Linux, and macOS in GitHub Actions, with a real VS Code extension smoke test on macOS.
+Version `1.0.0` is a thorough redesign and rebuild of the earlier extension. The interface is calmer, everyday flows are shorter, and the extension now covers much more of the OpenCode experience without hiding the underlying CLI. It also adds first-class macOS support for both Apple Silicon and Intel Macs, including automatic discovery of the official OpenCode install, Homebrew, and MacPorts.
 
 ## Preview
 
 ![OpenCode running in the VS Code sidebar](./docs/images/opencode-ui-preview.png)
 
-## New In 1.1.0
+## What's New In 1.0.0
 
 ### macOS Support
 
 Use the same sidebar workflow on macOS without extra extension settings. Install OpenCode with its official installer, Homebrew, npm, Bun, pnpm, Yarn, Mise, or MacPorts; `opencode-ui` will resolve the usual CLI locations even when VS Code was opened from Finder and received a shorter shell `PATH`.
-
-## What's New In 1.0.0
 
 ### Quick Custom Providers
 
