@@ -824,6 +824,8 @@ export default function App() {
   const [timelineLoading, setTimelineLoading] = useState(false)
   const [timelineError, setTimelineError] = useState<string | null>(null)
   const [timelineRevertMessageId, setTimelineRevertMessageId] = useState<string | null>(null)
+  const [revertingMessageId, setRevertingMessageId] = useState<string | null>(null)
+  const [forkingMessageId, setForkingMessageId] = useState<string | null>(null)
   const [pendingPermission, setPendingPermission] = useState<null | {
     permissionId: string
     toolName: string
@@ -842,7 +844,9 @@ export default function App() {
   const deleteRequestIdsRef = useRef<Map<string, string>>(new Map())
   const timelineRequestIdsRef = useRef<Map<string, string>>(new Map())
   const undoRequestIdsRef = useRef<Map<string, string>>(new Map())
+  const revertRequestIdsRef = useRef<Map<string, { sessionId: string; messageId: string }>>(new Map())
   const redoRequestIdsRef = useRef<Map<string, string>>(new Map())
+  const forkRequestIdsRef = useRef<Map<string, { sessionId: string; messageId: string }>>(new Map())
   const permissionReplyRequestIdsRef = useRef<Map<string, string>>(new Map())
   const questionReplyRequestIdsRef = useRef<Map<string, string>>(new Map())
   const questionRejectRequestIdsRef = useRef<Map<string, string>>(new Map())
@@ -1192,7 +1196,24 @@ export default function App() {
 
   const completeRun = useCallback((completion: PendingRunCompletion) => {
     const active = activeRunRef.current
-    const assistantMessage = typeof active?.assistantIndex === 'number' ? transcriptRef.current[active.assistantIndex] : undefined
+    const completedAt = Date.now()
+    let completedTranscript = transcriptRef.current
+    if (typeof active?.assistantIndex === 'number') {
+      const assistantMessage = completedTranscript[active.assistantIndex]
+      if (assistantMessage) {
+        completedTranscript = [...completedTranscript]
+        completedTranscript[active.assistantIndex] = {
+          ...assistantMessage,
+          completed: completedAt,
+          ...(completion.type === 'done' && !assistantMessage.finish ? { finish: 'stop' } : {})
+        }
+        transcriptRef.current = completedTranscript
+        setTranscript(completedTranscript)
+      }
+    }
+    const assistantMessage = typeof active?.assistantIndex === 'number'
+      ? completedTranscript[active.assistantIndex]
+      : undefined
     setEditedFiles(assistantMessage ? summarizeEditedFiles([assistantMessage], workspaceFolderPath) : [])
     setIsRunning(false)
     setLastRunPartKind(null)
@@ -1213,8 +1234,8 @@ export default function App() {
     if (completion.sessionId && completion.type !== 'stopped') {
       lastCompletedRunRef.current = {
         sessionId: completion.sessionId,
-        completedAt: Date.now(),
-        localTranscript: transcriptRef.current,
+        completedAt,
+        localTranscript: completedTranscript,
         exportAttempts: 0
       }
     }
@@ -1233,14 +1254,18 @@ export default function App() {
       return
     }
     suppressNextSessionAutoExportRef.current = options?.suppressAutoExport ?? false
-    if (!isRunningRef.current) {
+    const isSessionChange = sessionId !== selectedSessionIdRef.current
+    if (isSessionChange && !isRunningRef.current) {
+      setRunStatus(null)
       setEditedFiles([])
+      setReviewFiles([])
+    } else {
+      clearSettledRunIndicator()
     }
     activeSubtaskRef.current = null
     setActiveSubtask(null)
     setSubtaskTranscript([])
     setSubtaskTranscriptError(null)
-    clearSettledRunIndicator()
     setSelectedSessionId(sessionId)
   }, [clearSettledRunIndicator])
 
@@ -1333,6 +1358,40 @@ export default function App() {
     [pushDebug]
   )
 
+  const requestSessionRevert = useCallback(
+    (sessionId: string, messageId: string) => {
+      const vscode = getVsCodeApi()
+      if (!vscode) {
+        setRunStatus('Not running in VS Code')
+        return
+      }
+      if (!sessionId || !messageId || revertRequestIdsRef.current.size > 0) {
+        return
+      }
+      if (isRunningRef.current) {
+        setRunStatus('Cannot undo while running')
+        return
+      }
+
+      const requestId = createRequestId()
+      revertRequestIdsRef.current.set(requestId, { sessionId, messageId })
+      setRevertingMessageId(messageId)
+      pushDebug({
+        at: new Date().toISOString(),
+        kind: 'tx',
+        type: 'session.revert',
+        requestId,
+        detail: `${sessionId} | ${messageId}`
+      })
+      vscode.postMessage({
+        type: 'session.revert',
+        requestId,
+        payload: { sessionId, messageId }
+      })
+    },
+    [pushDebug]
+  )
+
   const requestSessionRedo = useCallback(
     (sessionId: string) => {
       const vscode = getVsCodeApi()
@@ -1357,6 +1416,40 @@ export default function App() {
         type: 'session.redo',
         requestId,
         payload: { sessionId }
+      })
+    },
+    [pushDebug]
+  )
+
+  const requestSessionFork = useCallback(
+    (sessionId: string, messageId: string) => {
+      const vscode = getVsCodeApi()
+      if (!vscode) {
+        setRunStatus('Not running in VS Code')
+        return
+      }
+      if (!sessionId || !messageId || forkRequestIdsRef.current.size > 0) {
+        return
+      }
+      if (isRunningRef.current) {
+        setRunStatus('Cannot fork while running')
+        return
+      }
+
+      const requestId = createRequestId()
+      forkRequestIdsRef.current.set(requestId, { sessionId, messageId })
+      setForkingMessageId(messageId)
+      pushDebug({
+        at: new Date().toISOString(),
+        kind: 'tx',
+        type: 'session.fork',
+        requestId,
+        detail: `${sessionId} | ${messageId}`
+      })
+      vscode.postMessage({
+        type: 'session.fork',
+        requestId,
+        payload: { sessionId, messageId }
       })
     },
     [pushDebug]
@@ -1786,6 +1879,7 @@ export default function App() {
     setPendingPermission(null)
     setPendingQuestion(null)
 
+    const created = Date.now()
     const assistantIndex = transcript.length + 1
     activeRunRef.current = {
       requestId,
@@ -1801,6 +1895,7 @@ export default function App() {
       const nextTranscript: TranscriptMessage[] = [
         ...current,
         {
+          created,
           role: 'user',
           parts: [
             ...(pastedImage
@@ -1819,6 +1914,7 @@ export default function App() {
           ]
         },
         {
+          created,
           role: 'assistant',
           parts: []
         }
@@ -2581,6 +2677,37 @@ export default function App() {
         return
       }
 
+      if (message.type === 'session.revert.response' && message.ok) {
+        const meta = revertRequestIdsRef.current.get(message.requestId)
+        if (!meta) {
+          return
+        }
+        revertRequestIdsRef.current.delete(message.requestId)
+        setRevertingMessageId((current) => (current === meta.messageId ? null : current))
+        if (message.payload.sessionId !== meta.sessionId) {
+          setRunStatus('Undo failed: session mismatch')
+          return
+        }
+
+        setTimelineRevertMessageId(message.payload.revertMessageId ?? meta.messageId)
+        setRunStatus(message.payload.changed ? 'Undone' : 'Already at this point')
+        if (typeof message.payload.composerText === 'string') {
+          setComposerValue(message.payload.composerText)
+          setComposerCursor(message.payload.composerText.length)
+          window.requestAnimationFrame(() => {
+            composerRef.current?.focus()
+            composerRef.current?.setSelectionRange(message.payload.composerText?.length ?? 0, message.payload.composerText?.length ?? 0)
+          })
+        }
+        if (selectedSessionIdRef.current === meta.sessionId) {
+          requestSessionExport(meta.sessionId)
+          if (timelineDialogOpen) {
+            requestSessionTimeline(meta.sessionId)
+          }
+        }
+        return
+      }
+
       if (message.type === 'session.redo.response' && message.ok) {
         const targetSessionId = redoRequestIdsRef.current.get(message.requestId)
         if (!targetSessionId) {
@@ -2602,6 +2729,25 @@ export default function App() {
             requestSessionTimeline(targetSessionId)
           }
         }
+        return
+      }
+
+      if (message.type === 'session.fork.response' && message.ok) {
+        const meta = forkRequestIdsRef.current.get(message.requestId)
+        if (!meta) {
+          return
+        }
+        forkRequestIdsRef.current.delete(message.requestId)
+        setForkingMessageId((current) => (current === meta.messageId ? null : current))
+        if (message.payload.sourceSessionId !== meta.sessionId) {
+          setRunStatus('Fork failed: session mismatch')
+          return
+        }
+
+        allowAutoSelectSessionRef.current = false
+        setTimelineDialogOpen(false)
+        selectSession(message.payload.sessionId)
+        requestSessions({ background: true })
         return
       }
 
@@ -3090,9 +3236,28 @@ export default function App() {
           return
         }
 
+        if (revertRequestIdsRef.current.has(message.requestId)) {
+          const meta = revertRequestIdsRef.current.get(message.requestId)
+          revertRequestIdsRef.current.delete(message.requestId)
+          setRevertingMessageId((current) => (current === meta?.messageId ? null : current))
+          setRunStatus(`Undo failed: ${message.error}`)
+          if (timelineDialogOpen) {
+            setTimelineError(message.error)
+          }
+          return
+        }
+
         if (redoRequestIdsRef.current.has(message.requestId)) {
           redoRequestIdsRef.current.delete(message.requestId)
           setRunStatus(`Redo failed: ${message.error}`)
+          return
+        }
+
+        if (forkRequestIdsRef.current.has(message.requestId)) {
+          const meta = forkRequestIdsRef.current.get(message.requestId)
+          forkRequestIdsRef.current.delete(message.requestId)
+          setForkingMessageId((current) => (current === meta?.messageId ? null : current))
+          setRunStatus(`Fork failed: ${message.error}`)
           return
         }
 
@@ -3589,13 +3754,24 @@ export default function App() {
             <QuestionBanner pending={pendingQuestion} onReply={requestQuestionReply} onReject={requestQuestionReject} />
           ) : null}
           {transcriptError ? <p className="error-panel">{t(transcriptError)}</p> : null}
-          {!loadingTranscript && !transcriptError && transcript.length === 0 ? <p className="empty-line">{t('No messages')}</p> : null}
           {!transcriptError && transcript.length > 0 ? (
             <Transcript
               messages={compactTranscript(transcript)}
               isRunning={isRunning}
               onOpenSubtask={openSubtask}
               onOpenFileReference={openFileReference}
+              onRevertMessage={(messageId) => {
+                if (selectedSessionId) {
+                  requestSessionRevert(selectedSessionId, messageId)
+                }
+              }}
+              onForkMessage={(messageId) => {
+                if (selectedSessionId) {
+                  requestSessionFork(selectedSessionId, messageId)
+                }
+              }}
+              revertingMessageId={revertingMessageId}
+              forkingMessageId={forkingMessageId}
             />
           ) : null}
         </div>
@@ -4006,6 +4182,13 @@ export default function App() {
         revertMessageId={timelineRevertMessageId}
         loading={timelineLoading}
         error={timelineError}
+        revertingMessageId={revertingMessageId}
+        disabled={isRunning}
+        onRevert={(messageId) => {
+          if (selectedSessionId) {
+            requestSessionRevert(selectedSessionId, messageId)
+          }
+        }}
         onClose={() => setTimelineDialogOpen(false)}
       />
 

@@ -187,6 +187,48 @@ describe('webview request protocol guards', () => {
     })).toBe(false);
   });
 
+  it('校验定点回退与会话分支请求和响应', () => {
+    expect(isWebviewRequestMessage({
+      type: 'session.revert',
+      requestId: 'revert-1',
+      payload: { sessionId: 'ses_parent', messageId: 'msg_user_1' }
+    })).toBe(true);
+    expect(isWebviewRequestMessage({
+      type: 'session.fork',
+      requestId: 'fork-1',
+      payload: { sessionId: 'ses_parent', messageId: 'msg_assistant_1' }
+    })).toBe(true);
+    expect(isWebviewRequestMessage({
+      type: 'session.revert',
+      requestId: 'revert-invalid',
+      payload: { sessionId: 'ses_parent', messageId: '' }
+    })).toBe(false);
+
+    expect(isExtensionResponseMessage({
+      type: 'session.revert.response',
+      requestId: 'revert-1',
+      ok: true,
+      payload: {
+        changed: true,
+        sessionId: 'ses_parent',
+        revertMessageId: 'msg_user_1',
+        composerText: 'restore this prompt'
+      }
+    })).toBe(true);
+    expect(isExtensionResponseMessage({
+      type: 'session.fork.response',
+      requestId: 'fork-1',
+      ok: true,
+      payload: { sourceSessionId: 'ses_parent', sessionId: 'ses_fork' }
+    })).toBe(true);
+    expect(isExtensionResponseMessage({
+      type: 'session.fork.response',
+      requestId: 'fork-invalid',
+      ok: true,
+      payload: { sourceSessionId: 'ses_parent', sessionId: '' }
+    })).toBe(false);
+  });
+
   it('仅打开 Markdown 时允许空文件名，保存到磁盘时仍要求文件名', () => {
     const basePayload = {
       sessionId: 'ses_123',

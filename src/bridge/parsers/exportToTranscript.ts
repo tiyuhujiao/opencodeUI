@@ -28,6 +28,10 @@ export type TranscriptPartUnknown = {
 export type TranscriptPart = TranscriptPartText | TranscriptPartReasoning | TranscriptPartTool | TranscriptPartUnknown;
 
 export type TranscriptMessage = {
+  id?: string;
+  created?: number;
+  completed?: number;
+  finish?: string;
   role: TranscriptRole;
   parts: TranscriptPart[];
   contextUsage?: {
@@ -38,8 +42,16 @@ export type TranscriptMessage = {
 
 export function exportToTranscript(payload: ExportPayload): TranscriptMessage[] {
   return payload.messages.map((message) => {
+    const id = resolveMessageId(message.info);
+    const created = resolveCreated(message.info);
+    const completed = resolveCompleted(message.info);
+    const finish = resolveFinish(message.info);
     const contextUsage = resolveContextUsage(message.info);
     return {
+      ...(id ? { id } : {}),
+      ...(created !== undefined ? { created } : {}),
+      ...(completed !== undefined ? { completed } : {}),
+      ...(finish ? { finish } : {}),
       role: resolveRole(message.info),
       parts: message.parts.map(mapPart),
       ...(contextUsage ? { contextUsage } : {})
@@ -74,6 +86,41 @@ function resolveRole(info: unknown): TranscriptRole {
     return role;
   }
   return 'unknown';
+}
+
+function resolveMessageId(info: unknown): string | undefined {
+  const id = getStringFromRecord(info, 'id');
+  return id?.trim() ? id : undefined;
+}
+
+function resolveCreated(info: unknown): number | undefined {
+  return resolveMessageTime(info, 'created');
+}
+
+function resolveCompleted(info: unknown): number | undefined {
+  return resolveMessageTime(info, 'completed');
+}
+
+function resolveMessageTime(info: unknown, key: 'created' | 'completed'): number | undefined {
+  if (!isRecord(info)) {
+    return undefined;
+  }
+
+  const time = isRecord(info.time) ? info.time : undefined;
+  const candidate = time?.[key] ?? info[key];
+  if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0) {
+    return candidate;
+  }
+  if (typeof candidate === 'string') {
+    const parsed = Date.parse(candidate);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function resolveFinish(info: unknown): string | undefined {
+  const finish = getStringFromRecord(info, 'finish')?.trim();
+  return finish || undefined;
 }
 
 function resolveContextUsage(info: unknown): TranscriptMessage['contextUsage'] {

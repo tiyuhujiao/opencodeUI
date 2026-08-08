@@ -60,7 +60,7 @@ body:
     attributes:
       label: Versions
       description: Include opencode-ui, opencode, IDE, Node, and npm versions when available.
-      placeholder: opencode-ui 1.0.1, opencode 1.15.10, VS Code 1.105.0, Node 22.x, npm 10.x
+      placeholder: opencode-ui 1.0.2, opencode 1.15.10, VS Code 1.105.0, Node 22.x, npm 10.x
   - type: textarea
     id: logs
     attributes:

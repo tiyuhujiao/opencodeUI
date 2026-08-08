@@ -8,7 +8,7 @@ describe('transcript activity block', () => {
   it('groups consecutive reasoning, tool calls, and subtasks without moving later thinking above text', () => {
     const source = readFileSync(join(root, 'webview-ui/src/components/Transcript.tsx'), 'utf8');
 
-    expect(source).toContain('const renderItems = buildMessageRenderItems(visibleParts, messageIndex, !isStreamingBubble)');
+    expect(source).toContain('const renderItems = buildMessageRenderItems(visibleParts, messageIndex, isFinalResponse)');
     expect(source).toContain('if (renderItems.length === 0) {');
     expect(source).toContain('function buildMessageRenderItems(parts: TranscriptPart[], messageIndex: number, markFinalAnswer: boolean): MessageRenderItem[]');
     expect(source).toContain('let activityEntries: ActivityEntry[] = []');
@@ -24,32 +24,35 @@ describe('transcript activity block', () => {
     expect(source).not.toContain('let hasActivity = false');
   });
 
-  it('keeps process blocks summarized, collapsed by default, and separates final answer text', () => {
+  it('renders one turn-level timer before process blocks and keeps the final answer outside process collapse', () => {
     const source = readFileSync(join(root, 'webview-ui/src/components/Transcript.tsx'), 'utf8');
 
     expect(source).toContain('function MessageContent({');
-    expect(source).toContain('<PrefinalWorkBlock');
+    expect(source).toContain('const rendered = buildTranscriptDisplayBlocks(messages)');
+    expect(source).toContain('<AssistantTurnBlock');
+    expect(source).toContain('<div className="turn-work">');
+    expect(source).toContain('{turn.responses.map((entry) => {');
+    expect(source.indexOf('<div className="turn-work">')).toBeLessThan(source.indexOf('{turn.responses.map((entry) => {'));
     expect(source).toContain('const finalAnswerIndex = items.findIndex((item) => item.kind ===');
-    expect(source).toContain('const workDurationLabel = usePrefinalWorkDuration(items, isStreamingBubble)');
+    expect(source).toContain('const visibleItems = !showProcess && finalAnswerIndex >= 0 ? items.slice(finalAnswerIndex) : items');
+    expect(source).toContain('const timer = window.setInterval(tick, 1000)');
+    expect(source).toContain('const timing = resolveAssistantTurnTiming(turn, {');
+    expect(source).toContain("t('Working for {duration}', { duration: durationLabel ?? '<1s' })");
+    expect(source).toContain("t('Worked for {duration}', { duration: durationLabel })");
     expect(source).toContain('function ActivityBlock({');
     expect(source).toContain('const [open, setOpen] = useState(false)');
     expect(source).toContain('const summary = getActivitySummary(entries, t)');
     expect(source).toContain('aria-expanded={open}');
     expect(source).toContain('className="activity-block__summary"');
     expect(source).toContain('className="activity-block__current"');
-    expect(source).toContain("md-body${item.isFinalAnswer && !options.insidePrefinal ? ' md-body--final-answer' : ''}");
+    expect(source).toContain("className={`md-body${item.isFinalAnswer ? ' md-body--final-answer' : ''}`}");
     expect(source).toContain('function markFinalAnswerItem(items: MessageRenderItem[]): MessageRenderItem[]');
-    expect(source).toContain('function PrefinalWorkBlock({');
-    expect(source).toContain("t('Worked for {duration}', { duration: durationLabel })");
-    expect(source).toContain("t('Worked before final answer')");
-    expect(source).toContain('function usePrefinalWorkDuration(items: MessageRenderItem[], isStreamingBubble: boolean)');
-    expect(source).toContain('const candidateFinalStarted = isStreamingBubble && isLastItemTextWithPriorWork(items)');
-    expect(source).toContain('candidateFinalStartedAtRef.current ?? Date.now()');
     expect(source).toContain("${t('Subtask')}: ${summarizeActivityText(activeTask.title || activeTask.summary)}");
     expect(source).toContain("${t('Tool')}: ${summarizeActivityText(latestTool.title || latestTool.summary)}");
     expect(source).toContain("${t('Thinking')} ${summarizeActivityText(latestThinking.part.text)}");
+    expect(source).not.toContain('PrefinalWorkBlock');
+    expect(source).not.toContain('usePrefinalWorkDuration');
     expect(source).not.toContain('activity-block__meta');
-    expect(source).not.toContain('prefinal-work__meta');
     expect(source).not.toContain('function getPrefinalWorkSummary');
     expect(source).not.toContain('function useActivityDuration');
     expect(source).not.toContain('activity-block__title');
@@ -75,10 +78,11 @@ describe('transcript activity block', () => {
     expect(source).toContain('const isLive = isCurrent && summary.isLive');
     expect(source).toContain('activity-block--active');
     expect(styles).toContain('.activity-block');
-    expect(styles).toContain('.prefinal-work');
-    expect(styles).toContain('.prefinal-work__summary');
-    expect(styles).toContain('.prefinal-work__body');
-    expect(styles).toContain('.prefinal-work__text');
+    expect(styles).toContain('.assistant-turn');
+    expect(styles).toContain('.turn-work');
+    expect(styles).toContain('.turn-work__summary');
+    expect(styles).toContain('.turn-work__divider');
+    expect(styles).toContain('.turn-work__chevron.is-expanded');
     expect(styles).toContain('.activity-block__summary::after');
     expect(styles).toContain('.activity-block--active .activity-block__summary::after');
     expect(styles).toContain('.msg--assistant.is-streaming');
@@ -94,7 +98,6 @@ describe('transcript activity block', () => {
     expect(styles).toContain('.md-body--final-answer');
     expect(styles).toContain('.activity-block__body');
     const nestedWorkStyles = [
-      styles.slice(styles.indexOf('.prefinal-work__body {'), styles.indexOf('.prefinal-work__text {')),
       styles.slice(styles.indexOf('.activity-block__body {'), styles.indexOf('.activity-entry {')),
       styles.slice(styles.indexOf('.activity-thinking__body {'), styles.indexOf('.md-body--final-answer {'))
     ]
@@ -114,6 +117,6 @@ describe('transcript activity block', () => {
     expect(styles).toContain('@media (max-width: 420px)');
     expect(styles).not.toContain('.log-block');
     expect(styles).not.toContain('.activity-block__meta');
-    expect(styles).not.toContain('.prefinal-work__meta');
+    expect(styles).not.toContain('.prefinal-work');
   });
 });

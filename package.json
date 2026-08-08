@@ -2,7 +2,7 @@
   "name": "opencode-ui-vscode",
   "displayName": "opencode-ui",
   "publisher": "tiyuhujiao",
-  "version": "1.0.1",
+  "version": "1.0.4",
   "description": "Visual OpenCode workspace for VS Code with custom providers, inline diffs, and bilingual UI.",
   "license": "MIT",
   "icon": "media/icon.png",

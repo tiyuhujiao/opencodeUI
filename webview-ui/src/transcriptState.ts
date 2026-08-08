@@ -27,21 +27,63 @@ export function compactTranscript(messages: TranscriptMessage[]): TranscriptMess
   const next: TranscriptMessage[] = []
   for (const message of messages) {
     const last = next[next.length - 1]
-    if (last && last.role === message.role) {
+    if (last && canCompactMessages(last, message)) {
       const merged = [...last.parts, ...message.parts]
       last.parts = merged
+      if (last.created === undefined && message.created !== undefined) {
+        last.created = message.created
+      }
+      if (message.completed !== undefined) {
+        last.completed = last.completed === undefined
+          ? message.completed
+          : Math.max(last.completed, message.completed)
+      }
       if (message.contextUsage) {
         last.contextUsage = preserveContextUsage(last.contextUsage, message.contextUsage)
       }
+      if (message.finish) {
+        last.finish = message.finish
+      }
     } else {
-      next.push({
-        role: message.role,
-        parts: [...message.parts],
-        ...(message.contextUsage ? { contextUsage: message.contextUsage } : {})
-      })
+      next.push(cloneTranscriptMessage(message))
     }
   }
   return next
+}
+
+function canCompactMessages(previous: TranscriptMessage, next: TranscriptMessage): boolean {
+  if (previous.role !== next.role) {
+    return false
+  }
+  if (!previous.id && !next.id) {
+    return true
+  }
+  return Boolean(previous.id && previous.id === next.id)
+}
+
+function cloneTranscriptMessage(message: TranscriptMessage): TranscriptMessage {
+  return {
+    ...(message.id ? { id: message.id } : {}),
+    ...(message.created !== undefined ? { created: message.created } : {}),
+    ...(message.completed !== undefined ? { completed: message.completed } : {}),
+    ...(message.finish ? { finish: message.finish } : {}),
+    role: message.role,
+    parts: [...message.parts],
+    ...(message.contextUsage ? { contextUsage: message.contextUsage } : {})
+  }
+}
+
+export function isFinalAssistantResponse(message: TranscriptMessage): boolean {
+  if (message.role !== 'assistant') {
+    return false
+  }
+
+  const finish = message.finish?.trim().toLowerCase()
+  if (!finish || finish === 'tool-calls' || finish === 'unknown') {
+    return false
+  }
+
+  return message.parts.some((part) => part.type === 'text' && part.text.trim().length > 0)
 }
 
 export function hasAnyAssistantText(messages: TranscriptMessage[]): boolean {
@@ -107,11 +149,7 @@ export function mergeLocalImageParts(local: TranscriptMessage[], exported: Trans
     return exported
   }
 
-  const merged = exported.map((message) => ({
-    role: message.role,
-    parts: [...message.parts],
-    ...(message.contextUsage ? { contextUsage: message.contextUsage } : {})
-  }))
+  const merged = exported.map(cloneTranscriptMessage)
 
   for (let i = 0; i < Math.min(local.length, merged.length); i += 1) {
     const localMessage = local[i]
@@ -139,11 +177,7 @@ export function mergeLocalRunErrors(local: TranscriptMessage[], exported: Transc
     return exported
   }
 
-  const merged = exported.map((message) => ({
-    role: message.role,
-    parts: [...message.parts],
-    ...(message.contextUsage ? { contextUsage: message.contextUsage } : {})
-  }))
+  const merged = exported.map(cloneTranscriptMessage)
 
   for (const entry of errors) {
     const target = findTurnTarget(merged, entry.userTurn)

@@ -249,8 +249,14 @@ class SidebarProvider {
                 case "session.undo":
                     void this.handleSessionUndoRequest(webview, message.requestId, message.payload.sessionId);
                     return;
+                case "session.revert":
+                    void this.handleSessionRevertRequest(webview, message.requestId, message.payload.sessionId, message.payload.messageId);
+                    return;
                 case "session.redo":
                     void this.handleSessionRedoRequest(webview, message.requestId, message.payload.sessionId);
+                    return;
+                case "session.fork":
+                    void this.handleSessionForkRequest(webview, message.requestId, message.payload.sessionId, message.payload.messageId);
                     return;
                 case "session.delete":
                     void this.handleSessionDeleteRequest(webview, message.requestId, message.payload.sessionId);
@@ -598,6 +604,49 @@ class SidebarProvider {
             this.respondError(webview, requestId, error, "执行 undo 失败。");
         }
     }
+    async handleSessionRevertRequest(webview, requestId, sessionId, messageId) {
+        try {
+            const [payload, sessionInfo] = await Promise.all([
+                this.computeRevertPayload(sessionId, messageId),
+                this.getSessionInfoForRead(sessionId),
+            ]);
+            if (sessionInfo.revert?.messageID === payload.messageId) {
+                this.respond(webview, {
+                    type: "session.revert.response",
+                    requestId,
+                    ok: true,
+                    payload: {
+                        changed: false,
+                        sessionId,
+                        revertMessageId: payload.messageId,
+                        composerText: payload.composerText,
+                    },
+                });
+                return;
+            }
+            const updated = await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}/revert`, {
+                method: "POST",
+                body: JSON.stringify({ messageID: payload.messageId }),
+            });
+            this.inlineDiff.invalidateAll("Session history changed; the previous inline diff is no longer current.");
+            this.respond(webview, {
+                type: "session.revert.response",
+                requestId,
+                ok: true,
+                payload: {
+                    changed: true,
+                    sessionId,
+                    revertMessageId: typeof updated.revert?.messageID === "string"
+                        ? updated.revert.messageID
+                        : payload.messageId,
+                    composerText: payload.composerText,
+                },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "回退到所选消息失败。");
+        }
+    }
     async handleSessionRedoRequest(webview, requestId, sessionId) {
         try {
             const sessionInfo = await this.getSessionInfoForMutation(sessionId);
@@ -637,6 +686,33 @@ class SidebarProvider {
         }
         catch (error) {
             this.respondError(webview, requestId, error, "执行 redo 失败。");
+        }
+    }
+    async handleSessionForkRequest(webview, requestId, sessionId, messageId) {
+        try {
+            const boundaryMessageId = await this.computeForkBoundaryMessageId(sessionId, messageId);
+            const forked = await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}/fork`, {
+                method: "POST",
+                ...(boundaryMessageId
+                    ? { body: JSON.stringify({ messageID: boundaryMessageId }) }
+                    : {}),
+            });
+            if (typeof forked.id !== "string" || forked.id.trim().length === 0) {
+                throw new Error("OpenCode did not return the forked session ID.");
+            }
+            this.invalidateSessionExportCache(forked.id);
+            this.respond(webview, {
+                type: "session.fork.response",
+                requestId,
+                ok: true,
+                payload: {
+                    sourceSessionId: sessionId,
+                    sessionId: forked.id,
+                },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "从所选消息创建分支会话失败。");
         }
     }
     async handleTempfileWriteRequest(webview, requestId, fileName, bytesBase64, mimeType) {
@@ -2034,6 +2110,43 @@ class SidebarProvider {
             break;
         }
         return fallback;
+    }
+    async computeRevertPayload(sessionId, messageId) {
+        const cachedExport = await this.getSessionExportData(sessionId);
+        const target = collectUserTimelineTargetsFromItems(this.getTimelineItemsFromSessionExport(cachedExport)).find((item) => item.messageId === messageId);
+        if (!target) {
+            throw new Error("The selected user message is no longer available in this session.");
+        }
+        return { messageId: target.messageId, composerText: target.text };
+    }
+    async computeForkBoundaryMessageId(sessionId, messageId) {
+        const cachedExport = await this.getSessionExportData(sessionId);
+        const sourceIndex = cachedExport.data.messages.findIndex((message) => {
+            const info = isRecord(message.info) ? message.info : undefined;
+            return info?.id === messageId;
+        });
+        const source = cachedExport.data.messages[sourceIndex];
+        const info = source && isRecord(source.info) ? source.info : undefined;
+        if (info?.role !== "assistant") {
+            throw new Error("The selected assistant message is no longer available in this session.");
+        }
+        const finish = typeof info.finish === "string" ? info.finish.trim().toLowerCase() : "";
+        const hasText = source.parts.some((part) => {
+            if (!isRecord(part) || part.type !== "text") {
+                return false;
+            }
+            return typeof part.text === "string" && part.text.trim().length > 0;
+        });
+        if (!hasText || !finish || finish === "tool-calls" || finish === "unknown") {
+            throw new Error("Only a completed assistant response can be forked.");
+        }
+        for (const message of cachedExport.data.messages.slice(sourceIndex + 1)) {
+            const nextInfo = isRecord(message.info) ? message.info : undefined;
+            if (typeof nextInfo?.id === "string" && nextInfo.id.trim().length > 0) {
+                return nextInfo.id;
+            }
+        }
+        return undefined;
     }
     async computeRedoComposerText(sessionId) {
         const cachedExport = await this.getSessionExportData(sessionId);

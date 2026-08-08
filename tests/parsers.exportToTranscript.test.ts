@@ -2,6 +2,45 @@ import { describe, expect, it } from 'vitest';
 import { exportToTranscript, liveMessagesToTranscript } from '../src/bridge/parsers';
 
 describe('exportToTranscript', () => {
+  it('保留 OpenCode 消息 ID、创建时间与完成时间作为历史操作和计时锚点', () => {
+    const transcript = exportToTranscript({
+      info: {},
+      messages: [
+        {
+          info: { id: 'msg_user_1', role: 'user', time: { created: 1_786_154_400_000 } },
+          parts: [{ type: 'text', text: 'checkpoint' }]
+        },
+        {
+          info: {
+            id: 'msg_assistant_1',
+            role: 'assistant',
+            time: {
+              created: '2026-08-08T06:00:00.000Z',
+              completed: '2026-08-08T06:01:02.855Z'
+            }
+          },
+          parts: [{ type: 'text', text: 'done' }]
+        }
+      ]
+    });
+
+    expect(transcript).toEqual([
+      {
+        id: 'msg_user_1',
+        created: 1_786_154_400_000,
+        role: 'user',
+        parts: [{ type: 'text', text: 'checkpoint' }]
+      },
+      {
+        id: 'msg_assistant_1',
+        created: Date.parse('2026-08-08T06:00:00.000Z'),
+        completed: Date.parse('2026-08-08T06:01:02.855Z'),
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'done' }]
+      }
+    ]);
+  });
+
   it('将 text/tool/unknown parts 映射为 transcript 消息', () => {
     const transcript = exportToTranscript({
       info: {},
@@ -40,6 +79,27 @@ describe('exportToTranscript', () => {
           }
         ]
       }
+    ]);
+  });
+
+  it('保留 assistant 完成原因以区分工具步骤与最终回复', () => {
+    const transcript = exportToTranscript({
+      info: {},
+      messages: [
+        {
+          info: { id: 'msg_tool_step', role: 'assistant', finish: 'tool-calls' },
+          parts: [{ type: 'tool', tool: 'read', state: { status: 'completed' } }]
+        },
+        {
+          info: { id: 'msg_final', role: 'assistant', finish: 'stop' },
+          parts: [{ type: 'text', text: 'final response' }]
+        }
+      ]
+    });
+
+    expect(transcript.map((message) => ({ id: message.id, finish: message.finish }))).toEqual([
+      { id: 'msg_tool_step', finish: 'tool-calls' },
+      { id: 'msg_final', finish: 'stop' }
     ]);
   });
 

@@ -13,7 +13,9 @@ exports.WEBVIEW_REQUEST_WHITELIST = [
     'subtask.transcript',
     'session.timeline',
     'session.undo',
+    'session.revert',
     'session.redo',
+    'session.fork',
     'session.delete',
     'permission.reply',
     'question.reply',
@@ -54,7 +56,9 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set([
     'subtask.transcript.response',
     'session.timeline.response',
     'session.undo.response',
+    'session.revert.response',
     'session.redo.response',
+    'session.fork.response',
     'session.delete.response',
     'file.open.response',
     'inlineDiff.open.response',
@@ -328,6 +332,20 @@ function isExtensionResponseMessage(message) {
             && isNonEmptyString(message.payload.sessionId)
             && Array.isArray(message.payload.messages);
     }
+    if (message.type === 'session.revert.response') {
+        return message.ok === true
+            && isObject(message.payload)
+            && typeof message.payload.changed === 'boolean'
+            && isNonEmptyString(message.payload.sessionId)
+            && (typeof message.payload.revertMessageId === 'undefined' || isNonEmptyString(message.payload.revertMessageId))
+            && (typeof message.payload.composerText === 'undefined' || isBoundedString(message.payload.composerText));
+    }
+    if (message.type === 'session.fork.response') {
+        return message.ok === true
+            && isObject(message.payload)
+            && isNonEmptyString(message.payload.sourceSessionId)
+            && isNonEmptyString(message.payload.sessionId);
+    }
     if (message.type === 'inlineDiff.open.response' || message.type === 'inlineDiff.dismiss.response') {
         return message.ok === true && isObject(message.payload) && isNonEmptyString(message.payload.fileId);
     }
@@ -429,6 +447,14 @@ function isWebviewRequestMessage(message) {
             return false;
         }
         if (typeof message.payload.sessionId !== 'string' || message.payload.sessionId.trim().length === 0) {
+            return false;
+        }
+    }
+    if (message.type === 'session.revert' || message.type === 'session.fork') {
+        if (!isObject(message.payload)) {
+            return false;
+        }
+        if (!isNonEmptyString(message.payload.sessionId) || !isNonEmptyString(message.payload.messageId)) {
             return false;
         }
     }

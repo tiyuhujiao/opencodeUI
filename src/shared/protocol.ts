@@ -6,7 +6,9 @@ export const WEBVIEW_REQUEST_WHITELIST = [
   'subtask.transcript',
   'session.timeline',
   'session.undo',
+  'session.revert',
   'session.redo',
+  'session.fork',
   'session.delete',
   'permission.reply',
   'question.reply',
@@ -104,11 +106,29 @@ export type SessionUndoRequest = {
   };
 };
 
+export type SessionRevertRequest = {
+  type: 'session.revert';
+  requestId: string;
+  payload: {
+    sessionId: string;
+    messageId: string;
+  };
+};
+
 export type SessionRedoRequest = {
   type: 'session.redo';
   requestId: string;
   payload: {
     sessionId: string;
+  };
+};
+
+export type SessionForkRequest = {
+  type: 'session.fork';
+  requestId: string;
+  payload: {
+    sessionId: string;
+    messageId: string;
   };
 };
 
@@ -321,7 +341,9 @@ export type WebviewRequestMessage =
   | SubtaskTranscriptRequest
   | SessionTimelineRequest
   | SessionUndoRequest
+  | SessionRevertRequest
   | SessionRedoRequest
+  | SessionForkRequest
   | SessionDeleteRequest
   | PermissionReplyRequest
   | QuestionReplyRequest
@@ -448,6 +470,10 @@ export type TranscriptPart =
   | TranscriptPartUnknown;
 
 export type TranscriptMessage = {
+  id?: string;
+  created?: number;
+  completed?: number;
+  finish?: string;
   role: TranscriptRole;
   parts: TranscriptPart[];
   contextUsage?: ContextUsage;
@@ -529,6 +555,18 @@ export type SessionUndoResponseMessage = {
   };
 };
 
+export type SessionRevertResponseMessage = {
+  type: 'session.revert.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    changed: boolean;
+    sessionId: string;
+    revertMessageId?: string;
+    composerText?: string;
+  };
+};
+
 export type SessionRedoResponseMessage = {
   type: 'session.redo.response';
   requestId: string;
@@ -538,6 +576,16 @@ export type SessionRedoResponseMessage = {
     sessionId: string;
     revertMessageId?: string;
     composerText?: string;
+  };
+};
+
+export type SessionForkResponseMessage = {
+  type: 'session.fork.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    sourceSessionId: string;
+    sessionId: string;
   };
 };
 
@@ -1136,7 +1184,9 @@ export type ExtensionResponseMessage =
   | SubtaskTranscriptResponseMessage
   | SessionTimelineResponseMessage
   | SessionUndoResponseMessage
+  | SessionRevertResponseMessage
   | SessionRedoResponseMessage
+  | SessionForkResponseMessage
   | SessionDeleteResponseMessage
   | PermissionReplyResponseMessage
   | QuestionReplyResponseMessage
@@ -1181,7 +1231,9 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set<string>([
   'subtask.transcript.response',
   'session.timeline.response',
   'session.undo.response',
+  'session.revert.response',
   'session.redo.response',
+  'session.fork.response',
   'session.delete.response',
   'file.open.response',
   'inlineDiff.open.response',
@@ -1502,6 +1554,22 @@ export function isExtensionResponseMessage(message: unknown): message is Extensi
       && Array.isArray(message.payload.messages);
   }
 
+  if (message.type === 'session.revert.response') {
+    return message.ok === true
+      && isObject(message.payload)
+      && typeof message.payload.changed === 'boolean'
+      && isNonEmptyString(message.payload.sessionId)
+      && (typeof message.payload.revertMessageId === 'undefined' || isNonEmptyString(message.payload.revertMessageId))
+      && (typeof message.payload.composerText === 'undefined' || isBoundedString(message.payload.composerText));
+  }
+
+  if (message.type === 'session.fork.response') {
+    return message.ok === true
+      && isObject(message.payload)
+      && isNonEmptyString(message.payload.sourceSessionId)
+      && isNonEmptyString(message.payload.sessionId);
+  }
+
   if (message.type === 'inlineDiff.open.response' || message.type === 'inlineDiff.dismiss.response') {
     return message.ok === true && isObject(message.payload) && isNonEmptyString(message.payload.fileId);
   }
@@ -1624,12 +1692,22 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
     }
   }
 
-   if (message.type === 'session.timeline' || message.type === 'session.undo' || message.type === 'session.redo') {
+  if (message.type === 'session.timeline' || message.type === 'session.undo' || message.type === 'session.redo') {
     if (!isObject(message.payload)) {
       return false;
     }
 
     if (typeof message.payload.sessionId !== 'string' || message.payload.sessionId.trim().length === 0) {
+      return false;
+    }
+  }
+
+  if (message.type === 'session.revert' || message.type === 'session.fork') {
+    if (!isObject(message.payload)) {
+      return false;
+    }
+
+    if (!isNonEmptyString(message.payload.sessionId) || !isNonEmptyString(message.payload.messageId)) {
       return false;
     }
   }

@@ -1,4 +1,5 @@
 import type { SessionTimelineItem } from '../../../../src/shared/protocol'
+import { LoaderCircle, Undo2 } from 'lucide-react'
 import { useI18n } from '../../i18n'
 
 type TimelineDialogProps = {
@@ -7,6 +8,9 @@ type TimelineDialogProps = {
   revertMessageId: string | null
   loading: boolean
   error: string | null
+  revertingMessageId: string | null
+  disabled: boolean
+  onRevert: (messageId: string) => void
   onClose: () => void
 }
 
@@ -25,7 +29,17 @@ function clip(text: string, empty: string): string {
   return normalized.length > 140 ? `${normalized.slice(0, 140)}…` : normalized
 }
 
-export function TimelineDialog({ open, items, revertMessageId, loading, error, onClose }: TimelineDialogProps) {
+export function TimelineDialog({
+  open,
+  items,
+  revertMessageId,
+  loading,
+  error,
+  revertingMessageId,
+  disabled,
+  onRevert,
+  onClose
+}: TimelineDialogProps) {
   const { language, t } = useI18n()
   if (!open) {
     return null
@@ -47,21 +61,33 @@ export function TimelineDialog({ open, items, revertMessageId, loading, error, o
           <ul className="timeline-list">
             {items.map((item, index) => {
               const isReverted = revertMessageId === item.messageId
+              const isReverting = revertingMessageId === item.messageId
+              const itemDisabled = disabled || isReverted || revertingMessageId !== null
               return (
-                <li
-                  key={item.messageId}
-                  className={`timeline-item${isReverted ? ' is-reverted' : ''}`}
-                >
-                  <div className="timeline-item__head">
-                    <div className="timeline-item__index">#{index + 1}</div>
-                    <div className="timeline-item__time">{formatWhen(item.created, language, t('Unknown time'))}</div>
-                    {isReverted ? <div className="timeline-item__badge">{t('Undo here')}</div> : null}
-                  </div>
-                  <div className="timeline-item__user">{clip(item.text, t('Empty user turn'))}</div>
-                  <div className="timeline-item__assistant">{clip(item.assistantText, t('No assistant text'))}</div>
-                  <div className="timeline-item__meta">
-                    {t('tools')} {item.toolCount} · {t('thinking')} {item.reasoningCount} · {t('steps')} {item.stepCount}
-                  </div>
+                <li key={item.messageId} className="timeline-list__item">
+                  <button
+                    type="button"
+                    className={`timeline-item${isReverted ? ' is-reverted' : ''}${isReverting ? ' is-reverting' : ''}`}
+                    onClick={() => onRevert(item.messageId)}
+                    disabled={itemDisabled}
+                    aria-current={isReverted ? 'step' : undefined}
+                    aria-label={t('Undo to this message: {message}', { message: clip(item.text, t('Empty user turn')) })}
+                    title={isReverted ? t('Current undo point') : t('Undo to this message')}
+                  >
+                    <span className="timeline-item__head">
+                      <span className="timeline-item__index">#{index + 1}</span>
+                      <span className="timeline-item__time">{formatWhen(item.created, language, t('Unknown time'))}</span>
+                      {isReverted ? <span className="timeline-item__badge">{t('Undo here')}</span> : null}
+                      <span className="timeline-item__action" aria-hidden="true">
+                        {isReverting ? <LoaderCircle size={14} /> : <Undo2 size={14} />}
+                      </span>
+                    </span>
+                    <span className="timeline-item__user">{clip(item.text, t('Empty user turn'))}</span>
+                    <span className="timeline-item__assistant">{clip(item.assistantText, t('No assistant text'))}</span>
+                    <span className="timeline-item__meta">
+                      {t('tools')} {item.toolCount} · {t('thinking')} {item.reasoningCount} · {t('steps')} {item.stepCount}
+                    </span>
+                  </button>
                 </li>
               )
             })}

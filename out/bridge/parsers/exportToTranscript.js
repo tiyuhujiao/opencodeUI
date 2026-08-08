@@ -5,8 +5,16 @@ exports.liveMessagesToTranscript = liveMessagesToTranscript;
 const exportJson_1 = require("./exportJson");
 function exportToTranscript(payload) {
     return payload.messages.map((message) => {
+        const id = resolveMessageId(message.info);
+        const created = resolveCreated(message.info);
+        const completed = resolveCompleted(message.info);
+        const finish = resolveFinish(message.info);
         const contextUsage = resolveContextUsage(message.info);
         return {
+            ...(id ? { id } : {}),
+            ...(created !== undefined ? { created } : {}),
+            ...(completed !== undefined ? { completed } : {}),
+            ...(finish ? { finish } : {}),
             role: resolveRole(message.info),
             parts: message.parts.map(mapPart),
             ...(contextUsage ? { contextUsage } : {})
@@ -34,6 +42,35 @@ function resolveRole(info) {
         return role;
     }
     return 'unknown';
+}
+function resolveMessageId(info) {
+    const id = getStringFromRecord(info, 'id');
+    return id?.trim() ? id : undefined;
+}
+function resolveCreated(info) {
+    return resolveMessageTime(info, 'created');
+}
+function resolveCompleted(info) {
+    return resolveMessageTime(info, 'completed');
+}
+function resolveMessageTime(info, key) {
+    if (!isRecord(info)) {
+        return undefined;
+    }
+    const time = isRecord(info.time) ? info.time : undefined;
+    const candidate = time?.[key] ?? info[key];
+    if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0) {
+        return candidate;
+    }
+    if (typeof candidate === 'string') {
+        const parsed = Date.parse(candidate);
+        return Number.isFinite(parsed) ? parsed : undefined;
+    }
+    return undefined;
+}
+function resolveFinish(info) {
+    const finish = getStringFromRecord(info, 'finish')?.trim();
+    return finish || undefined;
 }
 function resolveContextUsage(info) {
     if (!isRecord(info)) {

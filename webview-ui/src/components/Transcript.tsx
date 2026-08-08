@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ChevronRight } from 'lucide-react'
+import { Check, ChevronRight, Copy, GitFork, LoaderCircle, Undo2 } from 'lucide-react'
 import { renderMarkdown } from '../markdown/renderMarkdown'
 import {
   computeAnchoredScrollTop,
@@ -8,6 +8,14 @@ import {
   TURN_ANCHOR_SCROLL_DURATION_MS
 } from '../transcriptScroll'
 import { useI18n, type TranslationValues } from '../i18n'
+import { isFinalAssistantResponse } from '../transcriptState'
+import {
+  buildTranscriptDisplayBlocks,
+  formatTurnDuration,
+  resolveAssistantTurnTiming,
+  type AssistantTurn,
+  type IndexedTranscriptMessage
+} from '../transcriptTurns'
 import type { TranscriptMessage, TranscriptPart, TranscriptPartTool } from '../../../src/shared/protocol'
 
 type Translate = (source: string, values?: TranslationValues) => string
@@ -17,9 +25,22 @@ type TranscriptProps = {
   isRunning: boolean
   onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
   onOpenFileReference?: (reference: { path: string; line?: number; column?: number }) => void
+  onRevertMessage?: (messageId: string) => void
+  onForkMessage?: (messageId: string) => void
+  revertingMessageId?: string | null
+  forkingMessageId?: string | null
 }
 
-export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileReference }: TranscriptProps) {
+export function Transcript({
+  messages,
+  isRunning,
+  onOpenSubtask,
+  onOpenFileReference,
+  onRevertMessage,
+  onForkMessage,
+  revertingMessageId = null,
+  forkingMessageId = null
+}: TranscriptProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const autoScrollPausedRef = useRef(false)
   const scrollLockRef = useRef<{ top: number; until: number } | null>(null)
@@ -27,6 +48,30 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
   const runSpacerRef = useRef<HTMLDivElement | null>(null)
   const anchorScrollFrameRef = useRef<number | null>(null)
   const anchorScrollActiveRef = useRef(false)
+  const copyResetTimerRef = useRef<number | null>(null)
+  const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null)
+
+  useEffect(() => () => {
+    if (copyResetTimerRef.current !== null) {
+      window.clearTimeout(copyResetTimerRef.current)
+    }
+  }, [])
+
+  const copyAssistantMessage = useCallback(async (messageKey: string, text: string) => {
+    try {
+      await writeClipboardText(text)
+      setCopiedMessageKey(messageKey)
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current)
+      }
+      copyResetTimerRef.current = window.setTimeout(() => {
+        setCopiedMessageKey((current) => (current === messageKey ? null : current))
+        copyResetTimerRef.current = null
+      }, 1400)
+    } catch {
+      setCopiedMessageKey(null)
+    }
+  }, [])
 
   const cancelAnchorScroll = useCallback(() => {
     if (anchorScrollFrameRef.current !== null) {
@@ -61,7 +106,7 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
     }
 
     const contentBottom = () => {
-      const rows = el.querySelectorAll<HTMLElement>(':scope > .msg-row, :scope > .tool-group')
+      const rows = el.querySelectorAll<HTMLElement>(':scope > .msg-row, :scope > .assistant-turn, :scope > .tool-group')
       const last = rows.item(rows.length - 1)
       return last ? last.offsetTop + last.offsetHeight : 0
     }
@@ -213,7 +258,17 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
     }
   }, [cancelAnchorScroll, isRunning])
 
-  const rendered = buildDisplayBlocks(messages)
+  const rendered = buildTranscriptDisplayBlocks(messages)
+  let activeTurnKey: string | null = null
+  if (isRunning) {
+    for (let index = rendered.length - 1; index >= 0; index -= 1) {
+      const entry = rendered[index]
+      if (entry.kind === 'assistant-turn') {
+        activeTurnKey = entry.turn.key
+        break
+      }
+    }
+  }
 
   return (
     <div
@@ -261,56 +316,334 @@ export function Transcript({ messages, isRunning, onOpenSubtask, onOpenFileRefer
         })
       }}
     >
-      {rendered.map((entry, messageIndex) => {
-        if (entry.kind === 'tool-group') {
+      {rendered.map((block) => {
+        if (block.kind === 'assistant-turn') {
           return (
-            <ToolGroupBlock
-              key={`tool-group-${String(messageIndex)}`}
-              items={entry.items}
+            <AssistantTurnBlock
+              key={block.turn.key}
+              turn={block.turn}
+              isActive={block.turn.key === activeTurnKey}
+              isRunning={isRunning}
               onUserToggle={pauseAutoScrollForUserAction}
               onOpenSubtask={onOpenSubtask}
+              onForkMessage={onForkMessage}
+              copyAssistantMessage={copyAssistantMessage}
+              copiedMessageKey={copiedMessageKey}
+              forkingMessageId={forkingMessageId}
             />
           )
         }
 
-        const message = entry.message
-        const visibleParts = compressVisibleParts(message.parts.filter((part) => part.type !== 'unknown'))
-        if (visibleParts.length === 0) {
-          return null
-        }
-
-        const isStreamingBubble = isRunning && message.role === 'assistant' && messageIndex === messages.length - 1
-        const renderItems = buildMessageRenderItems(visibleParts, messageIndex, !isStreamingBubble)
-        if (renderItems.length === 0) {
-          return null
-        }
-
-        const currentActivityKey = isStreamingBubble && renderItems[renderItems.length - 1]?.kind === 'activity'
-          ? renderItems[renderItems.length - 1]?.key
-          : null
-
         return (
-          <div
-            key={`${message.role}-${String(messageIndex)}`}
-            className={`msg-row msg-row--${message.role}`}
-          >
-            <article
-              className={`msg msg--${message.role}${isStreamingBubble ? ' is-streaming' : ''}`}
-            >
-              <MessageContent
-                items={renderItems}
-                isStreamingBubble={isStreamingBubble}
-                currentActivityKey={currentActivityKey}
-                onUserToggle={pauseAutoScrollForUserAction}
-                onOpenSubtask={onOpenSubtask}
-              />
-            </article>
-          </div>
+          <MessageRow
+            key={getMessageKey(block.entry)}
+            entry={block.entry}
+            isStreamingBubble={false}
+            showProcess
+            isRunning={isRunning}
+            onUserToggle={pauseAutoScrollForUserAction}
+            onOpenSubtask={onOpenSubtask}
+            onRevertMessage={onRevertMessage}
+            onForkMessage={onForkMessage}
+            revertingMessageId={revertingMessageId}
+            forkingMessageId={forkingMessageId}
+            copiedMessageKey={copiedMessageKey}
+            copyAssistantMessage={copyAssistantMessage}
+          />
         )
       })}
       {isRunning ? <div ref={runSpacerRef} className="transcript__run-spacer" aria-hidden="true" /> : null}
     </div>
   )
+}
+
+type MessageRowProps = {
+  entry: IndexedTranscriptMessage
+  isStreamingBubble: boolean
+  showProcess: boolean
+  isRunning: boolean
+  onUserToggle: () => void
+  onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
+  onRevertMessage?: (messageId: string) => void
+  onForkMessage?: (messageId: string) => void
+  revertingMessageId: string | null
+  forkingMessageId: string | null
+  copiedMessageKey: string | null
+  copyAssistantMessage: (messageKey: string, text: string) => Promise<void>
+}
+
+function AssistantTurnBlock({
+  turn,
+  isActive,
+  isRunning,
+  onUserToggle,
+  onOpenSubtask,
+  onForkMessage,
+  copyAssistantMessage,
+  copiedMessageKey,
+  forkingMessageId
+}: {
+  turn: AssistantTurn
+  isActive: boolean
+  isRunning: boolean
+  onUserToggle: () => void
+  onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
+  onForkMessage?: (messageId: string) => void
+  copyAssistantMessage: (messageKey: string, text: string) => Promise<void>
+  copiedMessageKey: string | null
+  forkingMessageId: string | null
+}) {
+  const { t } = useI18n()
+  const fallbackStartedAtRef = useRef(Date.now())
+  const [now, setNow] = useState(Date.now())
+  const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    if (!isActive) {
+      return
+    }
+    const tick = () => setNow(Date.now())
+    tick()
+    const timer = window.setInterval(tick, 1000)
+    return () => window.clearInterval(timer)
+  }, [isActive])
+
+  const timing = resolveAssistantTurnTiming(turn, {
+    isActive,
+    now,
+    fallbackStartedAt: fallbackStartedAtRef.current
+  })
+  const finalResponses = new Set(
+    turn.responses
+      .filter((entry) => !isActive && isFinalAssistantResponse(entry.message))
+      .map((entry) => entry.messageIndex)
+  )
+  const hasFinalResponse = finalResponses.size > 0
+  const hasProcessContent = turn.responses.some((entry) =>
+    messageHasProcessContent(entry, finalResponses.has(entry.messageIndex))
+  )
+  const expanded = hasProcessContent && (expandedOverride ?? (isActive || !hasFinalResponse))
+  const durationLabel = timing.elapsedMs === null ? null : formatTurnDuration(timing.elapsedMs)
+  const title = isActive
+    ? timing.elapsedMs !== null && timing.elapsedMs >= 1000
+      ? t('Working for {duration}', { duration: durationLabel ?? '<1s' })
+      : t('Working')
+    : durationLabel
+      ? t('Worked for {duration}', { duration: durationLabel })
+      : t('Worked')
+  let lastAssistantMessageIndex = -1
+  for (let index = turn.responses.length - 1; index >= 0; index -= 1) {
+    if (turn.responses[index]?.message.role === 'assistant') {
+      lastAssistantMessageIndex = turn.responses[index].messageIndex
+      break
+    }
+  }
+
+  return (
+    <section className={`assistant-turn${isActive ? ' assistant-turn--active' : ''}`} data-turn-key={turn.key}>
+      <div className="turn-work">
+        {hasProcessContent ? (
+          <button
+            type="button"
+            className="turn-work__summary"
+            onClick={() => {
+              onUserToggle()
+              setExpandedOverride((current) => !(current ?? (isActive || !hasFinalResponse)))
+            }}
+            aria-expanded={expanded}
+          >
+            <span className="turn-work__title">{title}</span>
+            <ChevronRight
+              className={`turn-work__chevron${expanded ? ' is-expanded' : ''}`}
+              size={12}
+              strokeWidth={1.8}
+              aria-hidden="true"
+            />
+          </button>
+        ) : (
+          <div className="turn-work__summary turn-work__summary--static">
+            <span className="turn-work__title">{title}</span>
+          </div>
+        )}
+        <div className="turn-work__divider" aria-hidden="true" />
+      </div>
+      {turn.responses.map((entry) => {
+        const isFinalResponse = finalResponses.has(entry.messageIndex)
+        if (!isFinalResponse && !expanded) {
+          return null
+        }
+        return (
+          <MessageRow
+            key={getMessageKey(entry)}
+            entry={entry}
+            isStreamingBubble={isActive && entry.messageIndex === lastAssistantMessageIndex}
+            showProcess={expanded}
+            isRunning={isRunning}
+            onUserToggle={onUserToggle}
+            onOpenSubtask={onOpenSubtask}
+            onForkMessage={onForkMessage}
+            revertingMessageId={null}
+            forkingMessageId={forkingMessageId}
+            copiedMessageKey={copiedMessageKey}
+            copyAssistantMessage={copyAssistantMessage}
+          />
+        )
+      })}
+    </section>
+  )
+}
+
+function MessageRow({
+  entry,
+  isStreamingBubble,
+  showProcess,
+  isRunning,
+  onUserToggle,
+  onOpenSubtask,
+  onRevertMessage,
+  onForkMessage,
+  revertingMessageId,
+  forkingMessageId,
+  copiedMessageKey,
+  copyAssistantMessage
+}: MessageRowProps) {
+  const { t } = useI18n()
+  const { message, messageIndex } = entry
+  const visibleParts = compressVisibleParts(message.parts.filter((part) => part.type !== 'unknown'))
+  if (visibleParts.length === 0) {
+    return null
+  }
+
+  const isFinalResponse = !isStreamingBubble && isFinalAssistantResponse(message)
+  const renderItems = buildMessageRenderItems(visibleParts, messageIndex, isFinalResponse)
+  if (renderItems.length === 0) {
+    return null
+  }
+
+  const currentActivityKey = isStreamingBubble && renderItems[renderItems.length - 1]?.kind === 'activity'
+    ? renderItems[renderItems.length - 1]?.key
+    : null
+  const messageId = message.id
+  const messageKey = getMessageKey(entry)
+  const assistantCopyText = isFinalResponse ? getAssistantCopyText(message.parts) : ''
+  const canRevert = message.role === 'user' && Boolean(messageId && onRevertMessage)
+  const canFork = isFinalResponse && Boolean(messageId && onForkMessage)
+  const copied = copiedMessageKey === messageKey
+
+  return (
+    <div className={`msg-row msg-row--${message.role}`}>
+      <div className={`msg-stack msg-stack--${message.role}`}>
+        <article className={`msg msg--${message.role}${isStreamingBubble ? ' is-streaming' : ''}`}>
+          <MessageContent
+            items={renderItems}
+            showProcess={showProcess}
+            currentActivityKey={currentActivityKey}
+            onUserToggle={onUserToggle}
+            onOpenSubtask={onOpenSubtask}
+          />
+        </article>
+        {canRevert || assistantCopyText || canFork ? (
+          <div className={`msg__actions msg__actions--${message.role}`}>
+            {canRevert && messageId ? (
+              <button
+                type="button"
+                className={`msg__action${revertingMessageId === messageId ? ' is-loading' : ''}`}
+                onClick={() => {
+                  onUserToggle()
+                  onRevertMessage?.(messageId)
+                }}
+                disabled={isRunning || revertingMessageId !== null}
+                aria-label={t('Undo to this message')}
+                title={t('Undo to this message')}
+                aria-busy={revertingMessageId === messageId}
+              >
+                {revertingMessageId === messageId
+                  ? <LoaderCircle size={12} aria-hidden="true" />
+                  : <Undo2 size={12} aria-hidden="true" />}
+              </button>
+            ) : null}
+            {assistantCopyText ? (
+              <button
+                type="button"
+                className={`msg__action${copied ? ' is-success' : ''}`}
+                onClick={() => {
+                  onUserToggle()
+                  void copyAssistantMessage(messageKey, assistantCopyText)
+                }}
+                aria-label={t(copied ? 'Copied' : 'Copy response')}
+                title={t(copied ? 'Copied' : 'Copy response')}
+              >
+                {copied
+                  ? <Check size={12} aria-hidden="true" />
+                  : <Copy size={12} aria-hidden="true" />}
+              </button>
+            ) : null}
+            {canFork && messageId ? (
+              <button
+                type="button"
+                className={`msg__action${forkingMessageId === messageId ? ' is-loading' : ''}`}
+                onClick={() => {
+                  onUserToggle()
+                  onForkMessage?.(messageId)
+                }}
+                disabled={isRunning || forkingMessageId !== null}
+                aria-label={t('Fork conversation')}
+                title={t('Fork conversation')}
+                aria-busy={forkingMessageId === messageId}
+              >
+                {forkingMessageId === messageId
+                  ? <LoaderCircle size={12} aria-hidden="true" />
+                  : <GitFork size={12} aria-hidden="true" />}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+function getMessageKey(entry: IndexedTranscriptMessage): string {
+  return entry.message.id ?? `${entry.message.role}-${String(entry.messageIndex)}`
+}
+
+function messageHasProcessContent(entry: IndexedTranscriptMessage, isFinalResponse: boolean): boolean {
+  const visibleParts = compressVisibleParts(entry.message.parts.filter((part) => part.type !== 'unknown'))
+  const items = buildMessageRenderItems(visibleParts, entry.messageIndex, isFinalResponse)
+  if (!isFinalResponse) {
+    return items.length > 0
+  }
+  return items.findIndex((item) => item.kind === 'part' && item.isFinalAnswer) > 0
+}
+
+export function getAssistantCopyText(parts: TranscriptPart[]): string {
+  return parts
+    .filter((part): part is Extract<TranscriptPart, { type: 'text' }> => part.type === 'text')
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+async function writeClipboardText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', '')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.append(textarea)
+  textarea.select()
+  try {
+    if (!document.execCommand('copy')) {
+      throw new Error('Clipboard copy was rejected.')
+    }
+  } finally {
+    textarea.remove()
+  }
 }
 
 function parseCssPixels(value: string): number {
@@ -349,40 +682,23 @@ type MessageRenderItem =
 
 function MessageContent({
   items,
-  isStreamingBubble,
+  showProcess,
   currentActivityKey,
   onUserToggle,
   onOpenSubtask
 }: {
   items: MessageRenderItem[]
-  isStreamingBubble: boolean
+  showProcess: boolean
   currentActivityKey: string | null
   onUserToggle: () => void
   onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
 }) {
   const finalAnswerIndex = items.findIndex((item) => item.kind === 'part' && item.isFinalAnswer)
-  const workDurationLabel = usePrefinalWorkDuration(items, isStreamingBubble)
-
-  if (finalAnswerIndex > 0) {
-    const prefinalItems = items.slice(0, finalAnswerIndex)
-    const finalItems = items.slice(finalAnswerIndex)
-    return (
-      <div className="msg__content">
-        <PrefinalWorkBlock
-          items={prefinalItems}
-          durationLabel={workDurationLabel}
-          currentActivityKey={currentActivityKey}
-          onUserToggle={onUserToggle}
-          onOpenSubtask={onOpenSubtask}
-        />
-        {finalItems.map((item) => renderMessageItem(item, { currentActivityKey, onUserToggle, onOpenSubtask }))}
-      </div>
-    )
-  }
+  const visibleItems = !showProcess && finalAnswerIndex >= 0 ? items.slice(finalAnswerIndex) : items
 
   return (
     <div className="msg__content">
-      {items.map((item) => renderMessageItem(item, { currentActivityKey, onUserToggle, onOpenSubtask }))}
+      {visibleItems.map((item) => renderMessageItem(item, { currentActivityKey, onUserToggle, onOpenSubtask }))}
     </div>
   )
 }
@@ -393,7 +709,6 @@ function renderMessageItem(
     currentActivityKey: string | null
     onUserToggle: () => void
     onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
-    insidePrefinal?: boolean
   }
 ) {
   if (item.kind === 'activity') {
@@ -413,7 +728,7 @@ function renderMessageItem(
     return (
       <div
         key={item.key}
-        className={`md-body${item.isFinalAnswer && !options.insidePrefinal ? ' md-body--final-answer' : ''}${options.insidePrefinal ? ' prefinal-work__text' : ''}`}
+        className={`md-body${item.isFinalAnswer ? ' md-body--final-answer' : ''}`}
         // biome-ignore lint/security/noDangerouslySetInnerHtml: Markdown rendering is sanitized.
         dangerouslySetInnerHTML={{ __html: renderMarkdown(part.text) }}
       />
@@ -487,9 +802,8 @@ function markFinalAnswerItem(items: MessageRenderItem[]): MessageRenderItem[] {
     return items
   }
 
-  const hasPriorActivity = items.slice(0, finalTextIndex).some((item) => item.kind === 'activity')
   const hasLaterActivity = items.slice(finalTextIndex + 1).some((item) => item.kind === 'activity')
-  if (!hasPriorActivity || hasLaterActivity) {
+  if (hasLaterActivity) {
     return items
   }
 
@@ -499,108 +813,6 @@ function markFinalAnswerItem(items: MessageRenderItem[]): MessageRenderItem[] {
     next[finalTextIndex] = { ...finalItem, isFinalAnswer: true }
   }
   return next
-}
-
-function PrefinalWorkBlock({
-  items,
-  durationLabel,
-  currentActivityKey,
-  onUserToggle,
-  onOpenSubtask
-}: {
-  items: MessageRenderItem[]
-  durationLabel: string
-  currentActivityKey: string | null
-  onUserToggle: () => void
-  onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
-}) {
-  const { t } = useI18n()
-  const [open, setOpen] = useState(false)
-  const title = durationLabel
-    ? t('Worked for {duration}', { duration: durationLabel })
-    : t('Worked before final answer')
-
-  return (
-    <section className="prefinal-work">
-      <button
-        type="button"
-        className="prefinal-work__summary"
-        onClick={() => {
-          onUserToggle()
-          setOpen((current) => !current)
-        }}
-        aria-expanded={open}
-      >
-        <span className="prefinal-work__chevron" aria-hidden="true">{open ? 'v' : '>'}</span>
-        <span className="prefinal-work__title">{title}</span>
-      </button>
-      {open ? (
-        <div className="prefinal-work__body">
-          {items.map((item) =>
-            renderMessageItem(item, { currentActivityKey, onUserToggle, onOpenSubtask, insidePrefinal: true })
-          )}
-        </div>
-      ) : null}
-    </section>
-  )
-}
-
-function usePrefinalWorkDuration(items: MessageRenderItem[], isStreamingBubble: boolean) {
-  const startedAtRef = useRef<number | null>(null)
-  const candidateFinalStartedAtRef = useRef<number | null>(null)
-  const completedMsRef = useRef<number | null>(null)
-  const [elapsedMs, setElapsedMs] = useState(0)
-
-  const hasContent = items.length > 0
-  const hasFinalAnswer = items.some((item) => item.kind === 'part' && item.isFinalAnswer)
-  const candidateFinalStarted = isStreamingBubble && isLastItemTextWithPriorWork(items)
-
-  useEffect(() => {
-    if (!hasContent) {
-      startedAtRef.current = null
-      candidateFinalStartedAtRef.current = null
-      completedMsRef.current = null
-      setElapsedMs(0)
-      return
-    }
-
-    if (startedAtRef.current === null) {
-      startedAtRef.current = Date.now()
-    }
-
-    if (hasFinalAnswer && completedMsRef.current === null) {
-      const endedAt = candidateFinalStartedAtRef.current ?? Date.now()
-      const nextElapsed = Math.max(0, endedAt - startedAtRef.current)
-      completedMsRef.current = nextElapsed
-      setElapsedMs(nextElapsed)
-      return
-    }
-
-    if (!isStreamingBubble || hasFinalAnswer) {
-      return
-    }
-
-    if (candidateFinalStarted) {
-      if (candidateFinalStartedAtRef.current === null) {
-        candidateFinalStartedAtRef.current = Date.now()
-      }
-      return
-    }
-
-    candidateFinalStartedAtRef.current = null
-  }, [candidateFinalStarted, hasContent, hasFinalAnswer, isStreamingBubble])
-
-  const value = completedMsRef.current ?? elapsedMs
-  return startedAtRef.current === null ? '' : formatDuration(value)
-}
-
-function isLastItemTextWithPriorWork(items: MessageRenderItem[]) {
-  const lastItem = items[items.length - 1]
-  if (!lastItem || lastItem.kind !== 'part' || lastItem.part.type !== 'text') {
-    return false
-  }
-
-  return items.slice(0, -1).some((item) => item.kind === 'activity' || (item.kind === 'part' && item.part.type === 'text'))
 }
 
 function ActivityBlock({
@@ -768,21 +980,6 @@ function summarizeActivityText(value: string, maxLength = 78) {
     return text
   }
   return `${text.slice(0, maxLength - 3)}...`
-}
-
-function formatDuration(ms: number) {
-  if (ms < 1000) {
-    return '<1s'
-  }
-
-  const totalSeconds = Math.max(1, Math.round(ms / 1000))
-  if (totalSeconds < 60) {
-    return `${String(totalSeconds)}s`
-  }
-
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return seconds === 0 ? `${String(minutes)}m` : `${String(minutes)}m ${String(seconds)}s`
 }
 
 function ToolGroupBlock({
@@ -1001,15 +1198,6 @@ function TaskEntry({
       ) : null}
     </div>
   )
-}
-
-function buildDisplayBlocks(messages: TranscriptMessage[]): Array<
-  | { kind: 'message'; message: TranscriptMessage }
-  | { kind: 'tool-group'; items: ToolGroupEntry[] }
-> {
-  return messages
-    .filter((message) => message.parts.some((part) => part.type !== 'unknown'))
-    .map((message) => ({ kind: 'message', message }))
 }
 
 function compressVisibleParts(parts: TranscriptPart[]): TranscriptPart[] {

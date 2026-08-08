@@ -3,6 +3,8 @@ import type { RunStreamEvent, SessionSummary, TranscriptMessage } from '../src/s
 import {
   applyRunEventToTranscript,
   clearSettledRunStatus,
+  compactTranscript,
+  isFinalAssistantResponse,
   mergeLocalImageParts,
   mergeLocalRunErrors,
   preserveContextUsage,
@@ -10,6 +12,65 @@ import {
 } from '../webview-ui/src/transcriptState';
 
 describe('webview transcript state helpers', () => {
+  it('不会合并拥有不同 OpenCode ID 的连续同角色消息', () => {
+    const compacted = compactTranscript([
+      { id: 'msg_user_1', created: 100, role: 'user', parts: [{ type: 'text', text: 'first' }] },
+      { id: 'msg_user_2', created: 200, role: 'user', parts: [{ type: 'text', text: 'second' }] }
+    ]);
+
+    expect(compacted).toHaveLength(2);
+    expect(compacted.map((message) => message.id)).toEqual(['msg_user_1', 'msg_user_2']);
+    expect(compacted.map((message) => message.created)).toEqual([100, 200]);
+  });
+
+  it('仍会合并同一消息 ID 的分片并保留历史锚点', () => {
+    expect(compactTranscript([
+      { id: 'msg_assistant_1', created: 100, role: 'assistant', parts: [{ type: 'text', text: 'hello' }] },
+      {
+        id: 'msg_assistant_1',
+        completed: 4200,
+        finish: 'stop',
+        role: 'assistant',
+        parts: [{ type: 'text', text: ' world' }]
+      }
+    ])).toEqual([
+      {
+        id: 'msg_assistant_1',
+        created: 100,
+        completed: 4200,
+        finish: 'stop',
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'hello' }, { type: 'text', text: ' world' }]
+      }
+    ]);
+  });
+
+  it('只把带正文的已完成 assistant 消息识别为最终回复', () => {
+    expect(isFinalAssistantResponse({
+      id: 'msg_without_finish',
+      role: 'assistant',
+      parts: [{ type: 'text', text: 'Unclassified intermediate text.' }]
+    })).toBe(false);
+    expect(isFinalAssistantResponse({
+      id: 'msg_tool_step',
+      finish: 'tool-calls',
+      role: 'assistant',
+      parts: [{ type: 'text', text: 'I will inspect this first.' }]
+    })).toBe(false);
+    expect(isFinalAssistantResponse({
+      id: 'msg_reasoning',
+      finish: 'stop',
+      role: 'assistant',
+      parts: [{ type: 'reasoning', text: 'internal reasoning' }]
+    })).toBe(false);
+    expect(isFinalAssistantResponse({
+      id: 'msg_final',
+      finish: 'stop',
+      role: 'assistant',
+      parts: [{ type: 'reasoning', text: 'done thinking' }, { type: 'text', text: 'final response' }]
+    })).toBe(true);
+  });
+
   it('keeps an existing session title when a new prompt starts inside that session', () => {
     const current: SessionSummary[] = [
       { id: 'session-1', title: 'Stable project summary', updated: '2026-06-08T10:00:00.000Z' }
