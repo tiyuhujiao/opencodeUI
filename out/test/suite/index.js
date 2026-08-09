@@ -36,6 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.run = run;
 const assert = __importStar(require("node:assert"));
 const vscode = __importStar(require("vscode"));
+const node_fs_1 = require("node:fs");
 const path = __importStar(require("node:path"));
 const opencodeDirectory_1 = require("../../bridge/opencodeDirectory");
 const serveManager_1 = require("../../bridge/serveManager");
@@ -112,7 +113,14 @@ function normalizeDirectory(directory) {
     if (!directory) {
         return undefined;
     }
-    const normalized = path.normalize(directory);
+    let canonical = directory;
+    try {
+        canonical = node_fs_1.realpathSync.native(directory);
+    }
+    catch {
+        // Keep the reported path when the directory is no longer available.
+    }
+    const normalized = path.normalize(canonical);
     return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 async function verifyNativeInlineDiff() {

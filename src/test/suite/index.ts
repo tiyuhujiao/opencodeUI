@@ -1,5 +1,6 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
+import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { encodeOpencodeDirectory } from '../../bridge/opencodeDirectory';
 import { ensureServeRunning, requestServeJson } from '../../bridge/serveManager';
@@ -87,7 +88,13 @@ function normalizeDirectory(directory: string | undefined): string | undefined {
   if (!directory) {
     return undefined;
   }
-  const normalized = path.normalize(directory);
+  let canonical = directory;
+  try {
+    canonical = realpathSync.native(directory);
+  } catch {
+    // Keep the reported path when the directory is no longer available.
+  }
+  const normalized = path.normalize(canonical);
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
