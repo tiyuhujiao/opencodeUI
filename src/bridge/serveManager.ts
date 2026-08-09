@@ -1,6 +1,7 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import * as http from 'node:http';
 import * as net from 'node:net';
+import { homedir } from 'node:os';
 import { encodeOpencodeDirectory } from './opencodeDirectory';
 import { resolveOpencodeBinary, shouldHideOpencodeWindow, shouldUseShellForOpencode, withOpencodeBinInPath } from './opencodeEnv';
 
@@ -27,13 +28,38 @@ let restartPromise: Promise<ServeRuntime> | undefined;
 let currentPort: number | undefined;
 let managedPort: number | undefined;
 let managedChild: ChildProcess | undefined;
+let disposePromise: Promise<void> | undefined;
 let portStorage: ServePortStorage | undefined;
 
 export function configureServePortStorage(storage: ServePortStorage): void {
   portStorage = storage;
 }
 
+export function disposeServeManager(): Promise<void> {
+	if (disposePromise) {
+		return disposePromise;
+	}
+	const child = managedChild;
+	const port = managedPort;
+	managedChild = undefined;
+	managedPort = undefined;
+	if (currentPort === port) {
+		currentPort = undefined;
+	}
+	const pending = child ? stopManagedChild(child) : Promise.resolve();
+	const promise = pending.finally(() => {
+		if (disposePromise === promise) {
+			disposePromise = undefined;
+		}
+	});
+	disposePromise = promise;
+	return promise;
+}
+
 export async function ensureServeRunning(): Promise<ServeRuntime> {
+	if (disposePromise) {
+		await disposePromise;
+	}
 	if (restartPromise) {
 		return restartPromise;
 	}
@@ -49,6 +75,9 @@ export async function ensureServeRunning(): Promise<ServeRuntime> {
 }
 
 export async function restartServeForConfigChange(): Promise<ServeRuntime> {
+	if (disposePromise) {
+		await disposePromise;
+	}
 	if (restartPromise) {
 		return restartPromise;
 	}
@@ -136,7 +165,7 @@ async function restartServeForConfigChangeInternal(): Promise<ServeRuntime> {
 	await persistLastPort(targetPort);
 
 	if (previousChild && previousChild !== child) {
-		stopManagedChild(previousChild);
+		await stopManagedChild(previousChild);
 	}
 
 	return buildRuntime(targetPort, true);
@@ -186,6 +215,7 @@ async function startServe(port: number): Promise<ChildProcess> {
       shell: shouldUseShellForOpencode(command),
       stdio: ['ignore', 'pipe', 'pipe'],
       env,
+      cwd: homedir(),
       windowsHide: shouldHideOpencodeWindow()
     }
   );
@@ -206,7 +236,7 @@ async function startServe(port: number): Promise<ChildProcess> {
 		await waitForHealthAfterSpawn(child, port, stderrBuffer);
 		return child;
 	} catch (error) {
-		stopManagedChild(child);
+		await stopManagedChild(child);
 		throw error;
 	}
 }
@@ -230,15 +260,26 @@ function isManagedPort(port: number): boolean {
 	return managedPort === port && managedChild?.exitCode === null;
 }
 
-function stopManagedChild(child: ChildProcess): void {
+function stopManagedChild(child: ChildProcess): Promise<void> {
 	if (child.exitCode !== null) {
-		return;
+		return Promise.resolve();
+	}
+	if (process.platform === 'win32' && child.pid) {
+		return new Promise((resolve) => {
+			execFile(
+				'taskkill.exe',
+				['/pid', String(child.pid), '/T', '/F'],
+				{ windowsHide: true, timeout: 5_000 },
+				() => resolve(),
+			);
+		});
 	}
 	try {
 		child.kill();
 	} catch {
 		// The process may already be exiting between the exitCode check and kill().
 	}
+	return Promise.resolve();
 }
 
 function waitForSpawnReady(child: ChildProcess): Promise<void> {

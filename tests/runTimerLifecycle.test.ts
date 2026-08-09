@@ -11,7 +11,7 @@ describe('live run timer lifecycle', () => {
     expect(source).toContain('const created = Date.now()');
     expect(source).toMatch(/created,\s+role: 'user'/s);
     expect(source).toMatch(/created,\s+role: 'assistant'/s);
-    expect(source).toContain('const completedAt = Date.now()');
+    expect(source).toContain('const completedAt = completion.completedAt ?? Date.now()');
     expect(source).toContain('completed: completedAt');
     expect(source).toContain("completion.type === 'done' && !assistantMessage.finish ? { finish: 'stop' } : {}");
     expect(source).toContain('localTranscript: completedTranscript');

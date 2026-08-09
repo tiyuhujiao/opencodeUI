@@ -43,6 +43,7 @@ const unifiedPatch_1 = require("./unifiedPatch");
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_RUN_BYTES = 20 * 1024 * 1024;
 const SESSION_DIFF_DELAYS_MS = [0, 100, 300, 700];
+const FILE_RECONCILE_DELAYS_MS = [0, 40, 120];
 class InlineDiffControllerImpl {
     constructor(options) {
         this.options = options;
@@ -68,7 +69,15 @@ class InlineDiffControllerImpl {
         });
     }
     beginRun(input) {
-        const state = { input, evidence: new Map(), finished: false };
+        const state = {
+            input,
+            evidence: new Map(),
+            reconcileQueue: Promise.resolve(),
+            reviewBytes: new Map(),
+            openedFirstReview: false,
+            finished: false,
+            closed: false
+        };
         this.activeRuns.add(input.runId);
         this.publish();
         return {
@@ -86,12 +95,14 @@ class InlineDiffControllerImpl {
                 }
                 state.finished = true;
                 try {
+                    await state.reconcileQueue;
                     await this.finishRun(state, outcome);
                 }
                 catch (error) {
                     this.log('error', `inline diff finish failed: ${errorMessage(error)}`);
                 }
                 finally {
+                    state.closed = true;
                     this.activeRuns.delete(input.runId);
                     this.publish();
                 }
@@ -196,38 +207,105 @@ class InlineDiffControllerImpl {
             if (existing) {
                 existing.oldText ?? (existing.oldText = evidence.oldText);
                 existing.newText ?? (existing.newText = evidence.newText);
+                existing.unifiedDiff ?? (existing.unifiedDiff = evidence.unifiedDiff);
+                for (const replacement of evidence.replacements) {
+                    if (!existing.replacements.some((item) => item.oldText === replacement.oldText && item.newText === replacement.newText)) {
+                        existing.replacements.push(replacement);
+                    }
+                }
                 if (existing.operation === 'unknown') {
                     existing.operation = evidence.operation;
                 }
+                existing.status = evidence.status;
+                existing.version += 1;
+                if (evidence.status === 'completed') {
+                    this.queueEvidenceReconcile(state, key, existing);
+                }
                 continue;
             }
-            state.evidence.set(key, {
+            const next = {
                 ...evidence,
-                before: this.readSnapshot(evidence.uri)
-            });
+                before: this.readSnapshot(evidence.uri),
+                version: 1,
+                publishedVersion: 0
+            };
+            state.evidence.set(key, next);
+            if (evidence.status === 'completed') {
+                this.queueEvidenceReconcile(state, key, next);
+            }
         }
+    }
+    queueEvidenceReconcile(state, key, evidence) {
+        const version = evidence.version;
+        state.reconcileQueue = state.reconcileQueue
+            .then(async () => {
+            if (this.disposed || state.closed || evidence.publishedVersion >= version) {
+                return;
+            }
+            await this.reconcileCompletedEvidence(state, key, evidence);
+            evidence.publishedVersion = Math.max(evidence.publishedVersion, version);
+        })
+            .catch((error) => {
+            this.log('warn', `inline diff file reconcile failed: ${errorMessage(error)}`);
+        });
+    }
+    async reconcileCompletedEvidence(state, key, evidence) {
+        let candidates = [];
+        for (const delayMs of FILE_RECONCILE_DELAYS_MS) {
+            if (delayMs > 0) {
+                await delay(delayMs);
+            }
+            if (this.disposed || state.closed) {
+                return;
+            }
+            candidates = await this.candidatesFromEvidence(new Map([[key, evidence]]));
+            if (candidates.length > 0) {
+                break;
+            }
+        }
+        if (candidates.length === 0 || this.disposed || state.closed) {
+            return;
+        }
+        for (const candidate of candidates) {
+            this.upsertRunCandidate(state, candidate);
+        }
+        this.publish();
+        await this.openFirstPendingReview(state, candidates);
     }
     async finishRun(state, outcome) {
         const canonical = await this.loadCanonicalDiff(state.input);
         const candidates = canonical.length > 0
             ? await this.candidatesFromCanonical(canonical, state.input.cwd)
             : await this.candidatesFromEvidence(state.evidence);
-        let totalBytes = 0;
+        state.reviewBytes.clear();
         for (const candidate of candidates) {
-            totalBytes += Buffer.byteLength(candidate.baseline.text, 'utf8') + Buffer.byteLength(candidate.current.text, 'utf8');
-            if (totalBytes > MAX_RUN_BYTES) {
-                this.upsertUnavailable(candidate, 'The inline diff snapshot budget for this run exceeded 20 MiB.');
-                continue;
-            }
-            this.upsertCandidate(candidate);
+            this.upsertRunCandidate(state, candidate);
+        }
+        await this.openFirstPendingReview(state, candidates);
+        this.log('info', `inline diff run ${state.input.runId} (${outcome}) produced ${candidates.length} review candidate(s)`);
+    }
+    upsertRunCandidate(state, candidate) {
+        const key = uriKey(candidate.uri);
+        const bytes = Buffer.byteLength(candidate.baseline.text, 'utf8') + Buffer.byteLength(candidate.current.text, 'utf8');
+        const previousBytes = state.reviewBytes.get(key) ?? 0;
+        const nextTotal = [...state.reviewBytes.values()].reduce((sum, value) => sum + value, 0) - previousBytes + bytes;
+        state.reviewBytes.set(key, bytes);
+        if (nextTotal > MAX_RUN_BYTES) {
+            this.upsertUnavailable(candidate, 'The inline diff snapshot budget for this run exceeded 20 MiB.', state.input.runId);
+            return;
+        }
+        this.upsertCandidate(candidate, state.input.runId);
+    }
+    async openFirstPendingReview(state, candidates) {
+        if (state.openedFirstReview || this.disposed || state.closed) {
+            return;
         }
         const firstPending = candidates
             .map((candidate) => this.getFileForUri(candidate.uri))
             .find((file) => file?.status === 'pending');
-        if (firstPending) {
-            await this.editor.openNativeDiff(firstPending.fileId);
+        if (firstPending && await this.editor.openNativeDiff(firstPending.fileId)) {
+            state.openedFirstReview = true;
         }
-        this.log('info', `inline diff run ${state.input.runId} (${outcome}) produced ${candidates.length} review candidate(s)`);
     }
     async loadCanonicalDiff(input) {
         let messageId;
@@ -342,13 +420,33 @@ class InlineDiffControllerImpl {
                 continue;
             }
             if (baseline.hash === current.snapshot.hash && baselineExists === current.exists) {
-                if (evidence.operation === 'create' && evidence.newText === current.snapshot.text) {
+                if (evidence.unifiedDiff) {
+                    try {
+                        const reversed = (0, unifiedPatch_1.reverseUnifiedPatch)(current.snapshot.text, evidence.unifiedDiff, { currentExists: current.exists });
+                        baseline = (0, core_1.createTextSnapshot)(reversed.beforeText);
+                        baselineExists = reversed.beforeExists;
+                    }
+                    catch {
+                        // Fall through to the more conservative tool-input reconstruction below.
+                    }
+                }
+                if (baseline.hash !== current.snapshot.hash || baselineExists !== current.exists) {
+                    // The unified diff reconstructed a usable baseline.
+                }
+                else if (evidence.operation === 'create' && evidence.newText === current.snapshot.text) {
                     baseline = (0, core_1.createTextSnapshot)('');
                     baselineExists = false;
                 }
                 else if (evidence.operation === 'delete' && !current.exists && evidence.oldText !== undefined) {
                     baseline = (0, core_1.createTextSnapshot)(evidence.oldText);
                     baselineExists = true;
+                }
+                else if (evidence.replacements.length > 0) {
+                    const reconstructed = reverseReplacements(current.snapshot.text, evidence.replacements);
+                    if (reconstructed !== undefined) {
+                        baseline = (0, core_1.createTextSnapshot)(reconstructed);
+                        baselineExists = true;
+                    }
                 }
                 else if (evidence.oldText !== undefined && evidence.newText !== undefined) {
                     const reconstructed = reverseSingleReplacement(current.snapshot.text, evidence.oldText, evidence.newText);
@@ -375,7 +473,7 @@ class InlineDiffControllerImpl {
         }
         return candidates;
     }
-    upsertCandidate(candidate) {
+    upsertCandidate(candidate, runId) {
         const key = uriKey(candidate.uri);
         const existingId = this.fileIdByUri.get(key);
         const existing = existingId ? this.files.get(existingId) : undefined;
@@ -384,7 +482,13 @@ class InlineDiffControllerImpl {
         let status = candidate.status;
         let reason = candidate.reason;
         if (existing?.status === 'pending') {
-            if (existing.current.hash === candidate.baseline.hash && existing.currentExists === candidate.baselineExists) {
+            if (runId && existing.runId === runId) {
+                if (!candidate.canonical) {
+                    baseline = existing.baseline;
+                    baselineExists = existing.baselineExists;
+                }
+            }
+            else if (existing.current.hash === candidate.baseline.hash && existing.currentExists === candidate.baselineExists) {
                 baseline = existing.baseline;
                 baselineExists = existing.baselineExists;
             }
@@ -415,14 +519,15 @@ class InlineDiffControllerImpl {
             currentExists: candidate.currentExists,
             baseline,
             current: candidate.current,
+            runId: runId ?? existing?.runId,
             hunks
         };
         this.files.set(fileId, review);
         this.fileIdByUri.set(key, fileId);
     }
-    upsertUnavailable(candidate, reason) {
+    upsertUnavailable(candidate, reason, runId) {
         const unavailable = { ...candidate, status: 'unavailable', reason };
-        this.upsertCandidate(unavailable);
+        this.upsertCandidate(unavailable, runId);
     }
     accept(file, hunkId) {
         if (!hunkId) {
@@ -620,8 +725,11 @@ function extractEvidence(part, cwd) {
             uri,
             displayPath: displayPathForUri(uri),
             operation: evidence.operation,
+            status: evidence.status,
             oldText: evidence.oldText,
-            newText: evidence.newText
+            newText: evidence.newText,
+            replacements: evidence.replacements,
+            unifiedDiff: evidence.unifiedDiff
         };
     });
 }
@@ -656,6 +764,17 @@ function reverseSingleReplacement(current, oldText, newText) {
         return undefined;
     }
     return current.slice(0, first) + oldText + current.slice(first + newText.length);
+}
+function reverseReplacements(current, replacements) {
+    let reconstructed = current;
+    for (const replacement of [...replacements].reverse()) {
+        const next = reverseSingleReplacement(reconstructed, replacement.oldText, replacement.newText);
+        if (next === undefined) {
+            return undefined;
+        }
+        reconstructed = next;
+    }
+    return reconstructed;
 }
 function findRunUserMessageId(value, startedAt, promptText) {
     const entries = Array.isArray(value) ? value : isRecord(value) && Array.isArray(value.messages) ? value.messages : [];

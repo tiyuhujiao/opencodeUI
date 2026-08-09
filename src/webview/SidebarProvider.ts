@@ -15,6 +15,7 @@ import {
 	sessionListJson,
 } from "../bridge/opencodeCli";
 import {
+	disposeServeManager,
 	ensureServeRunning,
 	restartServeForConfigChange,
 } from "../bridge/serveManager";
@@ -63,7 +64,11 @@ import {
 	type ProviderSettingsScope,
 	type ProviderSettingsSnapshot,
 	type RunStreamEvent,
+	type TranscriptMessage,
+	type ActiveRunSnapshot,
+	type TerminalRunSnapshot,
 } from "../shared/protocol";
+import { applyRunEventToTranscript } from "../shared/runTranscript";
 import {
 	BLOCKER_POLL_INTERVAL_MS,
 	createServeStreamState,
@@ -107,6 +112,9 @@ const SESSION_EXPORT_CACHE_TTL_MS = 8_000;
 const EMPTY_SESSION_EXPORT_CACHE_TTL_MS = 750;
 const MODELS_CACHE_TTL_MS = 15 * 60_000;
 const PROVIDER_SETTINGS_CATALOG_TTL_MS = 5 * 60_000;
+const OPENCODE_COMPATIBILITY_CACHE_TTL_MS = 15 * 60_000;
+const OPENCODE_COMPATIBILITY_FAILURE_TTL_MS = 2 * 60_000;
+const HIDDEN_WEBVIEW_RETENTION_MS = 2 * 60_000;
 const TEMPFILE_MAX_BYTES = 10 * 1024 * 1024;
 const TEMPFILE_MAX_BASE64_CHARS = Math.ceil(TEMPFILE_MAX_BYTES / 3) * 4 + 4;
 const TEMPFILE_TTL_MS = 30 * 60_000;
@@ -121,9 +129,20 @@ export class SidebarProvider
 		"opencodeUI.lastSelectedAgent";
 
 	private view?: vscode.WebviewView;
+	private runEventWebview?: vscode.Webview;
+	private hiddenViewExpiryTimer?: NodeJS.Timeout;
+	private expiredHiddenView?: vscode.WebviewView;
+	private lastTerminalRun?: TerminalRunSnapshot;
 	private currentRun?: {
 		requestId: string;
+		revision: number;
 		controller: AbortController;
+		startedAt: number;
+		promptText: string;
+		placeholderTitle: string;
+		startedNewSession: boolean;
+		recoveryTranscript: TranscriptMessage[];
+		recoveryAssistantIndex: number;
 		sessionId?: string;
 		eventAbort?: AbortController;
 		blockerPoll?: NodeJS.Timeout;
@@ -146,6 +165,15 @@ export class SidebarProvider
 		catalog: NormalizedProviderCatalog;
 	};
 	private providerSettingsCatalogInFlight?: Promise<NormalizedProviderCatalog>;
+	private opencodeCompatibilityCache?: {
+		binary: string;
+		value: OpencodeCompatibility;
+		expiresAt: number;
+	};
+	private opencodeCompatibilityInFlight?: {
+		binary: string;
+		promise: Promise<OpencodeCompatibility>;
+	};
 	private readonly tempFiles = new Map<string, NodeJS.Timeout>();
 	private readonly inlineDiff: InlineDiffController;
 	private readonly inlineDiffStateSubscription: vscode.Disposable;
@@ -164,6 +192,8 @@ export class SidebarProvider
 	}
 
 	public dispose(): void {
+		this.cancelHiddenViewExpiry();
+		this.expiredHiddenView = undefined;
 		this.inlineDiffStateSubscription.dispose();
 		this.inlineDiff.dispose();
 		this.cleanupAllTempFiles();
@@ -266,7 +296,10 @@ export class SidebarProvider
 	}
 
 	public resolveWebviewView(webviewView: vscode.WebviewView): void {
+		this.cancelHiddenViewExpiry();
 		this.view = webviewView;
+		this.runEventWebview = undefined;
+		this.expiredHiddenView = undefined;
 		webviewView.webview.options = {
 			enableScripts: true,
 			localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "media")],
@@ -278,22 +311,41 @@ export class SidebarProvider
 		webviewView.webview.onDidReceiveMessage((message: unknown) => {
 			this.handleWebviewMessage(webviewView.webview, message);
 		});
-
 		const visibilityDisposable = (
 			webviewView as vscode.WebviewView & {
 				onDidChangeVisibility?: (listener: () => void) => vscode.Disposable;
 			}
 		).onDidChangeVisibility?.(() => {
-			if (!webviewView.visible) {
-				this.stopCurrentRunForHiddenPermission(webviewView.webview);
+			if (this.view !== webviewView) {
+				return;
 			}
+			if (!webviewView.visible) {
+				this.scheduleHiddenViewExpiry(webviewView);
+				return;
+			}
+
+			this.cancelHiddenViewExpiry();
+			if (this.expiredHiddenView === webviewView) {
+				this.expiredHiddenView = undefined;
+				this.runEventWebview = undefined;
+				webviewView.webview.html = this.getHtml(webviewView.webview);
+				return;
+			}
+
+			this.runEventWebview = webviewView.webview;
+			this.postRunSnapshot(webviewView.webview);
 		});
 
 		webviewView.onDidDispose(() => {
 			visibilityDisposable?.dispose();
-			this.stopCurrentRunForHiddenPermission(webviewView.webview);
-			this.stopCurrentRun();
-			this.cleanupAllTempFiles();
+			if (this.view === webviewView) {
+				this.cancelHiddenViewExpiry();
+				this.expiredHiddenView = undefined;
+				this.view = undefined;
+			}
+			if (this.runEventWebview === webviewView.webview) {
+				this.runEventWebview = undefined;
+			}
 		});
 
 		webviewView.webview.html = this.getHtml(webviewView.webview);
@@ -301,8 +353,49 @@ export class SidebarProvider
 
 	public refresh(): void {
 		if (this.view) {
+			this.cancelHiddenViewExpiry();
+			this.expiredHiddenView = undefined;
+			this.runEventWebview = undefined;
 			this.view.webview.html = this.getHtml(this.view.webview);
+			if (!this.view.visible) {
+				this.scheduleHiddenViewExpiry(this.view);
+			}
 		}
+	}
+
+	private scheduleHiddenViewExpiry(webviewView: vscode.WebviewView): void {
+		this.cancelHiddenViewExpiry();
+		this.hiddenViewExpiryTimer = setTimeout(() => {
+			this.hiddenViewExpiryTimer = undefined;
+			if (this.view !== webviewView || webviewView.visible) {
+				return;
+			}
+
+			this.expiredHiddenView = webviewView;
+			if (this.runEventWebview === webviewView.webview) {
+				this.runEventWebview = undefined;
+			}
+			this.clearHiddenViewCaches();
+			webviewView.webview.html = "";
+			if (!this.currentRun) {
+				disposeServeManager();
+			}
+		}, HIDDEN_WEBVIEW_RETENTION_MS);
+	}
+
+	private cancelHiddenViewExpiry(): void {
+		if (!this.hiddenViewExpiryTimer) {
+			return;
+		}
+		clearTimeout(this.hiddenViewExpiryTimer);
+		this.hiddenViewExpiryTimer = undefined;
+	}
+
+	private clearHiddenViewCaches(): void {
+		this.sessionExportCache.clear();
+		this.modelsCache.clear();
+		this.providerSettingsCatalogCache = undefined;
+		this.opencodeCompatibilityCache = undefined;
 	}
 
 	private getNonce(): string {
@@ -360,7 +453,11 @@ export class SidebarProvider
 
 			switch (message.type) {
 				case "webview.ready": {
-					void this.handleWebviewReadyRequest(webview, message.requestId);
+					void this.handleWebviewReadyRequest(
+						webview,
+						message.requestId,
+						message.payload?.selectedSessionId,
+					);
 					return;
 				}
 				case "sessions.list":
@@ -469,6 +566,13 @@ export class SidebarProvider
 						webview,
 						message.requestId,
 						message.payload.fileId,
+					);
+					return;
+				case "inlineDiff.resolve":
+					void this.handleInlineDiffResolveRequest(
+						webview,
+						message.requestId,
+						message.payload,
 					);
 					return;
 				case "inlineDiff.dismiss":
@@ -657,6 +761,7 @@ export class SidebarProvider
 	private async handleWebviewReadyRequest(
 		webview: vscode.Webview,
 		requestId: string,
+		selectedSessionId?: string,
 	): Promise<void> {
 		const lastSelectedModel = this.workspaceState.get<string>(
 			SidebarProvider.WORKSPACE_KEY_LAST_SELECTED_MODEL,
@@ -664,15 +769,28 @@ export class SidebarProvider
 		const lastSelectedAgent = this.workspaceState.get<string>(
 			SidebarProvider.WORKSPACE_KEY_LAST_SELECTED_AGENT,
 		);
-		const opencode = this.isSupportedHost()
-			? await this.getOpencodeCompatibility()
-			: undefined;
+		let opencode: OpencodeCompatibility | undefined;
+		if (this.isSupportedHost()) {
+			const env = withOpencodeBinInPath();
+			const binary = resolveOpencodeBinary(env);
+			const health = await this.checkServeHealth();
+			opencode = health.ok && health.version
+				? await this.getOpencodeCompatibility(env, this.getDefaultCwd(), health.version)
+				: this.getCachedOpencodeCompatibility(binary);
+		}
 		if (opencode?.warning) {
 			logWarn(opencode.warning);
 		} else if (opencode?.version) {
 			logInfo(`opencode ${opencode.version} detected at ${opencode.binary}`);
 		}
 
+		const activeRun = this.getActiveRunSnapshot();
+		const terminalRun =
+			!activeRun &&
+			this.lastTerminalRun &&
+			(!selectedSessionId || this.lastTerminalRun.sessionId === selectedSessionId)
+				? this.cloneTerminalRunSnapshot(this.lastTerminalRun)
+				: undefined;
 		this.respond(webview, {
 			type: "webview.ready.ack",
 			requestId,
@@ -685,9 +803,89 @@ export class SidebarProvider
 				lastSelectedModel,
 				lastSelectedAgent,
 				opencode,
+				...(activeRun ? { activeRun } : {}),
+				...(terminalRun ? { terminalRun } : {}),
 			},
 		});
+		if (this.view?.webview === webview) {
+			this.runEventWebview = webview;
+		}
 		this.postInlineDiffState(this.inlineDiff.getSnapshot(), webview);
+	}
+
+	private postRunSnapshot(webview: vscode.Webview): void {
+		const activeRun = this.getActiveRunSnapshot();
+		const terminalRun = !activeRun && this.lastTerminalRun
+			? this.cloneTerminalRunSnapshot(this.lastTerminalRun)
+			: undefined;
+		this.respond(webview, {
+			type: "run.snapshot",
+			requestId: `run-snapshot-${Date.now().toString(36)}`,
+			ok: true,
+			payload: {
+				...(activeRun ? { activeRun } : {}),
+				...(terminalRun ? { terminalRun } : {}),
+			},
+		});
+	}
+
+	private getActiveRunSnapshot(): ActiveRunSnapshot | undefined {
+		const run = this.currentRun;
+		if (!run) {
+			return undefined;
+		}
+
+		return {
+			requestId: run.requestId,
+			revision: run.revision,
+			...(run.sessionId ? { sessionId: run.sessionId } : {}),
+			startedAt: run.startedAt,
+			promptText: run.promptText,
+			placeholderTitle: run.placeholderTitle,
+			startedNewSession: run.startedNewSession,
+			transcript: run.recoveryTranscript.map((message) => ({
+				...message,
+				parts: message.parts.map((part) => ({ ...part })),
+				...(message.contextUsage
+					? { contextUsage: { ...message.contextUsage } }
+					: {}),
+			})),
+			assistantIndex: run.recoveryAssistantIndex,
+			...(run.pendingPermission
+				? {
+						pendingPermission: {
+							...run.pendingPermission,
+							patterns: [...run.pendingPermission.patterns],
+						},
+					}
+				: {}),
+			...(run.pendingQuestion
+				? {
+						pendingQuestion: {
+							...run.pendingQuestion,
+							questions: run.pendingQuestion.questions.map((question) => ({
+								...question,
+								options: question.options.map((option) => ({ ...option })),
+							})),
+						},
+					}
+				: {}),
+		};
+	}
+
+	private cloneTerminalRunSnapshot(
+		snapshot: TerminalRunSnapshot,
+	): TerminalRunSnapshot {
+		return {
+			...snapshot,
+			transcript: snapshot.transcript.map((message) => ({
+				...message,
+				parts: message.parts.map((part) => ({ ...part })),
+				...(message.contextUsage
+					? { contextUsage: { ...message.contextUsage } }
+					: {}),
+			})),
+		};
 	}
 
 	private async handleSessionsListRequest(
@@ -1237,6 +1435,27 @@ export class SidebarProvider
 		}
 	}
 
+	private async handleInlineDiffResolveRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		input: { fileId: string; revision: number; decision: "accept" | "reject" },
+	): Promise<void> {
+		try {
+			const result = await this.inlineDiff.resolve(input);
+			if (!result.ok) {
+				throw new Error(result.message);
+			}
+			this.respond(webview, {
+				type: "inlineDiff.resolve.response",
+				requestId,
+				ok: true,
+				payload: { fileId: input.fileId, decision: input.decision },
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "处理 Inline Diff 审阅失败。");
+		}
+	}
+
 	private handleInlineDiffDismissRequest(
 		webview: vscode.Webview,
 		requestId: string,
@@ -1264,8 +1483,10 @@ export class SidebarProvider
 			ok: true,
 			payload: {
 				revision: snapshot.revision,
+				activeRun: snapshot.activeRun,
 				files: snapshot.files.map((file) => ({
 					fileId: file.fileId,
+					revision: file.revision,
 					path: file.path,
 					displayPath: file.displayPath,
 					additions: file.additions,
@@ -1295,6 +1516,7 @@ export class SidebarProvider
 			);
 			if (this.currentRun?.pendingPermission?.permissionId === permissionId) {
 				this.currentRun.pendingPermission = undefined;
+				this.currentRun.revision += 1;
 			}
 			this.respond(webview, {
 				type: "permission.reply.response",
@@ -1326,6 +1548,7 @@ export class SidebarProvider
 			);
 			if (this.currentRun?.pendingQuestion?.questionId === questionId) {
 				this.currentRun.pendingQuestion = undefined;
+				this.currentRun.revision += 1;
 			}
 			this.respond(webview, {
 				type: "question.reply.response",
@@ -1352,6 +1575,7 @@ export class SidebarProvider
 			);
 			if (this.currentRun?.pendingQuestion?.questionId === questionId) {
 				this.currentRun.pendingQuestion = undefined;
+				this.currentRun.revision += 1;
 			}
 			this.respond(webview, {
 				type: "question.reject.response",
@@ -2221,25 +2445,29 @@ export class SidebarProvider
 	): Promise<void> {
 		const env = withOpencodeBinInPath();
 		const cwd = this.getDefaultCwd();
-		const [opencode, health, sessions, models, agents] = await Promise.all([
-			this.getOpencodeCompatibility(env, cwd),
+		const [health, sessions, models, agents] = await Promise.all([
 			this.checkServeHealth(),
 			this.safeCount(async () => {
-			const result = await sessionListJson({ env, cwd });
-			const parsed = parseSessionListJson(result.stdout);
-			return parsed.length;
+				const result = await sessionListJson({ env, cwd });
+				const parsed = parseSessionListJson(result.stdout);
+				return parsed.length;
 			}),
 			this.safeCount(async () => {
-			const result = await modelsList({ env, cwd });
-			const parsed = parseModelsList(result.stdout);
-			return parsed.length;
+				const result = await modelsList({ env, cwd });
+				const parsed = parseModelsList(result.stdout);
+				return parsed.length;
 			}),
 			this.safeCount(async () => {
-			const result = await agentList({ env, cwd });
-			const parsed = parseAgentList(result.stdout);
-			return parsed.length;
+				const result = await agentList({ env, cwd });
+				const parsed = parseAgentList(result.stdout);
+				return parsed.length;
 			}),
 		]);
+		const opencode = await this.getOpencodeCompatibility(
+			env,
+			cwd,
+			health.ok ? health.version : undefined,
+		);
 		const opencodeBinary = opencode.binary;
 
 		this.respond(webview, {
@@ -2287,21 +2515,70 @@ export class SidebarProvider
 	private async getOpencodeCompatibility(
 		env = withOpencodeBinInPath(),
 		cwd = this.getDefaultCwd(),
+		versionHint?: string,
 	): Promise<OpencodeCompatibility> {
 		const binary = resolveOpencodeBinary(env);
-
-		try {
-			const result = await opencodeVersion({ env, cwd, timeoutMs: 5_000 });
-			const version = parseOpencodeVersionOutput(result.stdout, result.stderr);
-			return buildOpencodeCompatibility(binary, version);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return buildOpencodeCompatibility(
-				binary,
-				undefined,
-				`无法检测 opencode 版本：${message}`,
-			);
+		const hintedVersion = versionHint
+			? parseOpencodeVersionOutput(versionHint)
+			: undefined;
+		if (hintedVersion) {
+			const value = buildOpencodeCompatibility(binary, hintedVersion);
+			this.cacheOpencodeCompatibility(binary, value, OPENCODE_COMPATIBILITY_CACHE_TTL_MS);
+			return value;
 		}
+
+		const cached = this.getCachedOpencodeCompatibility(binary);
+		if (cached) {
+			return cached;
+		}
+		if (this.opencodeCompatibilityInFlight?.binary === binary) {
+			return this.opencodeCompatibilityInFlight.promise;
+		}
+
+		const promise = (async () => {
+			try {
+				const result = await opencodeVersion({ env, cwd, timeoutMs: 5_000 });
+				const version = parseOpencodeVersionOutput(result.stdout, result.stderr);
+				const value = buildOpencodeCompatibility(binary, version);
+				this.cacheOpencodeCompatibility(binary, value, version
+					? OPENCODE_COMPATIBILITY_CACHE_TTL_MS
+					: OPENCODE_COMPATIBILITY_FAILURE_TTL_MS);
+				return value;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const value = buildOpencodeCompatibility(
+					binary,
+					undefined,
+					`无法检测 opencode 版本：${message}`,
+				);
+				this.cacheOpencodeCompatibility(binary, value, OPENCODE_COMPATIBILITY_FAILURE_TTL_MS);
+				return value;
+			}
+		})();
+		this.opencodeCompatibilityInFlight = { binary, promise };
+		try {
+			return await promise;
+		} finally {
+			if (this.opencodeCompatibilityInFlight?.promise === promise) {
+				this.opencodeCompatibilityInFlight = undefined;
+			}
+		}
+	}
+
+	private getCachedOpencodeCompatibility(binary: string): OpencodeCompatibility | undefined {
+		const cached = this.opencodeCompatibilityCache;
+		if (!cached || cached.binary !== binary || cached.expiresAt <= Date.now()) {
+			return undefined;
+		}
+		return cached.value;
+	}
+
+	private cacheOpencodeCompatibility(binary: string, value: OpencodeCompatibility, ttlMs: number): void {
+		this.opencodeCompatibilityCache = {
+			binary,
+			value,
+			expiresAt: Date.now() + ttlMs,
+		};
 	}
 
 	private async safeCount(
@@ -2355,8 +2632,48 @@ export class SidebarProvider
 			return;
 		}
 
+		if (payload.sessionId) {
+			try {
+				const statuses = await this.requestServeJson<
+					Record<string, { type?: unknown }>
+				>("/session/status");
+				const status = statuses[payload.sessionId];
+				if (status?.type === "busy" || status?.type === "retry") {
+					this.respond(webview, {
+						type: "webview.error",
+						requestId,
+						ok: false,
+						error: "当前会话仍有任务在运行，消息未发送，请先返回该任务或等待它完成。",
+					});
+					return;
+				}
+			} catch (error) {
+				this.respondError(
+					webview,
+					requestId,
+					error,
+					"发送前无法确认会话状态。",
+				);
+				return;
+			}
+		}
+
 		const controller = new AbortController();
 		const eventAbort = new AbortController();
+		const startedAt = Date.now();
+		const placeholderTitle = resolveNewSessionTitle(payload);
+		const recoveryTranscript: TranscriptMessage[] = [
+			{
+				created: startedAt,
+				role: "user",
+				parts: [{ type: "text", text: payload.message }],
+			},
+			{
+				created: startedAt,
+				role: "assistant",
+				parts: [],
+			},
+		];
 
 		try {
 			await Promise.all([
@@ -2375,7 +2692,19 @@ export class SidebarProvider
 			console.warn("[opencode-ui] persist selection failed:", message);
 		}
 
-		this.currentRun = { requestId, controller, eventAbort };
+		this.currentRun = {
+			requestId,
+			revision: 0,
+			controller,
+			eventAbort,
+			startedAt,
+			promptText: payload.message,
+			placeholderTitle,
+			startedNewSession: !payload.sessionId,
+			recoveryTranscript,
+			recoveryAssistantIndex: 1,
+		};
+		this.lastTerminalRun = undefined;
 
 		this.respond(webview, { type: "run.start.response", requestId, ok: true });
 
@@ -2406,6 +2735,10 @@ export class SidebarProvider
 			this.invalidateSessionExportCache(sessionId);
 			this.currentRun.sessionId = sessionId;
 			this.respondRunEvent(webview, requestId, { type: "session", sessionId });
+			await this.prependSessionHistoryToCurrentRun(requestId, sessionId);
+			if (this.currentRun?.requestId !== requestId) {
+				return;
+			}
 			inlineDiffRun = this.inlineDiff.beginRun({
 				runId: requestId,
 				sessionId,
@@ -2434,7 +2767,6 @@ export class SidebarProvider
 				this.currentRun.blockerPoll = blockerPoll;
 			}
 
-			const startedAt = Date.now();
 			watchdog = setTimeout(() => {
 				if (!this.currentRun || this.currentRun.requestId !== requestId) {
 					return;
@@ -2504,14 +2836,13 @@ export class SidebarProvider
 			}
 
 			if (completionResult === "stopped") {
-				this.clearCurrentRunForRequest(requestId);
 				this.respondRunEvent(webview, requestId, { type: "stopped" });
+				this.clearCurrentRunForRequest(requestId);
 				finishInlineDiff("stopped");
 				return;
 			}
 
 			if (completionResult instanceof Error) {
-				this.clearCurrentRunForRequest(requestId);
 				if (completionResult.name === "AbortError") {
 					this.respondRunEvent(webview, requestId, { type: "stopped" });
 					finishInlineDiff("stopped");
@@ -2522,11 +2853,12 @@ export class SidebarProvider
 					});
 					finishInlineDiff("failed");
 				}
+				this.clearCurrentRunForRequest(requestId);
 				return;
 			}
 
-			this.clearCurrentRunForRequest(requestId);
 			this.respondRunEvent(webview, requestId, { type: "done" });
+			this.clearCurrentRunForRequest(requestId);
 			finishInlineDiff("done");
 		} catch (error) {
 			if (!this.currentRun || this.currentRun.requestId !== requestId) {
@@ -2536,7 +2868,6 @@ export class SidebarProvider
 			const isAborted =
 				(error instanceof OpencodeCliError && error.code === "ABORTED") ||
 				(error instanceof Error && error.name === "AbortError");
-			this.clearCurrentRunForRequest(requestId);
 			if (isAborted) {
 				this.respondRunEvent(webview, requestId, { type: "stopped" });
 				finishInlineDiff("stopped");
@@ -2549,6 +2880,7 @@ export class SidebarProvider
 				});
 				finishInlineDiff("failed");
 			}
+			this.clearCurrentRunForRequest(requestId);
 		} finally {
 			if (watchdog) {
 				clearTimeout(watchdog);
@@ -2562,6 +2894,30 @@ export class SidebarProvider
 			if (!inlineDiffFinished) {
 				finishInlineDiff("stopped");
 			}
+		}
+	}
+
+	private async prependSessionHistoryToCurrentRun(
+		requestId: string,
+		sessionId: string,
+	): Promise<void> {
+		try {
+			const rawMessages = await this.requestServeJson<unknown>(
+				`/session/${encodeURIComponent(sessionId)}/message`,
+			);
+			const history = liveMessagesToTranscript(rawMessages);
+			const run = this.currentRun;
+			if (!run || run.requestId !== requestId) {
+				return;
+			}
+			const currentTurn = run.recoveryTranscript.slice(-2);
+			run.recoveryTranscript = [...history, ...currentTurn];
+			run.recoveryAssistantIndex = run.recoveryTranscript.length - 1;
+			run.revision += 1;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			logWarn(`seed active run transcript failed: ${message}`);
+			console.warn("[opencode-ui] seed active run transcript failed:", message);
 		}
 	}
 
@@ -2600,65 +2956,6 @@ export class SidebarProvider
 			console.warn("[opencode-ui] abort session failed:", message);
 		} finally {
 			clearTimeout(timer);
-		}
-	}
-
-	private stopCurrentRunForHiddenPermission(webview: vscode.Webview): void {
-		const run = this.currentRun;
-		const pendingPermission = run?.pendingPermission;
-		const pendingQuestion = run?.pendingQuestion;
-		if (!run || (!pendingPermission && !pendingQuestion)) {
-			return;
-		}
-
-		if (run.sessionId) {
-			void this.abortServeSession(run.sessionId);
-		}
-
-		if (pendingPermission) {
-			run.pendingPermission = undefined;
-			void this.requestServeJson<boolean>(
-				`/permission/${encodeURIComponent(pendingPermission.permissionId)}/reply`,
-				{
-					method: "POST",
-					body: JSON.stringify({
-						reply: "reject",
-						message: "侧边栏已隐藏，自动拒绝挂起的权限请求。",
-					}),
-				},
-			).catch((error) => {
-				const message = error instanceof Error ? error.message : String(error);
-				logWarn(`auto reject hidden permission failed: ${message}`);
-				console.warn(
-					"[opencode-ui] auto reject hidden permission failed:",
-					message,
-				);
-			});
-		}
-
-		if (pendingQuestion) {
-			run.pendingQuestion = undefined;
-			void this.requestServeJson<boolean>(
-				`/question/${encodeURIComponent(pendingQuestion.questionId)}/reject`,
-				{
-					method: "POST",
-				},
-			).catch((error) => {
-				const message = error instanceof Error ? error.message : String(error);
-				logWarn(`auto reject hidden question failed: ${message}`);
-				console.warn(
-					"[opencode-ui] auto reject hidden question failed:",
-					message,
-				);
-			});
-		}
-
-		this.respondRunEvent(webview, run.requestId, { type: "stopped" });
-		this.clearCurrentRunBlockerPoll(run);
-		run.controller.abort();
-		run.eventAbort?.abort();
-		if (this.currentRun?.requestId === run.requestId) {
-			this.currentRun = undefined;
 		}
 	}
 
@@ -2730,16 +3027,79 @@ export class SidebarProvider
 	}
 
 	private respondRunEvent(
-		webview: vscode.Webview,
+		_webview: vscode.Webview,
 		requestId: string,
 		event: RunStreamEvent,
 	): void {
-		this.respond(webview, {
+		const run = this.currentRun;
+		const isCurrentRun = run?.requestId === requestId;
+		if (
+			isCurrentRun &&
+			(event.type === "part" ||
+				event.type === "context.usage" ||
+				event.type === "error")
+		) {
+			run.recoveryTranscript = applyRunEventToTranscript(
+				run.recoveryTranscript,
+				event,
+				run.recoveryAssistantIndex,
+			);
+		}
+		const revision = isCurrentRun ? ++run.revision : 0;
+		if (
+			isCurrentRun &&
+			(event.type === "done" ||
+				event.type === "stopped" ||
+				event.type === "error")
+		) {
+			this.captureTerminalRun(event);
+		}
+
+		const target = this.runEventWebview;
+		if (!target) {
+			return;
+		}
+		this.respond(target, {
 			type: "run.event",
 			requestId,
 			ok: true,
-			payload: { event },
+			payload: { event, revision },
 		});
+	}
+
+	private captureTerminalRun(
+		event: Extract<RunStreamEvent, { type: "done" | "stopped" | "error" }>,
+	): void {
+		const snapshot = this.getActiveRunSnapshot();
+		if (!snapshot) {
+			return;
+		}
+		if (this.lastTerminalRun?.requestId === snapshot.requestId) {
+			return;
+		}
+		const completedAt = Date.now();
+		const transcript = snapshot.transcript.map((message, index) =>
+			index === snapshot.assistantIndex
+				? {
+						...message,
+						completed: completedAt,
+						...(event.type === "done" && !message.finish
+							? { finish: "stop" }
+							: {}),
+					}
+				: message,
+		);
+		this.lastTerminalRun = {
+			...snapshot,
+			transcript,
+			outcome:
+				event.type === "done"
+					? "done"
+					: event.type === "stopped"
+						? "stopped"
+						: "failed",
+			completedAt,
+		};
 	}
 
 	private async ensureSessionForPrompt(
@@ -2905,11 +3265,13 @@ export class SidebarProvider
 			setPendingPermission: (event) => {
 				if (this.currentRun?.requestId === requestId) {
 					this.currentRun.pendingPermission = event;
+					this.currentRun.revision += 1;
 				}
 			},
 			setPendingQuestion: (event) => {
 				if (this.currentRun?.requestId === requestId) {
 					this.currentRun.pendingQuestion = event;
+					this.currentRun.revision += 1;
 				}
 			},
 			requestServeJson: (pathname) => this.requestServeJson(pathname),

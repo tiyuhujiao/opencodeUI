@@ -22,6 +22,7 @@ exports.WEBVIEW_REQUEST_WHITELIST = [
     'question.reject',
     'file.open',
     'inlineDiff.open',
+    'inlineDiff.resolve',
     'inlineDiff.dismiss',
     'tempfile.write',
     'providers.list',
@@ -62,6 +63,7 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set([
     'session.delete.response',
     'file.open.response',
     'inlineDiff.open.response',
+    'inlineDiff.resolve.response',
     'inlineDiff.dismiss.response',
     'inlineDiff.state',
     'tempfile.write.response',
@@ -89,6 +91,7 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set([
     'question.reply.response',
     'question.reject.response',
     'run.event',
+    'run.snapshot',
     'selfcheck.response',
     'webview.error'
 ]);
@@ -349,8 +352,18 @@ function isExtensionResponseMessage(message) {
     if (message.type === 'inlineDiff.open.response' || message.type === 'inlineDiff.dismiss.response') {
         return message.ok === true && isObject(message.payload) && isNonEmptyString(message.payload.fileId);
     }
+    if (message.type === 'inlineDiff.resolve.response') {
+        return message.ok === true
+            && isObject(message.payload)
+            && isNonEmptyString(message.payload.fileId)
+            && (message.payload.decision === 'accept' || message.payload.decision === 'reject');
+    }
     if (message.type === 'inlineDiff.state') {
-        if (message.ok !== true || !isObject(message.payload) || !isNonNegativeInteger(message.payload.revision) || !Array.isArray(message.payload.files)) {
+        if (message.ok !== true
+            || !isObject(message.payload)
+            || !isNonNegativeInteger(message.payload.revision)
+            || typeof message.payload.activeRun !== 'boolean'
+            || !Array.isArray(message.payload.files)) {
             return false;
         }
         return message.payload.files.every(isInlineDiffFileSummary);
@@ -539,6 +552,14 @@ function isWebviewRequestMessage(message) {
             return false;
         }
     }
+    if (message.type === 'inlineDiff.resolve') {
+        if (!isObject(message.payload)
+            || !isNonEmptyString(message.payload.fileId)
+            || !isNonNegativeInteger(message.payload.revision)
+            || (message.payload.decision !== 'accept' && message.payload.decision !== 'reject')) {
+            return false;
+        }
+    }
     if (message.type === 'tempfile.write') {
         if (!isObject(message.payload)) {
             return false;
@@ -724,6 +745,7 @@ function isInlineDiffFileSummary(value) {
         return false;
     }
     return isNonEmptyString(value.fileId)
+        && isNonNegativeInteger(value.revision)
         && isNonEmptyString(value.path)
         && isNonEmptyString(value.displayPath)
         && isNonNegativeInteger(value.additions)

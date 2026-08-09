@@ -46,6 +46,14 @@ function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 async function run() {
+    try {
+        await runExtensionSmoke();
+    }
+    finally {
+        await (0, serveManager_1.disposeServeManager)();
+    }
+}
+async function runExtensionSmoke() {
     const extension = vscode.extensions.getExtension('tiyuhujiao.opencode-ui-vscode');
     assert.ok(extension, '应能找到扩展 tiyuhujiao.opencode-ui-vscode');
     await extension?.activate();
@@ -132,7 +140,7 @@ async function verifyNativeInlineDiff() {
     const currentText = 'alpha\nadded line\nomega\n';
     const promptText = 'replace the middle line';
     const startedAt = Date.now();
-    await vscode.workspace.fs.writeFile(fileUri, new TextEncoder().encode(currentText));
+    await vscode.workspace.fs.writeFile(fileUri, new TextEncoder().encode(baselineText));
     const controller = (0, inlineDiff_1.createInlineDiffController)({
         virtualDocumentScheme: 'opencode-inline-diff-smoke',
         commandPrefix: 'opencodeUI.smoke.inlineDiff',
@@ -171,6 +179,41 @@ async function verifyNativeInlineDiff() {
             startedAt,
             promptText
         });
+        const toolPart = (status) => ({
+            type: 'part',
+            part: {
+                type: 'tool',
+                toolName: 'edit',
+                status,
+                raw: {
+                    part: {
+                        id: 'tool-inline-diff-smoke',
+                        state: {
+                            status,
+                            input: {
+                                filePath: fileName,
+                                oldString: 'removed line',
+                                newString: 'added line'
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        run.observe(toolPart('running'));
+        await delay(60);
+        await vscode.workspace.fs.writeFile(fileUri, new TextEncoder().encode(currentText));
+        run.observe(toolPart('completed'));
+        for (let attempt = 0; attempt < 80 && controller.getSnapshot().files.length === 0; attempt += 1) {
+            await delay(25);
+        }
+        const liveSnapshot = controller.getSnapshot();
+        assert.equal(liveSnapshot.activeRun, true, '编辑工具完成后应在整轮结束前发布文件审阅');
+        assert.equal(liveSnapshot.files.length, 1, '单个已完成文件应立即生成审阅');
+        for (let attempt = 0; attempt < 80 && !(vscode.window.tabGroups.activeTabGroup.activeTab?.input instanceof vscode.TabInputTextDiff); attempt += 1) {
+            await delay(25);
+        }
+        assert.ok(vscode.window.tabGroups.activeTabGroup.activeTab?.input instanceof vscode.TabInputTextDiff, '首个完成文件应在整轮结束前打开原生 Diff Editor');
         await run.finish('done');
         const snapshot = controller.getSnapshot();
         assert.equal(snapshot.activeRun, false, 'inline diff run 完成后不应仍处于 active 状态');

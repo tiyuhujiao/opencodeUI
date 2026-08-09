@@ -8,8 +8,8 @@ describe('transcript activity block', () => {
   it('groups consecutive reasoning, tool calls, and subtasks without moving later thinking above text', () => {
     const source = readFileSync(join(root, 'webview-ui/src/components/Transcript.tsx'), 'utf8');
 
-    expect(source).toContain('const renderItems = buildMessageRenderItems(visibleParts, messageIndex, isFinalResponse)');
-    expect(source).toContain('if (renderItems.length === 0) {');
+    expect(source).toContain("const renderItems = buildMessageRenderItems(visibleParts, messageIndex, isFinalResponse || contentMode !== 'all')");
+    expect(source).toContain('if (visibleItems.length === 0) {');
     expect(source).toContain('function buildMessageRenderItems(parts: TranscriptPart[], messageIndex: number, markFinalAnswer: boolean): MessageRenderItem[]');
     expect(source).toContain('let activityEntries: ActivityEntry[] = []');
     expect(source).toContain('let activityIndex = 0');
@@ -19,6 +19,8 @@ describe('transcript activity block', () => {
     expect(source).toContain("if (part.toolName === 'todowrite') {");
     expect(source).toContain("if (part.type === 'reasoning' || part.type === 'tool') {");
     expect(source).toContain('activityEntries.push({ key, part })');
+    expect(source).toContain('const key = getPartRenderKey(part, messageIndex, partIndex)');
+    expect(source).toContain("return `${String(messageIndex)}-${part.type}-${part.streamKey}`");
     expect(source).toContain('flushActivity()');
     expect(source).toContain('return markFinalAnswer ? markFinalAnswerItem(items) : items');
     expect(source).not.toContain('let hasActivity = false');
@@ -31,10 +33,13 @@ describe('transcript activity block', () => {
     expect(source).toContain('const rendered = buildTranscriptDisplayBlocks(messages)');
     expect(source).toContain('<AssistantTurnBlock');
     expect(source).toContain('<div className="turn-work">');
-    expect(source).toContain('{turn.responses.map((entry) => {');
-    expect(source.indexOf('<div className="turn-work">')).toBeLessThan(source.indexOf('{turn.responses.map((entry) => {'));
+    expect(source).toContain("className={`assistant-turn__process${expanded ? ' is-expanded' : ''}`}");
+    expect(source).toContain("contentMode={finalResponseIndices.has(entry.messageIndex) ? 'process' : 'all'}");
+    expect(source).toContain('contentMode="final"');
+    expect(source.indexOf('className={`assistant-turn__process')).toBeLessThan(source.indexOf('contentMode="final"'));
     expect(source).toContain('const finalAnswerIndex = items.findIndex((item) => item.kind ===');
-    expect(source).toContain('const visibleItems = !showProcess && finalAnswerIndex >= 0 ? items.slice(finalAnswerIndex) : items');
+    expect(source).toContain("return mode === 'process' ? items.slice(0, finalAnswerIndex) : items.slice(finalAnswerIndex)");
+    expect(source).toContain('|| (isActive && entry.messageIndex === lastAssistantMessageIndex)');
     expect(source).toContain('const timer = window.setInterval(tick, 1000)');
     expect(source).toContain('const timing = resolveAssistantTurnTiming(turn, {');
     expect(source).toContain("t('Working for {duration}', { duration: durationLabel ?? '<1s' })");
@@ -45,7 +50,8 @@ describe('transcript activity block', () => {
     expect(source).toContain('aria-expanded={open}');
     expect(source).toContain('className="activity-block__summary"');
     expect(source).toContain('className="activity-block__current"');
-    expect(source).toContain("className={`md-body${item.isFinalAnswer ? ' md-body--final-answer' : ''}`}");
+    expect(source).toContain('const MarkdownTextBlock = memo(function MarkdownTextBlock({');
+    expect(source).toContain("className={`md-body${isFinalAnswer ? ' md-body--final-answer' : ''}`}");
     expect(source).toContain('function markFinalAnswerItem(items: MessageRenderItem[]): MessageRenderItem[]');
     expect(source).toContain("${t('Subtask')}: ${summarizeActivityText(activeTask.title || activeTask.summary)}");
     expect(source).toContain("${t('Tool')}: ${summarizeActivityText(latestTool.title || latestTool.summary)}");
@@ -79,6 +85,12 @@ describe('transcript activity block', () => {
     expect(source).toContain('activity-block--active');
     expect(styles).toContain('.activity-block');
     expect(styles).toContain('.assistant-turn');
+    expect(styles).toContain('.assistant-turn__process');
+    expect(styles).toContain('.assistant-turn__process.is-expanded');
+    expect(styles).toContain('grid-template-rows: 0fr;');
+    expect(styles).toContain('grid-template-rows: 1fr;');
+    expect(styles).toContain('grid-template-rows 220ms ease');
+    expect(styles).toContain('.assistant-turn__process-inner');
     expect(styles).toContain('.turn-work');
     expect(styles).toContain('.turn-work__summary');
     expect(styles).toContain('.turn-work__divider');

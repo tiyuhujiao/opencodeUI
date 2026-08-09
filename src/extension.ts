@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { configureServePortStorage, ensureServeRunning, requestServeJson } from './bridge/serveManager';
+import { configureServePortStorage, disposeServeManager, ensureServeRunning, requestServeJson } from './bridge/serveManager';
 import { initializeDiagnostics, logError, logInfo, logWarn, showDiagnostics } from './diagnostics';
 import { createInlineDiffController } from './inlineDiff';
 import { SidebarProvider } from './webview/SidebarProvider';
@@ -55,7 +55,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     sidebarProvider,
-    vscode.window.registerWebviewViewProvider('opencodeUI.sidebar', sidebarProvider),
+    vscode.window.registerWebviewViewProvider('opencodeUI.sidebar', sidebarProvider, {
+      webviewOptions: {
+        retainContextWhenHidden: true
+      }
+    }),
     vscode.commands.registerCommand('opencodeUI.refresh', () => {
       sidebarProvider.refresh();
     }),
@@ -68,7 +72,8 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
-export function deactivate(): void {
+export function deactivate(): Promise<void> {
+	return disposeServeManager();
 }
 
 export function resolveHostKind(remoteName: string | undefined, platform: NodeJS.Platform = process.platform): HostKind {

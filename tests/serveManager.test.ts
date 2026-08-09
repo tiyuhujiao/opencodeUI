@@ -11,6 +11,7 @@ vi.mock('node:net', () => ({
 }));
 
 vi.mock('node:child_process', () => ({
+  execFile: vi.fn(),
   spawn: vi.fn()
 }));
 
@@ -24,6 +25,7 @@ type MockServerScript =
   | { type: 'listening'; addressPort: number; closeError?: Error };
 
 class FakeChildProcess {
+  public pid: number | undefined;
   public exitCode: number | null = null;
   public readonly kill = vi.fn(() => true);
   public readonly stderr = {
@@ -155,11 +157,13 @@ async function setup(lastPort: number | undefined) {
   const requestMock = vi.mocked(httpMod.request);
   const createServerMock = vi.mocked(netMod.createServer);
   const spawnMock = vi.mocked(childProcessMod.spawn);
+  const execFileMock = vi.mocked(childProcessMod.execFile);
   const opencodeEnv = await import('../src/bridge/opencodeEnv');
 
   requestMock.mockReset();
   createServerMock.mockReset();
   spawnMock.mockReset();
+  execFileMock.mockReset();
 
   const setLastPort = vi.fn(async () => {});
 
@@ -174,6 +178,7 @@ async function setup(lastPort: number | undefined) {
     requestMock,
     createServerMock,
     spawnMock,
+    execFileMock,
     opencodeEnv,
     setLastPort
   };
@@ -314,8 +319,58 @@ describe('ensureServeRunning 端口策略', () => {
       startedByManager: true
     });
     expect(calledPorts).toEqual([5111, 4096, 5522]);
-    expect(spawnMock).toHaveBeenCalledWith('opencode', ['serve', '--hostname', '127.0.0.1', '--port', '5522'], expect.objectContaining({ shell: false }));
+    expect(spawnMock).toHaveBeenCalledWith(
+      'opencode',
+      ['serve', '--hostname', '127.0.0.1', '--port', '5522'],
+      expect.objectContaining({ shell: false, cwd: homedir() })
+    );
     expect(setLastPort).toHaveBeenCalledWith(5522);
+  });
+
+  it('扩展停用时只终止由 manager 启动的 serve', async () => {
+    vi.useFakeTimers();
+    const { serveManager, requestMock, createServerMock, spawnMock, execFileMock, opencodeEnv } = await setup(undefined);
+    opencodeEnv.__setExistsSyncImplementationForTests(() => false);
+    opencodeEnv.__setExecFileSyncImplementationForTests((() => {
+      throw new Error('where lookup disabled');
+    }) as never);
+    configureHealthResponses(requestMock, {
+      4096: { type: 'error' },
+      5522: { type: 'status', statusCode: 200 }
+    });
+    configureNetServers(createServerMock, [
+      { type: 'error' },
+      { type: 'listening', addressPort: 5522 }
+    ]);
+
+    const child = new FakeChildProcess();
+    child.pid = 4242;
+    spawnMock.mockReturnValue(child as never);
+
+    const runtimePromise = serveManager.ensureServeRunning();
+    await vi.advanceTimersByTimeAsync(350);
+    await runtimePromise;
+
+    execFileMock.mockImplementation(((_file, _args, _options, callback) => {
+      callback(null, '', '');
+      return child as never;
+    }) as never);
+
+    await serveManager.disposeServeManager();
+    await serveManager.disposeServeManager();
+
+    if (process.platform === 'win32') {
+      expect(execFileMock).toHaveBeenCalledWith(
+        'taskkill.exe',
+        ['/pid', '4242', '/T', '/F'],
+        { windowsHide: true, timeout: 5_000 },
+        expect.any(Function)
+      );
+      expect(child.kill).not.toHaveBeenCalled();
+    } else {
+      expect(execFileMock).not.toHaveBeenCalled();
+      expect(child.kill).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('健康检查失败时不持久化端口', async () => {

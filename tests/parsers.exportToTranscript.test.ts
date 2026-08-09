@@ -165,4 +165,37 @@ describe('exportToTranscript', () => {
       }
     ]);
   });
+
+  it('为实时与导出的多段 text/Thinking 保留稳定 streamKey', () => {
+    const transcript = liveMessagesToTranscript([
+      {
+        info: { id: 'message-1', role: 'assistant' },
+        parts: [
+          { id: 'reasoning-1', messageID: 'message-1', type: 'reasoning', text: '**分析一**' },
+          { id: 'reasoning-2', messageID: 'message-1', type: 'reasoning', text: '**分析二**' },
+          { id: 'text-1', messageID: 'message-1', type: 'text', text: '最终回答' }
+        ]
+      }
+    ]);
+
+    expect(transcript[0]?.parts).toEqual([
+      {
+        type: 'reasoning',
+        text: '**分析一**',
+        streamKey: 'message-1:reasoning-1',
+        raw: { id: 'reasoning-1', messageID: 'message-1', type: 'reasoning', text: '**分析一**' }
+      },
+      {
+        type: 'reasoning',
+        text: '**分析二**',
+        streamKey: 'message-1:reasoning-2',
+        raw: { id: 'reasoning-2', messageID: 'message-1', type: 'reasoning', text: '**分析二**' }
+      },
+      {
+        type: 'text',
+        text: '最终回答',
+        streamKey: 'message-1:text-1'
+      }
+    ]);
+  });
 });

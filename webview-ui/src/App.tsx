@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, ArrowUp, History, Languages, Moon, Plus, RefreshCw, Settings2, ShieldCheck, Square, Sun } from 'lucide-react'
-import { createRequestId, getVsCodeApi } from './vscodeApi'
+import {
+  createRequestId,
+  getVsCodeApi,
+  persistSessionId,
+  readPersistedSessionId
+} from './vscodeApi'
 import { Transcript } from './components/Transcript'
 import { ModelDialog } from './components/dialog/ModelDialog'
 import { SessionDialog } from './components/dialog/SessionDialog'
@@ -22,7 +27,13 @@ import {
   upsertPendingSessionSummary
 } from './transcriptState'
 import {
+  shouldApplyRunEvent,
+  shouldRestoreActiveSnapshot,
+  shouldRestoreTerminalSnapshot
+} from './runRecovery'
+import {
   isExtensionResponseMessage,
+  type ActiveRunSnapshot,
   type AgentSummary,
   type ComposerCommandSummary,
   type ComposerMcpServerSummary,
@@ -37,6 +48,7 @@ import {
   type SessionSummary,
   type SessionTimelineItem,
   type TranscriptMessage,
+  type TerminalRunSnapshot,
   type WorkspaceResourceSummary
 } from '../../src/shared/protocol'
 import { summarizeEditedFiles, type EditedFileSummary } from './editedFiles'
@@ -125,6 +137,7 @@ export type UiRunEvent = RunStreamEvent
 
 type DisplayEditedFile = EditedFileSummary & {
   fileId?: string
+  revision?: number
   hunks?: number
   status?: InlineDiffFileSummary['status']
   reason?: string
@@ -146,6 +159,7 @@ type SelfcheckState = {
 }
 
 type SelfcheckSnapshot = {
+  opencode: SelfcheckState
   health: SelfcheckState
   sessions: SelfcheckState
   models: SelfcheckState
@@ -157,6 +171,7 @@ type DiagnosticsState = 'idle' | 'pending' | 'ok' | 'error'
 type PendingRunCompletion = {
   type: 'done' | 'stopped' | 'error'
   sessionId: string | null
+  completedAt?: number
 }
 
 type PendingQuestionState = {
@@ -233,13 +248,14 @@ function hasBlockingSessionListRequests(requests: Map<string, SessionListRequest
 }
 
 function getDiagnosticsState(selfcheck: SelfcheckSnapshot): DiagnosticsState {
-  if (selfcheck.health.state === 'error') {
+  const states = Object.values(selfcheck).map((entry) => entry.state)
+  if (states.includes('error')) {
     return 'error'
   }
-  if (selfcheck.health.state === 'pending' || selfcheck.health.state === 'timeout') {
+  if (states.includes('pending') || states.includes('timeout')) {
     return 'pending'
   }
-  if (selfcheck.health.state === 'ok') {
+  if (states.every((state) => state === 'ok')) {
     return 'ok'
   }
   return 'idle'
@@ -295,12 +311,18 @@ function RunActivityIndicator({ status }: { status: string | null }) {
 function RunStatusDetails({
   status,
   files,
+  reviewActiveRun,
+  resolvingFileIds,
   onOpenFile,
+  onResolveFile,
   onDismissFile
 }: {
   status: string | null
   files: DisplayEditedFile[]
+  reviewActiveRun: boolean
+  resolvingFileIds: Set<string>
   onOpenFile: (file: DisplayEditedFile) => void
+  onResolveFile: (file: DisplayEditedFile, decision: 'accept' | 'reject') => void
   onDismissFile: (fileId: string) => void
 }) {
   const message = status && !getRunActivity(status) ? status : null
@@ -311,18 +333,31 @@ function RunStatusDetails({
   return (
     <div className="run-status-row">
       {message ? <p className="status-line status-line--message">{message}</p> : null}
-      <EditedFilesSummary files={files} onOpenFile={onOpenFile} onDismissFile={onDismissFile} />
+      <EditedFilesSummary
+        files={files}
+        reviewActiveRun={reviewActiveRun}
+        resolvingFileIds={resolvingFileIds}
+        onOpenFile={onOpenFile}
+        onResolveFile={onResolveFile}
+        onDismissFile={onDismissFile}
+      />
     </div>
   )
 }
 
 function EditedFilesSummary({
   files,
+  reviewActiveRun,
+  resolvingFileIds,
   onOpenFile,
+  onResolveFile,
   onDismissFile
 }: {
   files: DisplayEditedFile[]
+  reviewActiveRun: boolean
+  resolvingFileIds: Set<string>
   onOpenFile: (file: DisplayEditedFile) => void
+  onResolveFile: (file: DisplayEditedFile, decision: 'accept' | 'reject') => void
   onDismissFile: (fileId: string) => void
 }) {
   const { t } = useI18n()
@@ -347,15 +382,13 @@ function EditedFilesSummary({
         {files.map((file) => {
           const fileId = file.fileId
           const canDismiss = Boolean(fileId && file.status && file.status !== 'pending')
-          const actionLabel = fileId ? (file.status === 'pending' ? t('Review') : t('View')) : t('Open')
+          const canResolve = Boolean(fileId && file.status === 'pending' && typeof file.revision === 'number')
+          const resolving = Boolean(fileId && resolvingFileIds.has(fileId))
+          const resolveDisabled = reviewActiveRun || resolving
+          const resolveTitle = reviewActiveRun ? t('Available when the run finishes') : undefined
           return (
             <div key={fileId ?? file.path} className={`edit-summary__item${file.status ? ` edit-summary__item--${file.status}` : ''}`}>
-              <button
-                type="button"
-                className="edit-summary__open"
-                onClick={() => onOpenFile(file)}
-                title={file.reason}
-              >
+              <div className="edit-summary__content" title={file.reason}>
                 <span className="edit-summary__file">
                   <span className="edit-summary__path">{file.displayPath}</span>
                   {file.reason ? <span className="edit-summary__reason">{file.reason}</span> : null}
@@ -367,19 +400,49 @@ function EditedFilesSummary({
                   </span>
                   {typeof file.hunks === 'number' && file.hunks > 0 ? <span>{file.hunks} {t(file.hunks === 1 ? 'hunk' : 'hunks')}</span> : null}
                   {file.status && file.status !== 'pending' ? <span className="edit-summary__state">{file.status}</span> : null}
-                  <span className="edit-summary__action">{actionLabel}</span>
                 </span>
-              </button>
-              {canDismiss && fileId ? (
+              </div>
+              <div className="edit-summary__actions">
                 <button
                   type="button"
-                  className="edit-summary__dismiss"
-                  aria-label={`Dismiss ${file.displayPath}`}
-                  onClick={() => onDismissFile(fileId)}
+                  className="edit-summary__action-button"
+                  onClick={() => onOpenFile(file)}
                 >
-                  {t('Dismiss')}
+                  {t('Open')}
                 </button>
-              ) : null}
+                {canResolve ? (
+                  <>
+                    <button
+                      type="button"
+                      className="edit-summary__action-button"
+                      disabled={resolveDisabled}
+                      title={resolveTitle}
+                      onClick={() => onResolveFile(file, 'accept')}
+                    >
+                      {t('Save')}
+                    </button>
+                    <button
+                      type="button"
+                      className="edit-summary__action-button edit-summary__action-button--reject"
+                      disabled={resolveDisabled}
+                      title={resolveTitle}
+                      onClick={() => onResolveFile(file, 'reject')}
+                    >
+                      {t('Reject')}
+                    </button>
+                  </>
+                ) : null}
+                {canDismiss && fileId ? (
+                  <button
+                    type="button"
+                    className="edit-summary__action-button"
+                    aria-label={`Dismiss ${file.displayPath}`}
+                    onClick={() => onDismissFile(fileId)}
+                  >
+                    {t('Dismiss')}
+                  </button>
+                ) : null}
+              </div>
             </div>
           )
         })}
@@ -392,11 +455,11 @@ function mergeEditedFileSummaries(liveFiles: EditedFileSummary[], reviewFiles: I
   const merged = new Map<string, DisplayEditedFile>()
 
   for (const file of liveFiles) {
-    merged.set(normalizeEditedFilePath(file.path), file)
+    merged.set(normalizeEditedFilePath(file.displayPath || file.path), file)
   }
 
   for (const file of reviewFiles) {
-    merged.set(normalizeEditedFilePath(file.path), file)
+    merged.set(normalizeEditedFilePath(file.displayPath || file.path), file)
   }
 
   return [...merged.values()]
@@ -690,6 +753,7 @@ export default function App() {
   const [debugLog, setDebugLog] = useState<DebugEntry[]>([])
 
   const [selfcheck, setSelfcheck] = useState<SelfcheckSnapshot>({
+    opencode: { state: 'idle' },
     health: { state: 'idle' },
     sessions: { state: 'idle' },
     models: { state: 'idle' },
@@ -700,7 +764,7 @@ export default function App() {
     setDebugLog((current) => [...current, entry].slice(-200))
   }, [])
 
-  const selfcheckTimersRef = useRef<{ health?: number; sessions?: number; models?: number; agents?: number }>({})
+  const selfcheckTimersRef = useRef<Partial<Record<keyof SelfcheckSnapshot, number>>>({})
 
   const startSelfcheckTimer = useCallback(
     (key: keyof SelfcheckSnapshot, requestId: string) => {
@@ -724,12 +788,14 @@ export default function App() {
             }
           }
         })
-      }, key === 'health' ? 8000 : 4000)
+      }, key === 'health' || key === 'opencode' ? 8000 : 4000)
     },
     []
   )
   const [sessions, setSessions] = useState<SessionSummary[]>([])
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() =>
+    readPersistedSessionId(getVsCodeApi())
+  )
   const [sessionsError, setSessionsError] = useState<string | null>(null)
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [transcript, setTranscript] = useState<TranscriptMessage[]>([])
@@ -782,6 +848,8 @@ export default function App() {
   const clearSettledRunIndicator = useCallback(() => setRunStatus(clearSettledRunStatus), [])
   const [editedFiles, setEditedFiles] = useState<EditedFileSummary[]>([])
   const [reviewFiles, setReviewFiles] = useState<InlineDiffFileSummary[]>([])
+  const [reviewActiveRun, setReviewActiveRun] = useState(false)
+  const [resolvingReviewFileIds, setResolvingReviewFileIds] = useState<Set<string>>(new Set())
   const displayedEditedFiles = useMemo(() => mergeEditedFileSummaries(editedFiles, reviewFiles), [editedFiles, reviewFiles])
 
   const [thinkingPreferences, setThinkingPreferences] = useState<Record<string, string>>(() =>
@@ -851,6 +919,7 @@ export default function App() {
   const questionReplyRequestIdsRef = useRef<Map<string, string>>(new Map())
   const questionRejectRequestIdsRef = useRef<Map<string, string>>(new Map())
   const inlineDiffOpenRequestIdsRef = useRef<Map<string, string>>(new Map())
+  const inlineDiffResolveRequestIdsRef = useRef<Map<string, { fileId: string; decision: 'accept' | 'reject' }>>(new Map())
   const inlineDiffDismissRequestIdsRef = useRef<Map<string, string>>(new Map())
   const inlineDiffRevisionRef = useRef(-1)
   const providersRequestIdsRef = useRef<Set<string>>(new Set())
@@ -874,6 +943,8 @@ export default function App() {
     sessionId: string | null
     placeholderTitle: string
     startedNewSession: boolean
+    submittedText?: string
+    previousTranscript?: TranscriptMessage[]
   } | null>(null)
 
   const lastCompletedRunRef = useRef<{
@@ -882,15 +953,18 @@ export default function App() {
     localTranscript: TranscriptMessage[]
     exportAttempts: number
   } | null>(null)
+  const lastRecoveredTerminalRequestIdRef = useRef<string | null>(null)
+  const activeRunRevisionRef = useRef(-1)
   const runErrorTranscriptsRef = useRef<Map<string, TranscriptMessage[]>>(new Map())
 
   const allowAutoSelectSessionRef = useRef(true)
   const isRunningRef = useRef(false)
-  const suppressNextSessionAutoExportRef = useRef(true)
+  const suppressNextSessionAutoExportRef = useRef(selectedSessionId === null)
 
   const sessionsRef = useRef<SessionSummary[]>([])
   const transcriptRef = useRef<TranscriptMessage[]>([])
   const activeSubtaskRef = useRef<ActiveSubtask | null>(null)
+  const selectedSessionIdRef = useRef<string | null>(selectedSessionId)
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode
@@ -937,6 +1011,11 @@ export default function App() {
   useEffect(() => {
     sessionsRef.current = sessions
   }, [sessions])
+
+  useEffect(() => {
+    selectedSessionIdRef.current = selectedSessionId
+    persistSessionId(getVsCodeApi(), selectedSessionId)
+  }, [selectedSessionId])
 
   const requestSessions = useCallback((options?: { background?: boolean }) => {
     const vscode = getVsCodeApi()
@@ -987,6 +1066,7 @@ export default function App() {
           detail: 'Not running in VS Code'
         })
         setSelfcheck({
+          opencode: { state: 'error', detail: 'Not running in VS Code' },
           health: { state: 'error', detail: 'Not running in VS Code' },
           sessions: { state: 'error', detail: 'Not running in VS Code' },
           models: { state: 'error', detail: 'Not running in VS Code' },
@@ -1004,6 +1084,10 @@ export default function App() {
       })
 
       setSelfcheck((current) => ({
+        opencode:
+          current.opencode.state === 'ok'
+            ? { ...current.opencode, detail: 'Refreshing', lastRequestId: requestId }
+            : { state: 'pending', detail: 'Request sent', lastRequestId: requestId },
         health:
           current.health.state === 'ok'
             ? { ...current.health, detail: 'Refreshing', lastRequestId: requestId }
@@ -1013,6 +1097,7 @@ export default function App() {
         agents: { state: 'pending', detail: 'Request sent', lastRequestId: requestId }
       }))
 
+      startSelfcheckTimer('opencode', requestId)
       startSelfcheckTimer('health', requestId)
       startSelfcheckTimer('sessions', requestId)
       startSelfcheckTimer('models', requestId)
@@ -1032,6 +1117,7 @@ export default function App() {
         detail
       })
       setSelfcheck({
+        opencode: { state: 'error', detail },
         health: { state: 'error', detail },
         sessions: { state: 'error', detail },
         models: { state: 'error', detail },
@@ -1196,7 +1282,7 @@ export default function App() {
 
   const completeRun = useCallback((completion: PendingRunCompletion) => {
     const active = activeRunRef.current
-    const completedAt = Date.now()
+    const completedAt = completion.completedAt ?? Date.now()
     let completedTranscript = transcriptRef.current
     if (typeof active?.assistantIndex === 'number') {
       const assistantMessage = completedTranscript[active.assistantIndex]
@@ -1240,13 +1326,102 @@ export default function App() {
       }
     }
 
+    if (active) {
+      lastRecoveredTerminalRequestIdRef.current = active.requestId
+    }
     activeRunRef.current = null
+    activeRunRevisionRef.current = -1
 
     const finalSessionId = completion.sessionId
     if (finalSessionId) {
       window.setTimeout(() => requestSessionExport(finalSessionId, { background: true }), 350)
     }
   }, [requestSessionExport, workspaceFolderPath])
+
+  const restoreActiveRun = useCallback((snapshot: ActiveRunSnapshot) => {
+    const recoveredTranscript = snapshot.transcript.map((message) => ({
+      ...message,
+      parts: message.parts.map((part) => ({ ...part })),
+      ...(message.contextUsage ? { contextUsage: { ...message.contextUsage } } : {})
+    }))
+    let assistantIndex = snapshot.assistantIndex
+    if (assistantIndex < 0 || recoveredTranscript[assistantIndex]?.role !== 'assistant') {
+      assistantIndex = -1
+      for (let index = recoveredTranscript.length - 1; index >= 0; index -= 1) {
+        if (recoveredTranscript[index]?.role === 'assistant') {
+          assistantIndex = index
+          break
+        }
+      }
+    }
+    if (assistantIndex < 0) {
+      assistantIndex = recoveredTranscript.length
+      recoveredTranscript.push({
+        created: snapshot.startedAt,
+        role: 'assistant',
+        parts: []
+      })
+    }
+
+    transcriptRef.current = recoveredTranscript
+    setTranscript(recoveredTranscript)
+    const assistantMessage = recoveredTranscript[assistantIndex]
+    setEditedFiles(assistantMessage ? summarizeEditedFiles([assistantMessage], workspaceFolderPath) : [])
+    activeRunRef.current = {
+      requestId: snapshot.requestId,
+      assistantIndex,
+      sessionId: snapshot.sessionId ?? null,
+      placeholderTitle: snapshot.placeholderTitle,
+      startedNewSession: snapshot.startedNewSession
+    }
+    activeRunRevisionRef.current = snapshot.revision
+    isRunningRef.current = true
+    setIsRunning(true)
+    setRunStatus('Running…')
+    setLastRunPartKind(assistantMessage?.parts[assistantMessage.parts.length - 1]?.type ?? null)
+    setPendingPermission(snapshot.pendingPermission
+      ? {
+          permissionId: snapshot.pendingPermission.permissionId,
+          toolName: snapshot.pendingPermission.toolName,
+          patterns: [...snapshot.pendingPermission.patterns],
+          message: snapshot.pendingPermission.message
+        }
+      : null)
+    setPendingQuestion(snapshot.pendingQuestion
+      ? {
+          questionId: snapshot.pendingQuestion.questionId,
+          questions: snapshot.pendingQuestion.questions.map((question) => ({
+            ...question,
+            options: question.options.map((option) => ({ ...option }))
+          }))
+        }
+      : null)
+
+    if (snapshot.sessionId) {
+      selectedSessionIdRef.current = snapshot.sessionId
+      suppressNextSessionAutoExportRef.current = true
+      setSelectedSessionId(snapshot.sessionId)
+    }
+  }, [workspaceFolderPath])
+
+  const restoreTerminalRun = useCallback((snapshot: TerminalRunSnapshot) => {
+    const active = activeRunRef.current
+    if (!shouldRestoreTerminalSnapshot(snapshot, {
+      activeRequestId: active?.requestId ?? null,
+      consumedRequestId: lastRecoveredTerminalRequestIdRef.current,
+      selectedSessionId: selectedSessionIdRef.current
+    })) {
+      return
+    }
+
+    lastRecoveredTerminalRequestIdRef.current = snapshot.requestId
+    restoreActiveRun(snapshot)
+    completeRun({
+      type: snapshot.outcome === 'failed' ? 'error' : snapshot.outcome,
+      sessionId: snapshot.sessionId ?? null,
+      completedAt: snapshot.completedAt
+    })
+  }, [completeRun, restoreActiveRun])
 
   const selectSession = useCallback((sessionId: string | null, options?: { suppressAutoExport?: boolean; allowDuringRun?: boolean }) => {
     if (isRunningRef.current && options?.allowDuringRun !== true) {
@@ -1259,6 +1434,8 @@ export default function App() {
       setRunStatus(null)
       setEditedFiles([])
       setReviewFiles([])
+      setReviewActiveRun(false)
+      setResolvingReviewFileIds(new Set())
     } else {
       clearSettledRunIndicator()
     }
@@ -1637,6 +1814,40 @@ export default function App() {
     [pushDebug]
   )
 
+  const resolveEditedFile = useCallback(
+    (file: DisplayEditedFile, decision: 'accept' | 'reject') => {
+      const vscode = getVsCodeApi()
+      if (!vscode) {
+        setRunStatus('Not running in VS Code')
+        return
+      }
+      if (!file.fileId || typeof file.revision !== 'number') {
+        return
+      }
+
+      const requestId = createRequestId()
+      inlineDiffResolveRequestIdsRef.current.set(requestId, { fileId: file.fileId, decision })
+      setResolvingReviewFileIds((current) => new Set(current).add(file.fileId as string))
+      pushDebug({
+        at: new Date().toISOString(),
+        kind: 'tx',
+        type: 'inlineDiff.resolve',
+        requestId,
+        detail: `${file.fileId}:${decision}`
+      })
+      vscode.postMessage({
+        type: 'inlineDiff.resolve',
+        requestId,
+        payload: {
+          fileId: file.fileId,
+          revision: file.revision,
+          decision
+        }
+      })
+    },
+    [pushDebug]
+  )
+
   const handleDeleteSession = useCallback(
     (sessionId: string) => {
       if (!sessionId) {
@@ -1880,14 +2091,18 @@ export default function App() {
     setPendingQuestion(null)
 
     const created = Date.now()
-    const assistantIndex = transcript.length + 1
+    const previousTranscript = transcriptRef.current
+    const assistantIndex = previousTranscript.length + 1
     activeRunRef.current = {
       requestId,
       assistantIndex,
       sessionId: selectedSessionId,
       placeholderTitle: summarizePendingSessionTitle(message),
-      startedNewSession: selectedSessionId === null
+      startedNewSession: selectedSessionId === null,
+      submittedText: message,
+      previousTranscript
     }
+    activeRunRevisionRef.current = 0
 
     // If this is a brand-new session (no selectedSessionId), keep the local transcript visible
     // until we receive the sessionId event.
@@ -1951,7 +2166,7 @@ export default function App() {
       setPastedImageFilePath(null)
     }
     setWorkspaceAttachments([])
-  }, [composerCommands, composerValue, isRunning, moveSessionExportsToBackground, pastedImage, pastedImageFilePath, pushDebug, selectedSessionId, selectedModel, selectedAgent, thinkingEnabled, thinkingVariant, transcript.length, workspaceAttachments])
+  }, [composerCommands, composerValue, isRunning, moveSessionExportsToBackground, pastedImage, pastedImageFilePath, pushDebug, selectedSessionId, selectedModel, selectedAgent, thinkingEnabled, thinkingVariant, workspaceAttachments])
 
   const commands = useMemo(() => {
     type Cmd = {
@@ -2460,13 +2675,18 @@ export default function App() {
         const versionLabel = message.payload.opencode?.version ? ` · opencode ${message.payload.opencode.version}` : ''
         setStatus(message.payload.isSupportedHost ? `Connected: ${location}${versionLabel}` : `Unsupported host: ${location}`)
         setWorkspaceFolderPath(message.payload.workspaceFolderPath)
-        if (message.payload.opencode?.warning) {
-          setRunStatus(message.payload.opencode.warning)
-        }
         pendingInitialSelectedModelRef.current = message.payload.lastSelectedModel ?? null
         pendingInitialSelectedAgentRef.current = message.payload.lastSelectedAgent ?? null
         setSelectedModel(message.payload.lastSelectedModel ?? '')
         setSelectedAgent(message.payload.lastSelectedAgent ?? '')
+        if (message.payload.activeRun && shouldRestoreActiveSnapshot(message.payload.activeRun, {
+          activeRequestId: activeRunRef.current?.requestId ?? null,
+          currentRevision: activeRunRevisionRef.current
+        })) {
+          restoreActiveRun(message.payload.activeRun)
+        } else if (message.payload.terminalRun) {
+          restoreTerminalRun(message.payload.terminalRun)
+        }
         requestSessions()
         requestProviders()
         requestModels()
@@ -2481,6 +2701,7 @@ export default function App() {
           return
         }
         inlineDiffRevisionRef.current = message.payload.revision
+        setReviewActiveRun(message.payload.activeRun)
         setReviewFiles(message.payload.files)
         return
       }
@@ -2804,6 +3025,20 @@ export default function App() {
         return
       }
 
+      if (message.type === 'inlineDiff.resolve.response' && message.ok) {
+        const pending = inlineDiffResolveRequestIdsRef.current.get(message.requestId)
+        if (!pending) {
+          return
+        }
+        inlineDiffResolveRequestIdsRef.current.delete(message.requestId)
+        setResolvingReviewFileIds((current) => {
+          const next = new Set(current)
+          next.delete(pending.fileId)
+          return next
+        })
+        return
+      }
+
       if (message.type === 'inlineDiff.dismiss.response' && message.ok) {
         if (!inlineDiffDismissRequestIdsRef.current.has(message.requestId)) {
           return
@@ -2960,10 +3195,6 @@ export default function App() {
           ok: true,
           detail: `opencode=${message.payload.opencode?.version ?? message.payload.opencodeBinary}`
         })
-        if (message.payload.opencode?.warning) {
-          setRunStatus(message.payload.opencode.warning)
-        }
-
         setSelfcheck((current) => {
           const currentRid = current.health.lastRequestId
           if (currentRid && currentRid !== rid) {
@@ -2975,7 +3206,19 @@ export default function App() {
               ? { state: 'ok', detail: `count=${String(v.count)}`, lastRequestId: rid }
               : { state: 'error', detail: v.error, lastRequestId: rid }
 
+          const opencode = message.payload.opencode
+          const opencodeState: SelfcheckState = !opencode
+            ? { state: 'error', detail: 'Version unavailable', lastRequestId: rid }
+            : opencode.warning
+              ? { state: 'error', detail: opencode.warning, lastRequestId: rid }
+              : {
+                  state: 'ok',
+                  detail: opencode.version ? `version=${opencode.version}` : opencode.binary,
+                  lastRequestId: rid
+                }
+
           return {
+            opencode: opencodeState,
             health: message.payload.health.ok
               ? {
                   state: 'ok',
@@ -2999,6 +3242,18 @@ export default function App() {
         return
       }
 
+      if (message.type === 'run.snapshot' && message.ok) {
+        if (message.payload.activeRun && shouldRestoreActiveSnapshot(message.payload.activeRun, {
+          activeRequestId: activeRunRef.current?.requestId ?? null,
+          currentRevision: activeRunRevisionRef.current
+        })) {
+          restoreActiveRun(message.payload.activeRun)
+        } else if (message.payload.terminalRun) {
+          restoreTerminalRun(message.payload.terminalRun)
+        }
+        return
+      }
+
       if (message.type === 'run.event' && message.ok) {
         pushDebug({
           at: new Date().toISOString(),
@@ -3012,9 +3267,13 @@ export default function App() {
               : message.payload.event.type
         })
         const active = activeRunRef.current
-        if (!active || active.requestId !== message.requestId) {
+        if (!active || !shouldApplyRunEvent(message.requestId, message.payload.revision, {
+          activeRequestId: active?.requestId ?? null,
+          currentRevision: activeRunRevisionRef.current
+        })) {
           return
         }
+        activeRunRevisionRef.current = message.payload.revision
 
         if (message.payload.event.type === 'session') {
           active.sessionId = message.payload.event.sessionId
@@ -3352,6 +3611,20 @@ export default function App() {
           return
         }
 
+        if (inlineDiffResolveRequestIdsRef.current.has(message.requestId)) {
+          const pending = inlineDiffResolveRequestIdsRef.current.get(message.requestId)
+          inlineDiffResolveRequestIdsRef.current.delete(message.requestId)
+          if (pending) {
+            setResolvingReviewFileIds((current) => {
+              const next = new Set(current)
+              next.delete(pending.fileId)
+              return next
+            })
+          }
+          setRunStatus(`Review failed: ${message.error}`)
+          return
+        }
+
         if (inlineDiffDismissRequestIdsRef.current.has(message.requestId)) {
           inlineDiffDismissRequestIdsRef.current.delete(message.requestId)
           setRunStatus(`Dismiss review failed: ${message.error}`)
@@ -3369,19 +3642,16 @@ export default function App() {
           setIsRunning(false)
           setRunStatus(`Failed: ${message.error}`)
           const active = activeRunRef.current
-          if (active) {
-            const failedTranscript = applyLiveRunEvent(
-              {
-                type: 'error',
-                error: message.error
-              },
-              active.assistantIndex
-            )
-            if (active.sessionId) {
-              runErrorTranscriptsRef.current.set(active.sessionId, failedTranscript)
-            }
+          if (active?.previousTranscript) {
+            transcriptRef.current = active.previousTranscript
+            setTranscript(active.previousTranscript)
+          }
+          if (active?.submittedText) {
+            setComposerValue((current) => current.trim().length > 0 ? current : active.submittedText ?? current)
+            setComposerCursor(active.submittedText.length)
           }
           activeRunRef.current = null
+          activeRunRevisionRef.current = -1
           return
         }
 
@@ -3395,7 +3665,10 @@ export default function App() {
     window.addEventListener('message', onMessage)
     vscode.postMessage({
       type: 'webview.ready',
-      requestId
+      requestId,
+      payload: {
+        selectedSessionId: selectedSessionIdRef.current ?? undefined
+      }
     })
 
     return () => {
@@ -3414,6 +3687,8 @@ export default function App() {
     requestSessionExport,
     timelineDialogOpen,
     requestSessionTimeline,
+    restoreActiveRun,
+    restoreTerminalRun,
     selectSession
   ])
 
@@ -3444,12 +3719,6 @@ export default function App() {
     }
     requestModels()
   }, [loadingModels, modelDialogOpen, modelsLoaded, requestModels])
-
-  const selectedSessionIdRef = useRef<string | null>(null)
-
-  useEffect(() => {
-    selectedSessionIdRef.current = selectedSessionId
-  }, [selectedSessionId])
 
   const visibleModels = useMemo(() => {
     if (!selectedProviderId) {
@@ -3580,6 +3849,10 @@ export default function App() {
 
                   <div className="diagnostics-popover__status">
                     <div>
+                      opencode: {selfcheck.opencode.state}
+                      {selfcheck.opencode.detail ? ` (${selfcheck.opencode.detail})` : ''}
+                    </div>
+                    <div>
                       health: {selfcheck.health.state}
                       {selfcheck.health.detail ? ` (${selfcheck.health.detail})` : ''}
                     </div>
@@ -3694,7 +3967,10 @@ export default function App() {
       <RunStatusDetails
         status={runStatus}
         files={displayedEditedFiles}
+        reviewActiveRun={reviewActiveRun}
+        resolvingFileIds={resolvingReviewFileIds}
         onOpenFile={openEditedFile}
+        onResolveFile={resolveEditedFile}
         onDismissFile={dismissEditedFile}
       />
 

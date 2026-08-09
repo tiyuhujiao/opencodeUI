@@ -1,26 +1,19 @@
 import type {
-  ContextUsage,
-  RunStreamEvent,
   SessionSummary,
   TranscriptMessage,
-  TranscriptPartText,
-  TranscriptPartTool
+  TranscriptPartText
 } from '../../src/shared/protocol'
+import {
+  applyRunEventToTranscript,
+  preserveContextUsage
+} from '../../src/shared/runTranscript'
+
+export { applyRunEventToTranscript, preserveContextUsage }
 
 const RUN_ERROR_PREFIX = '运行错误：'
 
 export function clearSettledRunStatus(status: string | null): string | null {
   return status === 'Completed' || status === 'Stopped' || status === 'Failed' ? null : status
-}
-
-export function preserveContextUsage(previous: ContextUsage | undefined, incoming: ContextUsage): ContextUsage {
-  if (incoming.usedTokens === 0 && previous && previous.usedTokens > 0) {
-    return {
-      ...previous,
-      ...(incoming.model ? { model: incoming.model } : {})
-    }
-  }
-  return incoming
 }
 
 export function compactTranscript(messages: TranscriptMessage[]): TranscriptMessage[] {
@@ -208,93 +201,6 @@ export function mergeLocalRunErrors(local: TranscriptMessage[], exported: Transc
   return merged
 }
 
-export function applyRunEventToTranscript(messages: TranscriptMessage[], event: RunStreamEvent, assistantIndex: number): TranscriptMessage[] {
-  const target = messages[assistantIndex]
-  if (!target) {
-    return messages
-  }
-
-  const next = [...messages]
-  const nextTarget: TranscriptMessage = {
-    ...target,
-    parts: [...target.parts]
-  }
-  next[assistantIndex] = nextTarget
-
-  if (event.type === 'context.usage') {
-    const previousUsage = findLatestContextUsage(messages, assistantIndex)
-    nextTarget.contextUsage = preserveContextUsage(previousUsage, event.usage)
-    return next
-  }
-
-  if (event.type === 'part') {
-    if (event.part.type === 'tool') {
-      const raw = event.part.raw as { type?: unknown; part?: unknown } | null
-      const rawType = typeof raw?.type === 'string' ? raw.type : null
-      const part = (raw && typeof raw === 'object' ? (raw as { part?: unknown }).part : undefined) as
-        | { type?: unknown }
-        | undefined
-      const partType = typeof part?.type === 'string' ? part.type : null
-      if (rawType === 'step_start' || rawType === 'step_finish' || partType === 'step-start' || partType === 'step-finish') {
-        return messages
-      }
-    }
-
-    if (event.part.type === 'text') {
-      const previous = nextTarget.parts[nextTarget.parts.length - 1]
-      if (previous?.type === 'text') {
-        nextTarget.parts[nextTarget.parts.length - 1] = {
-          type: 'text',
-          text: `${previous.text}${event.part.text}`
-        }
-      } else {
-        nextTarget.parts.push(event.part)
-      }
-      return next
-    }
-
-    if (event.part.type === 'reasoning') {
-      const previous = nextTarget.parts[nextTarget.parts.length - 1]
-      if (previous?.type === 'reasoning') {
-        nextTarget.parts[nextTarget.parts.length - 1] = {
-          type: 'reasoning',
-          text: `${previous.text}${event.part.text}`,
-          raw: event.part.raw ?? previous.raw
-        }
-      } else {
-        nextTarget.parts.push(event.part)
-      }
-      return next
-    }
-
-    if (event.part.type === 'tool') {
-      const incomingKey = getToolPartUpdateKey(event.part)
-      if (incomingKey) {
-        const existingIndex = nextTarget.parts.findIndex((part) => part.type === 'tool' && getToolPartUpdateKey(part) === incomingKey)
-        if (existingIndex >= 0) {
-          nextTarget.parts[existingIndex] = mergeToolPart(nextTarget.parts[existingIndex] as TranscriptPartTool, event.part)
-          return next
-        }
-      }
-    }
-
-    nextTarget.parts.push(event.part)
-    return next
-  }
-
-  if (event.type === 'error') {
-    const errorPart: TranscriptPartText = {
-      type: 'text',
-      text: `\n\n${RUN_ERROR_PREFIX}${event.error}`
-    }
-    if (!nextTarget.parts.some((part) => isRunErrorPart(part) && part.text === errorPart.text)) {
-      nextTarget.parts.push(errorPart)
-    }
-  }
-
-  return next
-}
-
 function collectLocalRunErrors(messages: TranscriptMessage[]): Array<{ userTurn: number; parts: TranscriptPartText[] }> {
   const errors: Array<{ userTurn: number; parts: TranscriptPartText[] }> = []
   let userTurn = -1
@@ -353,77 +259,6 @@ function findTurnTarget(
 
 function isRunErrorPart(part: TranscriptMessage['parts'][number]): part is TranscriptPartText {
   return part.type === 'text' && part.text.trimStart().startsWith(RUN_ERROR_PREFIX)
-}
-
-function findLatestContextUsage(messages: TranscriptMessage[], beforeIndex: number): ContextUsage | undefined {
-  for (let index = beforeIndex; index >= 0; index -= 1) {
-    const usage = messages[index]?.contextUsage
-    if (usage) {
-      return usage
-    }
-  }
-  return undefined
-}
-
-function mergeToolPart(previous: TranscriptPartTool, next: TranscriptPartTool): TranscriptPartTool {
-  return {
-    type: 'tool',
-    toolName: next.toolName || previous.toolName,
-    status: next.status || previous.status,
-    raw: next.raw ?? previous.raw
-  }
-}
-
-function getToolPartUpdateKey(part: TranscriptPartTool): string | null {
-  const toolName = part.toolName.trim().toLowerCase()
-  const raw = toRecord(part.raw)
-  const nestedPart = toRecord(raw?.part)
-  const state = toRecord(nestedPart?.state) ?? toRecord(raw?.state)
-  const input = toRecord(state?.input)
-  const id = pickFirstString([
-    nestedPart?.id,
-    nestedPart?.partID,
-    nestedPart?.partId,
-    nestedPart?.toolCallID,
-    nestedPart?.toolCallId,
-    raw?.id,
-    raw?.partID,
-    raw?.partId,
-    raw?.toolCallID,
-    raw?.toolCallId,
-    state?.id,
-    state?.partID,
-    state?.partId,
-    state?.toolCallID,
-    state?.toolCallId
-  ])
-  if (id) {
-    return `${toolName}:id:${id}`
-  }
-
-  if (toolName !== 'task') {
-    return null
-  }
-
-  const semantic = pickFirstString([input?.description, input?.prompt])
-  return semantic ? `${toolName}:semantic:${semantic.toLowerCase().replace(/\s+/g, ' ')}` : null
-}
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null
-}
-
-function pickFirstString(values: unknown[]): string | null {
-  for (const value of values) {
-    if (typeof value !== 'string') {
-      continue
-    }
-    const trimmed = value.trim()
-    if (trimmed.length > 0) {
-      return trimmed
-    }
-  }
-  return null
 }
 
 function transcriptCompleteness(messages: TranscriptMessage[]): { userMessages: number; assistantTextMessages: number } {

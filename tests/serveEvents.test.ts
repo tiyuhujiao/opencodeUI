@@ -697,11 +697,62 @@ describe("run lifecycle serve event dispatch", () => {
 			{
 				type: "text",
 				text: "你",
+				streamKey: "message-1:text-1",
 			},
 			{
 				type: "text",
 				text: "好",
+				streamKey: "message-1:text-1",
 			},
+		]);
+	});
+
+	it("为连续多个 Thinking 保留各自的 messageID 与 partID", () => {
+		const posted: unknown[] = [];
+		const lifecycle = createLifecycle({ posted });
+		const streamState = createServeStreamState();
+
+		dispatchServeEvent(lifecycle, "request-1", "session-1", {
+			type: "message.updated",
+			properties: {
+				info: {
+					sessionID: "session-1",
+					role: "assistant",
+					id: "message-1",
+				},
+			},
+		}, streamState);
+
+		for (const [partID, delta] of [["reasoning-1", "**分析一**"], ["reasoning-2", "**分析二**"]] as const) {
+			dispatchServeEvent(lifecycle, "request-1", "session-1", {
+				type: "message.part.updated",
+				properties: {
+					part: {
+						id: partID,
+						sessionID: "session-1",
+						messageID: "message-1",
+						type: "reasoning",
+						text: "",
+					},
+				},
+			}, streamState);
+			dispatchServeEvent(lifecycle, "request-1", "session-1", {
+				type: "message.part.delta",
+				properties: {
+					sessionID: "session-1",
+					messageID: "message-1",
+					partID,
+					field: "text",
+					delta,
+				},
+			}, streamState);
+		}
+
+		expect(posted.map((message) => (
+			message as { payload: { event: { part: { type: string; text: string; streamKey?: string } } } }
+		).payload.event.part)).toEqual([
+			{ type: "reasoning", text: "**分析一**", streamKey: "message-1:reasoning-1" },
+			{ type: "reasoning", text: "**分析二**", streamKey: "message-1:reasoning-2" },
 		]);
 	});
 

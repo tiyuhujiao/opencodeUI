@@ -122,6 +122,70 @@ describe('webview transcript state helpers', () => {
     expect(applyRunEventToTranscript(streamed, stepEvent, 1)).toBe(streamed);
   });
 
+  it('只合并同一 streamKey 的 Thinking，并立即分开展示不同摘要', () => {
+    const base: TranscriptMessage[] = [
+      { role: 'user', parts: [{ type: 'text', text: 'hello' }] },
+      { role: 'assistant', parts: [] }
+    ];
+
+    const first = applyRunEventToTranscript(base, {
+      type: 'part',
+      part: { type: 'reasoning', text: '**分析', streamKey: 'msg-1:reasoning-1' }
+    }, 1);
+    const completedFirst = applyRunEventToTranscript(first, {
+      type: 'part',
+      part: { type: 'reasoning', text: '一**', streamKey: 'msg-1:reasoning-1' }
+    }, 1);
+    const second = applyRunEventToTranscript(completedFirst, {
+      type: 'part',
+      part: { type: 'reasoning', text: '**分析二**', streamKey: 'msg-1:reasoning-2' }
+    }, 1);
+
+    expect(second[1]?.parts).toEqual([
+      { type: 'reasoning', text: '**分析一**', streamKey: 'msg-1:reasoning-1' },
+      { type: 'reasoning', text: '**分析二**', streamKey: 'msg-1:reasoning-2' }
+    ]);
+  });
+
+  it('把迟到的 keyed Thinking 增量追加回原 part，并保持其他 part 引用稳定', () => {
+    const base: TranscriptMessage[] = [
+      { role: 'assistant', parts: [] }
+    ];
+    const first = applyRunEventToTranscript(base, {
+      type: 'part',
+      part: { type: 'reasoning', text: '分析', streamKey: 'msg-1:reasoning-1' }
+    }, 0);
+    const second = applyRunEventToTranscript(first, {
+      type: 'part',
+      part: { type: 'reasoning', text: '计划', streamKey: 'msg-1:reasoning-2' }
+    }, 0);
+    const secondPart = second[0]?.parts[1];
+    const lateFirstDelta = applyRunEventToTranscript(second, {
+      type: 'part',
+      part: { type: 'reasoning', text: '完成', streamKey: 'msg-1:reasoning-1' }
+    }, 0);
+
+    expect(lateFirstDelta[0]?.parts).toEqual([
+      { type: 'reasoning', text: '分析完成', streamKey: 'msg-1:reasoning-1' },
+      { type: 'reasoning', text: '计划', streamKey: 'msg-1:reasoning-2' }
+    ]);
+    expect(lateFirstDelta[0]?.parts[1]).toBe(secondPart);
+  });
+
+  it('保留无 streamKey 旧事件的相邻增量合并行为', () => {
+    const base: TranscriptMessage[] = [{ role: 'assistant', parts: [] }];
+    const first = applyRunEventToTranscript(base, {
+      type: 'part',
+      part: { type: 'reasoning', text: '旧事件' }
+    }, 0);
+    const second = applyRunEventToTranscript(first, {
+      type: 'part',
+      part: { type: 'reasoning', text: '增量' }
+    }, 0);
+
+    expect(second[0]?.parts).toEqual([{ type: 'reasoning', text: '旧事件增量' }]);
+  });
+
   it('导出 transcript 未返回图片时保留本地用户图片 part', () => {
     const local: TranscriptMessage[] = [
       {

@@ -1,83 +1,42 @@
-import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
 
-vi.mock('vscode', () => ({ workspace: {} }), { virtual: true });
-
-import { SidebarProvider } from '../src/webview/SidebarProvider';
-
-function createProvider() {
-  return new SidebarProvider(
-    { fsPath: '/ext' } as never,
-    {
-      get: () => undefined,
-      update: async () => {}
-    } as never,
-    'wsl',
-    'wsl'
-  );
-}
-
-describe('SidebarProvider hidden permission handling', () => {
-  it('侧边栏隐藏时自动拒绝挂起权限并停止当前 run', () => {
-    const provider = createProvider() as unknown as {
-      currentRun?: {
-        requestId: string;
-        controller: { abort: () => void };
-        eventAbort?: { abort: () => void };
-        pendingPermission?: {
-          type: 'permission';
-          permissionId: string;
-          sessionId: string;
-          toolName: string;
-          patterns: string[];
-        };
-      };
-      requestServeJson: (pathname: string, init: { method?: string; body?: string }) => Promise<boolean>;
-      stopCurrentRunForHiddenPermission: (webview: { postMessage: (message: unknown) => Thenable<boolean> }) => void;
-    };
-    const controllerAbort = vi.fn();
-    const eventAbort = vi.fn();
-    const posted: unknown[] = [];
-    const webview = {
-      postMessage: async (message: unknown) => {
-        posted.push(message);
-        return true;
-      }
-    };
-    provider.requestServeJson = vi.fn(async () => true);
-    provider.currentRun = {
-      requestId: 'run-1',
-      controller: { abort: controllerAbort },
-      eventAbort: { abort: eventAbort },
-      pendingPermission: {
-        type: 'permission',
-        permissionId: 'permission-1',
-        sessionId: 'session-1',
-        toolName: 'write',
-        patterns: ['/tmp/file']
-      }
-    };
-
-    provider.stopCurrentRunForHiddenPermission(webview);
-
-    expect(provider.requestServeJson).toHaveBeenCalledWith(
-      '/permission/permission-1/reply',
-      expect.objectContaining({
-        method: 'POST',
-        body: expect.stringContaining('"reply":"reject"')
-      })
+describe('SidebarProvider hidden run lifecycle', () => {
+  it('隐藏或销毁侧边栏不再拒绝 blocker、终止任务或清理运行中附件', () => {
+    const source = readFileSync(join(process.cwd(), 'src/webview/SidebarProvider.ts'), 'utf8');
+    const resolveView = source.slice(
+      source.indexOf('public resolveWebviewView'),
+      source.indexOf('public refresh()')
     );
-    expect(posted[0]).toMatchObject({
-      type: 'run.event',
-      requestId: 'run-1',
-      ok: true,
-      payload: {
-        event: {
-          type: 'stopped'
-        }
-      }
-    });
-    expect(controllerAbort).toHaveBeenCalledOnce();
-    expect(eventAbort).toHaveBeenCalledOnce();
-    expect(provider.currentRun).toBeUndefined();
+
+    expect(source).not.toContain('stopCurrentRunForHiddenPermission');
+    expect(source).toContain('const HIDDEN_WEBVIEW_RETENTION_MS = 2 * 60_000;');
+    expect(resolveView).toContain('this.scheduleHiddenViewExpiry(webviewView)');
+    expect(resolveView).toContain('this.postRunSnapshot(webviewView.webview)');
+    expect(resolveView).not.toContain('this.stopCurrentRun()');
+    expect(resolveView).not.toContain('this.cleanupAllTempFiles()');
+    expect(resolveView).not.toContain('/permission/');
+    expect(resolveView).not.toContain('/question/');
+  });
+
+  it('隐藏满两分钟后释放页面，空闲时停止自启 serve，返回后重新挂载扫描', () => {
+    const source = readFileSync(join(process.cwd(), 'src/webview/SidebarProvider.ts'), 'utf8');
+    const expiryStart = source.indexOf('private scheduleHiddenViewExpiry');
+    const expiryEnd = source.indexOf('private cancelHiddenViewExpiry', expiryStart);
+    const expiry = source.slice(expiryStart, expiryEnd);
+
+    expect(expiry).toContain('webviewView.webview.html = "";');
+    expect(expiry).toContain('this.clearHiddenViewCaches();');
+    expect(expiry).toMatch(/if \(!this\.currentRun\) \{\s*disposeServeManager\(\);/s);
+    expect(source).toContain('webviewView.webview.html = this.getHtml(webviewView.webview);');
+  });
+
+  it('注册 WebviewView 时保留隐藏上下文', () => {
+    const source = readFileSync(join(process.cwd(), 'src/extension.ts'), 'utf8');
+
+    expect(source).toMatch(
+      /registerWebviewViewProvider\('opencodeUI\.sidebar', sidebarProvider, \{\s*webviewOptions: \{\s*retainContextWhenHidden: true/s
+    );
   });
 });

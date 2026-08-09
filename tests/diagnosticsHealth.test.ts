@@ -10,6 +10,7 @@ describe('authoritative diagnostics health', () => {
     expect(provider).toContain('for (let attempt = 0; attempt < 2; attempt += 1)');
     expect(app).toContain("document.visibilityState === 'visible'");
     expect(app).toContain('window.setInterval(refresh, 30_000)');
-    expect(app).toContain("selfcheck.health.state === 'error'");
+    expect(app).toContain('const states = Object.values(selfcheck).map((entry) => entry.state)');
+    expect(app).toContain('opencode: {selfcheck.opencode.state}');
   });
 });

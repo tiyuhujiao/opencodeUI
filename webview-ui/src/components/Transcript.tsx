@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Check, ChevronRight, Copy, GitFork, LoaderCircle, Undo2 } from 'lucide-react'
 import { renderMarkdown } from '../markdown/renderMarkdown'
 import {
@@ -339,7 +339,7 @@ export function Transcript({
             key={getMessageKey(block.entry)}
             entry={block.entry}
             isStreamingBubble={false}
-            showProcess
+            contentMode="all"
             isRunning={isRunning}
             onUserToggle={pauseAutoScrollForUserAction}
             onOpenSubtask={onOpenSubtask}
@@ -360,7 +360,7 @@ export function Transcript({
 type MessageRowProps = {
   entry: IndexedTranscriptMessage
   isStreamingBubble: boolean
-  showProcess: boolean
+  contentMode: MessageContentMode
   isRunning: boolean
   onUserToggle: () => void
   onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
@@ -413,14 +413,34 @@ function AssistantTurnBlock({
     now,
     fallbackStartedAt: fallbackStartedAtRef.current
   })
-  const finalResponses = new Set(
+  const completedFinalResponseIndices = new Set(
     turn.responses
       .filter((entry) => !isActive && isFinalAssistantResponse(entry.message))
       .map((entry) => entry.messageIndex)
   )
-  const hasFinalResponse = finalResponses.size > 0
+  let lastAssistantMessageIndex = -1
+  for (let index = turn.responses.length - 1; index >= 0; index -= 1) {
+    if (turn.responses[index]?.message.role === 'assistant') {
+      lastAssistantMessageIndex = turn.responses[index].messageIndex
+      break
+    }
+  }
+  const finalResponseIndices = new Set<number>()
+  for (const entry of turn.responses) {
+    const canBeFinal = completedFinalResponseIndices.has(entry.messageIndex)
+      || (isActive && entry.messageIndex === lastAssistantMessageIndex)
+    if (!canBeFinal) {
+      continue
+    }
+    const visibleParts = compressVisibleParts(entry.message.parts.filter((part) => part.type !== 'unknown'))
+    const items = buildMessageRenderItems(visibleParts, entry.messageIndex, true)
+    if (items.some((item) => item.kind === 'part' && item.isFinalAnswer)) {
+      finalResponseIndices.add(entry.messageIndex)
+    }
+  }
+  const hasFinalResponse = finalResponseIndices.size > 0
   const hasProcessContent = turn.responses.some((entry) =>
-    messageHasProcessContent(entry, finalResponses.has(entry.messageIndex))
+    messageHasProcessContent(entry, finalResponseIndices.has(entry.messageIndex))
   )
   const expanded = hasProcessContent && (expandedOverride ?? (isActive || !hasFinalResponse))
   const durationLabel = timing.elapsedMs === null ? null : formatTurnDuration(timing.elapsedMs)
@@ -431,13 +451,6 @@ function AssistantTurnBlock({
     : durationLabel
       ? t('Worked for {duration}', { duration: durationLabel })
       : t('Worked')
-  let lastAssistantMessageIndex = -1
-  for (let index = turn.responses.length - 1; index >= 0; index -= 1) {
-    if (turn.responses[index]?.message.role === 'assistant') {
-      lastAssistantMessageIndex = turn.responses[index].messageIndex
-      break
-    }
-  }
 
   return (
     <section className={`assistant-turn${isActive ? ' assistant-turn--active' : ''}`} data-turn-key={turn.key}>
@@ -467,28 +480,47 @@ function AssistantTurnBlock({
         )}
         <div className="turn-work__divider" aria-hidden="true" />
       </div>
-      {turn.responses.map((entry) => {
-        const isFinalResponse = finalResponses.has(entry.messageIndex)
-        if (!isFinalResponse && !expanded) {
-          return null
-        }
-        return (
-          <MessageRow
-            key={getMessageKey(entry)}
-            entry={entry}
-            isStreamingBubble={isActive && entry.messageIndex === lastAssistantMessageIndex}
-            showProcess={expanded}
-            isRunning={isRunning}
-            onUserToggle={onUserToggle}
-            onOpenSubtask={onOpenSubtask}
-            onForkMessage={onForkMessage}
-            revertingMessageId={null}
-            forkingMessageId={forkingMessageId}
-            copiedMessageKey={copiedMessageKey}
-            copyAssistantMessage={copyAssistantMessage}
-          />
-        )
-      })}
+      {hasProcessContent ? (
+        <div
+          className={`assistant-turn__process${expanded ? ' is-expanded' : ''}`}
+          aria-hidden={!expanded}
+        >
+          <div className="assistant-turn__process-inner">
+            {turn.responses.map((entry) => (
+              <MessageRow
+                key={`${getMessageKey(entry)}-process`}
+                entry={entry}
+                isStreamingBubble={isActive && entry.messageIndex === lastAssistantMessageIndex}
+                contentMode={finalResponseIndices.has(entry.messageIndex) ? 'process' : 'all'}
+                isRunning={isRunning}
+                onUserToggle={onUserToggle}
+                onOpenSubtask={onOpenSubtask}
+                onForkMessage={onForkMessage}
+                revertingMessageId={null}
+                forkingMessageId={forkingMessageId}
+                copiedMessageKey={copiedMessageKey}
+                copyAssistantMessage={copyAssistantMessage}
+              />
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {turn.responses.map((entry) => finalResponseIndices.has(entry.messageIndex) ? (
+        <MessageRow
+          key={`${getMessageKey(entry)}-final`}
+          entry={entry}
+          isStreamingBubble={isActive && entry.messageIndex === lastAssistantMessageIndex}
+          contentMode="final"
+          isRunning={isRunning}
+          onUserToggle={onUserToggle}
+          onOpenSubtask={onOpenSubtask}
+          onForkMessage={onForkMessage}
+          revertingMessageId={null}
+          forkingMessageId={forkingMessageId}
+          copiedMessageKey={copiedMessageKey}
+          copyAssistantMessage={copyAssistantMessage}
+        />
+      ) : null)}
     </section>
   )
 }
@@ -496,7 +528,7 @@ function AssistantTurnBlock({
 function MessageRow({
   entry,
   isStreamingBubble,
-  showProcess,
+  contentMode,
   isRunning,
   onUserToggle,
   onOpenSubtask,
@@ -515,17 +547,18 @@ function MessageRow({
   }
 
   const isFinalResponse = !isStreamingBubble && isFinalAssistantResponse(message)
-  const renderItems = buildMessageRenderItems(visibleParts, messageIndex, isFinalResponse)
-  if (renderItems.length === 0) {
+  const renderItems = buildMessageRenderItems(visibleParts, messageIndex, isFinalResponse || contentMode !== 'all')
+  const visibleItems = selectMessageRenderItems(renderItems, contentMode)
+  if (visibleItems.length === 0) {
     return null
   }
 
-  const currentActivityKey = isStreamingBubble && renderItems[renderItems.length - 1]?.kind === 'activity'
-    ? renderItems[renderItems.length - 1]?.key
+  const currentActivityKey = isStreamingBubble && visibleItems[visibleItems.length - 1]?.kind === 'activity'
+    ? visibleItems[visibleItems.length - 1]?.key
     : null
   const messageId = message.id
   const messageKey = getMessageKey(entry)
-  const assistantCopyText = isFinalResponse ? getAssistantCopyText(message.parts) : ''
+  const assistantCopyText = isFinalResponse && contentMode !== 'process' ? getAssistantCopyText(message.parts) : ''
   const canRevert = message.role === 'user' && Boolean(messageId && onRevertMessage)
   const canFork = isFinalResponse && Boolean(messageId && onForkMessage)
   const copied = copiedMessageKey === messageKey
@@ -535,8 +568,7 @@ function MessageRow({
       <div className={`msg-stack msg-stack--${message.role}`}>
         <article className={`msg msg--${message.role}${isStreamingBubble ? ' is-streaming' : ''}`}>
           <MessageContent
-            items={renderItems}
-            showProcess={showProcess}
+            items={visibleItems}
             currentActivityKey={currentActivityKey}
             onUserToggle={onUserToggle}
             onOpenSubtask={onOpenSubtask}
@@ -604,16 +636,15 @@ function MessageRow({
 }
 
 function getMessageKey(entry: IndexedTranscriptMessage): string {
-  return entry.message.id ?? `${entry.message.role}-${String(entry.messageIndex)}`
+  return `${entry.message.role}-${String(entry.messageIndex)}`
 }
 
-function messageHasProcessContent(entry: IndexedTranscriptMessage, isFinalResponse: boolean): boolean {
+type MessageContentMode = 'all' | 'process' | 'final'
+
+function messageHasProcessContent(entry: IndexedTranscriptMessage, hasFinalAnswer: boolean): boolean {
   const visibleParts = compressVisibleParts(entry.message.parts.filter((part) => part.type !== 'unknown'))
-  const items = buildMessageRenderItems(visibleParts, entry.messageIndex, isFinalResponse)
-  if (!isFinalResponse) {
-    return items.length > 0
-  }
-  return items.findIndex((item) => item.kind === 'part' && item.isFinalAnswer) > 0
+  const items = buildMessageRenderItems(visibleParts, entry.messageIndex, hasFinalAnswer)
+  return selectMessageRenderItems(items, hasFinalAnswer ? 'process' : 'all').length > 0
 }
 
 export function getAssistantCopyText(parts: TranscriptPart[]): string {
@@ -682,25 +713,31 @@ type MessageRenderItem =
 
 function MessageContent({
   items,
-  showProcess,
   currentActivityKey,
   onUserToggle,
   onOpenSubtask
 }: {
   items: MessageRenderItem[]
-  showProcess: boolean
   currentActivityKey: string | null
   onUserToggle: () => void
   onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
 }) {
-  const finalAnswerIndex = items.findIndex((item) => item.kind === 'part' && item.isFinalAnswer)
-  const visibleItems = !showProcess && finalAnswerIndex >= 0 ? items.slice(finalAnswerIndex) : items
-
   return (
     <div className="msg__content">
-      {visibleItems.map((item) => renderMessageItem(item, { currentActivityKey, onUserToggle, onOpenSubtask }))}
+      {items.map((item) => renderMessageItem(item, { currentActivityKey, onUserToggle, onOpenSubtask }))}
     </div>
   )
+}
+
+function selectMessageRenderItems(items: MessageRenderItem[], mode: MessageContentMode): MessageRenderItem[] {
+  if (mode === 'all') {
+    return items
+  }
+  const finalAnswerIndex = items.findIndex((item) => item.kind === 'part' && item.isFinalAnswer)
+  if (finalAnswerIndex < 0) {
+    return mode === 'process' ? items : []
+  }
+  return mode === 'process' ? items.slice(0, finalAnswerIndex) : items.slice(finalAnswerIndex)
 }
 
 function renderMessageItem(
@@ -726,11 +763,10 @@ function renderMessageItem(
   const part = item.part
   if (part.type === 'text') {
     return (
-      <div
+      <MarkdownTextBlock
         key={item.key}
-        className={`md-body${item.isFinalAnswer ? ' md-body--final-answer' : ''}`}
-        // biome-ignore lint/security/noDangerouslySetInnerHtml: Markdown rendering is sanitized.
-        dangerouslySetInnerHTML={{ __html: renderMarkdown(part.text) }}
+        text={part.text}
+        isFinalAnswer={item.isFinalAnswer === true}
       />
     )
   }
@@ -745,6 +781,22 @@ function renderMessageItem(
 
   return null
 }
+
+const MarkdownTextBlock = memo(function MarkdownTextBlock({
+  text,
+  isFinalAnswer
+}: {
+  text: string
+  isFinalAnswer: boolean
+}) {
+  return (
+    <div
+      className={`md-body${isFinalAnswer ? ' md-body--final-answer' : ''}`}
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: Markdown rendering is sanitized.
+      dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }}
+    />
+  )
+})
 
 function buildMessageRenderItems(parts: TranscriptPart[], messageIndex: number, markFinalAnswer: boolean): MessageRenderItem[] {
   const items: MessageRenderItem[] = []
@@ -765,7 +817,7 @@ function buildMessageRenderItems(parts: TranscriptPart[], messageIndex: number, 
   }
 
   parts.forEach((part, partIndex) => {
-    const key = `${String(messageIndex)}-${String(partIndex)}`
+    const key = getPartRenderKey(part, messageIndex, partIndex)
     if (part.type === 'tool') {
       if (part.toolName === 'status') {
         return
@@ -786,6 +838,13 @@ function buildMessageRenderItems(parts: TranscriptPart[], messageIndex: number, 
 
   flushActivity()
   return markFinalAnswer ? markFinalAnswerItem(items) : items
+}
+
+function getPartRenderKey(part: TranscriptPart, messageIndex: number, partIndex: number): string {
+  if ((part.type === 'text' || part.type === 'reasoning') && part.streamKey) {
+    return `${String(messageIndex)}-${part.type}-${part.streamKey}`
+  }
+  return `${String(messageIndex)}-${String(partIndex)}`
 }
 
 function markFinalAnswerItem(items: MessageRenderItem[]): MessageRenderItem[] {
@@ -861,7 +920,7 @@ function ActivityBlock({
   )
 }
 
-function ActivityEntryBlock({
+const ActivityEntryBlock = memo(function ActivityEntryBlock({
   entry,
   onUserToggle,
   onOpenSubtask
@@ -914,7 +973,12 @@ function ActivityEntryBlock({
   }
 
   return null
-}
+}, (previous, next) => (
+  previous.entry.key === next.entry.key
+  && previous.entry.part === next.entry.part
+  && previous.onUserToggle === next.onUserToggle
+  && previous.onOpenSubtask === next.onOpenSubtask
+))
 
 function getActivitySummary(entries: ActivityEntry[], t: Translate) {
   const thinkingEntries = entries.filter((entry) => entry.part.type === 'reasoning' && entry.part.text.trim().length > 0)

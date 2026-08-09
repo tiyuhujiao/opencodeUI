@@ -52,6 +52,7 @@ const opencodeCompatibility_1 = require("../bridge/opencodeCompatibility");
 const diagnostics_1 = require("../diagnostics");
 const parsers_1 = require("../bridge/parsers");
 const protocol_1 = require("../shared/protocol");
+const runTranscript_1 = require("../shared/runTranscript");
 const runLifecycle_1 = require("./runLifecycle");
 const sessionMarkdown_1 = require("../sessionMarkdown");
 const providerSettings_1 = require("../providerSettings");
@@ -61,6 +62,9 @@ const SESSION_EXPORT_CACHE_TTL_MS = 8000;
 const EMPTY_SESSION_EXPORT_CACHE_TTL_MS = 750;
 const MODELS_CACHE_TTL_MS = 15 * 60000;
 const PROVIDER_SETTINGS_CATALOG_TTL_MS = 5 * 60000;
+const OPENCODE_COMPATIBILITY_CACHE_TTL_MS = 15 * 60000;
+const OPENCODE_COMPATIBILITY_FAILURE_TTL_MS = 2 * 60000;
+const HIDDEN_WEBVIEW_RETENTION_MS = 2 * 60000;
 const TEMPFILE_MAX_BYTES = 10 * 1024 * 1024;
 const TEMPFILE_MAX_BASE64_CHARS = Math.ceil(TEMPFILE_MAX_BYTES / 3) * 4 + 4;
 const TEMPFILE_TTL_MS = 30 * 60000;
@@ -80,6 +84,8 @@ class SidebarProvider {
         this.inlineDiffStateSubscription = this.inlineDiff.onDidChange((snapshot) => this.postInlineDiffState(snapshot));
     }
     dispose() {
+        this.cancelHiddenViewExpiry();
+        this.expiredHiddenView = undefined;
         this.inlineDiffStateSubscription.dispose();
         this.inlineDiff.dispose();
         this.cleanupAllTempFiles();
@@ -163,7 +169,10 @@ class SidebarProvider {
         });
     }
     resolveWebviewView(webviewView) {
+        this.cancelHiddenViewExpiry();
         this.view = webviewView;
+        this.runEventWebview = undefined;
+        this.expiredHiddenView = undefined;
         webviewView.webview.options = {
             enableScripts: true,
             localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "media")],
@@ -175,22 +184,77 @@ class SidebarProvider {
             this.handleWebviewMessage(webviewView.webview, message);
         });
         const visibilityDisposable = webviewView.onDidChangeVisibility?.(() => {
-            if (!webviewView.visible) {
-                this.stopCurrentRunForHiddenPermission(webviewView.webview);
+            if (this.view !== webviewView) {
+                return;
             }
+            if (!webviewView.visible) {
+                this.scheduleHiddenViewExpiry(webviewView);
+                return;
+            }
+            this.cancelHiddenViewExpiry();
+            if (this.expiredHiddenView === webviewView) {
+                this.expiredHiddenView = undefined;
+                this.runEventWebview = undefined;
+                webviewView.webview.html = this.getHtml(webviewView.webview);
+                return;
+            }
+            this.runEventWebview = webviewView.webview;
+            this.postRunSnapshot(webviewView.webview);
         });
         webviewView.onDidDispose(() => {
             visibilityDisposable?.dispose();
-            this.stopCurrentRunForHiddenPermission(webviewView.webview);
-            this.stopCurrentRun();
-            this.cleanupAllTempFiles();
+            if (this.view === webviewView) {
+                this.cancelHiddenViewExpiry();
+                this.expiredHiddenView = undefined;
+                this.view = undefined;
+            }
+            if (this.runEventWebview === webviewView.webview) {
+                this.runEventWebview = undefined;
+            }
         });
         webviewView.webview.html = this.getHtml(webviewView.webview);
     }
     refresh() {
         if (this.view) {
+            this.cancelHiddenViewExpiry();
+            this.expiredHiddenView = undefined;
+            this.runEventWebview = undefined;
             this.view.webview.html = this.getHtml(this.view.webview);
+            if (!this.view.visible) {
+                this.scheduleHiddenViewExpiry(this.view);
+            }
         }
+    }
+    scheduleHiddenViewExpiry(webviewView) {
+        this.cancelHiddenViewExpiry();
+        this.hiddenViewExpiryTimer = setTimeout(() => {
+            this.hiddenViewExpiryTimer = undefined;
+            if (this.view !== webviewView || webviewView.visible) {
+                return;
+            }
+            this.expiredHiddenView = webviewView;
+            if (this.runEventWebview === webviewView.webview) {
+                this.runEventWebview = undefined;
+            }
+            this.clearHiddenViewCaches();
+            webviewView.webview.html = "";
+            if (!this.currentRun) {
+                (0, serveManager_1.disposeServeManager)();
+            }
+        }, HIDDEN_WEBVIEW_RETENTION_MS);
+    }
+    cancelHiddenViewExpiry() {
+        if (!this.hiddenViewExpiryTimer) {
+            return;
+        }
+        clearTimeout(this.hiddenViewExpiryTimer);
+        this.hiddenViewExpiryTimer = undefined;
+    }
+    clearHiddenViewCaches() {
+        this.sessionExportCache.clear();
+        this.modelsCache.clear();
+        this.providerSettingsCatalogCache = undefined;
+        this.opencodeCompatibilityCache = undefined;
     }
     getNonce() {
         return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
@@ -229,7 +293,7 @@ class SidebarProvider {
             }
             switch (message.type) {
                 case "webview.ready": {
-                    void this.handleWebviewReadyRequest(webview, message.requestId);
+                    void this.handleWebviewReadyRequest(webview, message.requestId, message.payload?.selectedSessionId);
                     return;
                 }
                 case "sessions.list":
@@ -276,6 +340,9 @@ class SidebarProvider {
                     return;
                 case "inlineDiff.open":
                     void this.handleInlineDiffOpenRequest(webview, message.requestId, message.payload.fileId);
+                    return;
+                case "inlineDiff.resolve":
+                    void this.handleInlineDiffResolveRequest(webview, message.requestId, message.payload);
                     return;
                 case "inlineDiff.dismiss":
                     this.handleInlineDiffDismissRequest(webview, message.requestId, message.payload.fileId);
@@ -359,18 +426,30 @@ class SidebarProvider {
             this.respondError(webview, requestId, error, "处理消息失败。");
         }
     }
-    async handleWebviewReadyRequest(webview, requestId) {
+    async handleWebviewReadyRequest(webview, requestId, selectedSessionId) {
         const lastSelectedModel = this.workspaceState.get(SidebarProvider.WORKSPACE_KEY_LAST_SELECTED_MODEL);
         const lastSelectedAgent = this.workspaceState.get(SidebarProvider.WORKSPACE_KEY_LAST_SELECTED_AGENT);
-        const opencode = this.isSupportedHost()
-            ? await this.getOpencodeCompatibility()
-            : undefined;
+        let opencode;
+        if (this.isSupportedHost()) {
+            const env = (0, opencodeEnv_1.withOpencodeBinInPath)();
+            const binary = (0, opencodeEnv_1.resolveOpencodeBinary)(env);
+            const health = await this.checkServeHealth();
+            opencode = health.ok && health.version
+                ? await this.getOpencodeCompatibility(env, this.getDefaultCwd(), health.version)
+                : this.getCachedOpencodeCompatibility(binary);
+        }
         if (opencode?.warning) {
             (0, diagnostics_1.logWarn)(opencode.warning);
         }
         else if (opencode?.version) {
             (0, diagnostics_1.logInfo)(`opencode ${opencode.version} detected at ${opencode.binary}`);
         }
+        const activeRun = this.getActiveRunSnapshot();
+        const terminalRun = !activeRun &&
+            this.lastTerminalRun &&
+            (!selectedSessionId || this.lastTerminalRun.sessionId === selectedSessionId)
+            ? this.cloneTerminalRunSnapshot(this.lastTerminalRun)
+            : undefined;
         this.respond(webview, {
             type: "webview.ready.ack",
             requestId,
@@ -383,9 +462,83 @@ class SidebarProvider {
                 lastSelectedModel,
                 lastSelectedAgent,
                 opencode,
+                ...(activeRun ? { activeRun } : {}),
+                ...(terminalRun ? { terminalRun } : {}),
             },
         });
+        if (this.view?.webview === webview) {
+            this.runEventWebview = webview;
+        }
         this.postInlineDiffState(this.inlineDiff.getSnapshot(), webview);
+    }
+    postRunSnapshot(webview) {
+        const activeRun = this.getActiveRunSnapshot();
+        const terminalRun = !activeRun && this.lastTerminalRun
+            ? this.cloneTerminalRunSnapshot(this.lastTerminalRun)
+            : undefined;
+        this.respond(webview, {
+            type: "run.snapshot",
+            requestId: `run-snapshot-${Date.now().toString(36)}`,
+            ok: true,
+            payload: {
+                ...(activeRun ? { activeRun } : {}),
+                ...(terminalRun ? { terminalRun } : {}),
+            },
+        });
+    }
+    getActiveRunSnapshot() {
+        const run = this.currentRun;
+        if (!run) {
+            return undefined;
+        }
+        return {
+            requestId: run.requestId,
+            revision: run.revision,
+            ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+            startedAt: run.startedAt,
+            promptText: run.promptText,
+            placeholderTitle: run.placeholderTitle,
+            startedNewSession: run.startedNewSession,
+            transcript: run.recoveryTranscript.map((message) => ({
+                ...message,
+                parts: message.parts.map((part) => ({ ...part })),
+                ...(message.contextUsage
+                    ? { contextUsage: { ...message.contextUsage } }
+                    : {}),
+            })),
+            assistantIndex: run.recoveryAssistantIndex,
+            ...(run.pendingPermission
+                ? {
+                    pendingPermission: {
+                        ...run.pendingPermission,
+                        patterns: [...run.pendingPermission.patterns],
+                    },
+                }
+                : {}),
+            ...(run.pendingQuestion
+                ? {
+                    pendingQuestion: {
+                        ...run.pendingQuestion,
+                        questions: run.pendingQuestion.questions.map((question) => ({
+                            ...question,
+                            options: question.options.map((option) => ({ ...option })),
+                        })),
+                    },
+                }
+                : {}),
+        };
+    }
+    cloneTerminalRunSnapshot(snapshot) {
+        return {
+            ...snapshot,
+            transcript: snapshot.transcript.map((message) => ({
+                ...message,
+                parts: message.parts.map((part) => ({ ...part })),
+                ...(message.contextUsage
+                    ? { contextUsage: { ...message.contextUsage } }
+                    : {}),
+            })),
+        };
     }
     async handleSessionsListRequest(webview, requestId) {
         try {
@@ -787,6 +940,23 @@ class SidebarProvider {
             this.respondError(webview, requestId, error, "打开 Inline Diff 失败。");
         }
     }
+    async handleInlineDiffResolveRequest(webview, requestId, input) {
+        try {
+            const result = await this.inlineDiff.resolve(input);
+            if (!result.ok) {
+                throw new Error(result.message);
+            }
+            this.respond(webview, {
+                type: "inlineDiff.resolve.response",
+                requestId,
+                ok: true,
+                payload: { fileId: input.fileId, decision: input.decision },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "处理 Inline Diff 审阅失败。");
+        }
+    }
     handleInlineDiffDismissRequest(webview, requestId, fileId) {
         this.inlineDiff.dismiss(fileId);
         this.respond(webview, {
@@ -806,8 +976,10 @@ class SidebarProvider {
             ok: true,
             payload: {
                 revision: snapshot.revision,
+                activeRun: snapshot.activeRun,
                 files: snapshot.files.map((file) => ({
                     fileId: file.fileId,
+                    revision: file.revision,
                     path: file.path,
                     displayPath: file.displayPath,
                     additions: file.additions,
@@ -827,6 +999,7 @@ class SidebarProvider {
             });
             if (this.currentRun?.pendingPermission?.permissionId === permissionId) {
                 this.currentRun.pendingPermission = undefined;
+                this.currentRun.revision += 1;
             }
             this.respond(webview, {
                 type: "permission.reply.response",
@@ -850,6 +1023,7 @@ class SidebarProvider {
             });
             if (this.currentRun?.pendingQuestion?.questionId === questionId) {
                 this.currentRun.pendingQuestion = undefined;
+                this.currentRun.revision += 1;
             }
             this.respond(webview, {
                 type: "question.reply.response",
@@ -869,6 +1043,7 @@ class SidebarProvider {
             });
             if (this.currentRun?.pendingQuestion?.questionId === questionId) {
                 this.currentRun.pendingQuestion = undefined;
+                this.currentRun.revision += 1;
             }
             this.respond(webview, {
                 type: "question.reject.response",
@@ -1551,8 +1726,7 @@ class SidebarProvider {
     async handleSelfcheckRunRequest(webview, requestId) {
         const env = (0, opencodeEnv_1.withOpencodeBinInPath)();
         const cwd = this.getDefaultCwd();
-        const [opencode, health, sessions, models, agents] = await Promise.all([
-            this.getOpencodeCompatibility(env, cwd),
+        const [health, sessions, models, agents] = await Promise.all([
             this.checkServeHealth(),
             this.safeCount(async () => {
                 const result = await (0, opencodeCli_1.sessionListJson)({ env, cwd });
@@ -1570,6 +1744,7 @@ class SidebarProvider {
                 return parsed.length;
             }),
         ]);
+        const opencode = await this.getOpencodeCompatibility(env, cwd, health.ok ? health.version : undefined);
         const opencodeBinary = opencode.binary;
         this.respond(webview, {
             type: "selfcheck.response",
@@ -1607,17 +1782,63 @@ class SidebarProvider {
         }
         return { ok: false, error: lastError };
     }
-    async getOpencodeCompatibility(env = (0, opencodeEnv_1.withOpencodeBinInPath)(), cwd = this.getDefaultCwd()) {
+    async getOpencodeCompatibility(env = (0, opencodeEnv_1.withOpencodeBinInPath)(), cwd = this.getDefaultCwd(), versionHint) {
         const binary = (0, opencodeEnv_1.resolveOpencodeBinary)(env);
+        const hintedVersion = versionHint
+            ? (0, opencodeCompatibility_1.parseOpencodeVersionOutput)(versionHint)
+            : undefined;
+        if (hintedVersion) {
+            const value = (0, opencodeCompatibility_1.buildOpencodeCompatibility)(binary, hintedVersion);
+            this.cacheOpencodeCompatibility(binary, value, OPENCODE_COMPATIBILITY_CACHE_TTL_MS);
+            return value;
+        }
+        const cached = this.getCachedOpencodeCompatibility(binary);
+        if (cached) {
+            return cached;
+        }
+        if (this.opencodeCompatibilityInFlight?.binary === binary) {
+            return this.opencodeCompatibilityInFlight.promise;
+        }
+        const promise = (async () => {
+            try {
+                const result = await (0, opencodeCli_1.opencodeVersion)({ env, cwd, timeoutMs: 5000 });
+                const version = (0, opencodeCompatibility_1.parseOpencodeVersionOutput)(result.stdout, result.stderr);
+                const value = (0, opencodeCompatibility_1.buildOpencodeCompatibility)(binary, version);
+                this.cacheOpencodeCompatibility(binary, value, version
+                    ? OPENCODE_COMPATIBILITY_CACHE_TTL_MS
+                    : OPENCODE_COMPATIBILITY_FAILURE_TTL_MS);
+                return value;
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                const value = (0, opencodeCompatibility_1.buildOpencodeCompatibility)(binary, undefined, `无法检测 opencode 版本：${message}`);
+                this.cacheOpencodeCompatibility(binary, value, OPENCODE_COMPATIBILITY_FAILURE_TTL_MS);
+                return value;
+            }
+        })();
+        this.opencodeCompatibilityInFlight = { binary, promise };
         try {
-            const result = await (0, opencodeCli_1.opencodeVersion)({ env, cwd, timeoutMs: 5000 });
-            const version = (0, opencodeCompatibility_1.parseOpencodeVersionOutput)(result.stdout, result.stderr);
-            return (0, opencodeCompatibility_1.buildOpencodeCompatibility)(binary, version);
+            return await promise;
         }
-        catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return (0, opencodeCompatibility_1.buildOpencodeCompatibility)(binary, undefined, `无法检测 opencode 版本：${message}`);
+        finally {
+            if (this.opencodeCompatibilityInFlight?.promise === promise) {
+                this.opencodeCompatibilityInFlight = undefined;
+            }
         }
+    }
+    getCachedOpencodeCompatibility(binary) {
+        const cached = this.opencodeCompatibilityCache;
+        if (!cached || cached.binary !== binary || cached.expiresAt <= Date.now()) {
+            return undefined;
+        }
+        return cached.value;
+    }
+    cacheOpencodeCompatibility(binary, value, ttlMs) {
+        this.opencodeCompatibilityCache = {
+            binary,
+            value,
+            expiresAt: Date.now() + ttlMs,
+        };
     }
     async safeCount(run) {
         try {
@@ -1648,8 +1869,41 @@ class SidebarProvider {
             });
             return;
         }
+        if (payload.sessionId) {
+            try {
+                const statuses = await this.requestServeJson("/session/status");
+                const status = statuses[payload.sessionId];
+                if (status?.type === "busy" || status?.type === "retry") {
+                    this.respond(webview, {
+                        type: "webview.error",
+                        requestId,
+                        ok: false,
+                        error: "当前会话仍有任务在运行，消息未发送，请先返回该任务或等待它完成。",
+                    });
+                    return;
+                }
+            }
+            catch (error) {
+                this.respondError(webview, requestId, error, "发送前无法确认会话状态。");
+                return;
+            }
+        }
         const controller = new AbortController();
         const eventAbort = new AbortController();
+        const startedAt = Date.now();
+        const placeholderTitle = resolveNewSessionTitle(payload);
+        const recoveryTranscript = [
+            {
+                created: startedAt,
+                role: "user",
+                parts: [{ type: "text", text: payload.message }],
+            },
+            {
+                created: startedAt,
+                role: "assistant",
+                parts: [],
+            },
+        ];
         try {
             await Promise.all([
                 this.workspaceState.update(SidebarProvider.WORKSPACE_KEY_LAST_SELECTED_MODEL, payload.model),
@@ -1661,7 +1915,19 @@ class SidebarProvider {
             (0, diagnostics_1.logWarn)(`persist selection failed: ${message}`);
             console.warn("[opencode-ui] persist selection failed:", message);
         }
-        this.currentRun = { requestId, controller, eventAbort };
+        this.currentRun = {
+            requestId,
+            revision: 0,
+            controller,
+            eventAbort,
+            startedAt,
+            promptText: payload.message,
+            placeholderTitle,
+            startedNewSession: !payload.sessionId,
+            recoveryTranscript,
+            recoveryAssistantIndex: 1,
+        };
+        this.lastTerminalRun = undefined;
         this.respond(webview, { type: "run.start.response", requestId, ok: true });
         let watchdog;
         let inlineDiffRun;
@@ -1684,6 +1950,10 @@ class SidebarProvider {
             this.invalidateSessionExportCache(sessionId);
             this.currentRun.sessionId = sessionId;
             this.respondRunEvent(webview, requestId, { type: "session", sessionId });
+            await this.prependSessionHistoryToCurrentRun(requestId, sessionId);
+            if (this.currentRun?.requestId !== requestId) {
+                return;
+            }
             inlineDiffRun = this.inlineDiff.beginRun({
                 runId: requestId,
                 sessionId,
@@ -1698,7 +1968,6 @@ class SidebarProvider {
             if (this.currentRun?.requestId === requestId) {
                 this.currentRun.blockerPoll = blockerPoll;
             }
-            const startedAt = Date.now();
             watchdog = setTimeout(() => {
                 if (!this.currentRun || this.currentRun.requestId !== requestId) {
                     return;
@@ -1748,13 +2017,12 @@ class SidebarProvider {
                 return;
             }
             if (completionResult === "stopped") {
-                this.clearCurrentRunForRequest(requestId);
                 this.respondRunEvent(webview, requestId, { type: "stopped" });
+                this.clearCurrentRunForRequest(requestId);
                 finishInlineDiff("stopped");
                 return;
             }
             if (completionResult instanceof Error) {
-                this.clearCurrentRunForRequest(requestId);
                 if (completionResult.name === "AbortError") {
                     this.respondRunEvent(webview, requestId, { type: "stopped" });
                     finishInlineDiff("stopped");
@@ -1766,10 +2034,11 @@ class SidebarProvider {
                     });
                     finishInlineDiff("failed");
                 }
+                this.clearCurrentRunForRequest(requestId);
                 return;
             }
-            this.clearCurrentRunForRequest(requestId);
             this.respondRunEvent(webview, requestId, { type: "done" });
+            this.clearCurrentRunForRequest(requestId);
             finishInlineDiff("done");
         }
         catch (error) {
@@ -1778,7 +2047,6 @@ class SidebarProvider {
             }
             const isAborted = (error instanceof opencodeCli_1.OpencodeCliError && error.code === "ABORTED") ||
                 (error instanceof Error && error.name === "AbortError");
-            this.clearCurrentRunForRequest(requestId);
             if (isAborted) {
                 this.respondRunEvent(webview, requestId, { type: "stopped" });
                 finishInlineDiff("stopped");
@@ -1791,6 +2059,7 @@ class SidebarProvider {
                 });
                 finishInlineDiff("failed");
             }
+            this.clearCurrentRunForRequest(requestId);
         }
         finally {
             if (watchdog) {
@@ -1805,6 +2074,25 @@ class SidebarProvider {
             if (!inlineDiffFinished) {
                 finishInlineDiff("stopped");
             }
+        }
+    }
+    async prependSessionHistoryToCurrentRun(requestId, sessionId) {
+        try {
+            const rawMessages = await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}/message`);
+            const history = (0, parsers_1.liveMessagesToTranscript)(rawMessages);
+            const run = this.currentRun;
+            if (!run || run.requestId !== requestId) {
+                return;
+            }
+            const currentTurn = run.recoveryTranscript.slice(-2);
+            run.recoveryTranscript = [...history, ...currentTurn];
+            run.recoveryAssistantIndex = run.recoveryTranscript.length - 1;
+            run.revision += 1;
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            (0, diagnostics_1.logWarn)(`seed active run transcript failed: ${message}`);
+            console.warn("[opencode-ui] seed active run transcript failed:", message);
         }
     }
     async handleRunStopRequest(webview, requestId) {
@@ -1837,48 +2125,6 @@ class SidebarProvider {
         }
         finally {
             clearTimeout(timer);
-        }
-    }
-    stopCurrentRunForHiddenPermission(webview) {
-        const run = this.currentRun;
-        const pendingPermission = run?.pendingPermission;
-        const pendingQuestion = run?.pendingQuestion;
-        if (!run || (!pendingPermission && !pendingQuestion)) {
-            return;
-        }
-        if (run.sessionId) {
-            void this.abortServeSession(run.sessionId);
-        }
-        if (pendingPermission) {
-            run.pendingPermission = undefined;
-            void this.requestServeJson(`/permission/${encodeURIComponent(pendingPermission.permissionId)}/reply`, {
-                method: "POST",
-                body: JSON.stringify({
-                    reply: "reject",
-                    message: "侧边栏已隐藏，自动拒绝挂起的权限请求。",
-                }),
-            }).catch((error) => {
-                const message = error instanceof Error ? error.message : String(error);
-                (0, diagnostics_1.logWarn)(`auto reject hidden permission failed: ${message}`);
-                console.warn("[opencode-ui] auto reject hidden permission failed:", message);
-            });
-        }
-        if (pendingQuestion) {
-            run.pendingQuestion = undefined;
-            void this.requestServeJson(`/question/${encodeURIComponent(pendingQuestion.questionId)}/reject`, {
-                method: "POST",
-            }).catch((error) => {
-                const message = error instanceof Error ? error.message : String(error);
-                (0, diagnostics_1.logWarn)(`auto reject hidden question failed: ${message}`);
-                console.warn("[opencode-ui] auto reject hidden question failed:", message);
-            });
-        }
-        this.respondRunEvent(webview, run.requestId, { type: "stopped" });
-        this.clearCurrentRunBlockerPoll(run);
-        run.controller.abort();
-        run.eventAbort?.abort();
-        if (this.currentRun?.requestId === run.requestId) {
-            this.currentRun = undefined;
         }
     }
     stopCurrentRun() {
@@ -1938,13 +2184,61 @@ class SidebarProvider {
             console.warn("[opencode-ui] cleanup temp file failed:", error);
         }
     }
-    respondRunEvent(webview, requestId, event) {
-        this.respond(webview, {
+    respondRunEvent(_webview, requestId, event) {
+        const run = this.currentRun;
+        const isCurrentRun = run?.requestId === requestId;
+        if (isCurrentRun &&
+            (event.type === "part" ||
+                event.type === "context.usage" ||
+                event.type === "error")) {
+            run.recoveryTranscript = (0, runTranscript_1.applyRunEventToTranscript)(run.recoveryTranscript, event, run.recoveryAssistantIndex);
+        }
+        const revision = isCurrentRun ? ++run.revision : 0;
+        if (isCurrentRun &&
+            (event.type === "done" ||
+                event.type === "stopped" ||
+                event.type === "error")) {
+            this.captureTerminalRun(event);
+        }
+        const target = this.runEventWebview;
+        if (!target) {
+            return;
+        }
+        this.respond(target, {
             type: "run.event",
             requestId,
             ok: true,
-            payload: { event },
+            payload: { event, revision },
         });
+    }
+    captureTerminalRun(event) {
+        const snapshot = this.getActiveRunSnapshot();
+        if (!snapshot) {
+            return;
+        }
+        if (this.lastTerminalRun?.requestId === snapshot.requestId) {
+            return;
+        }
+        const completedAt = Date.now();
+        const transcript = snapshot.transcript.map((message, index) => index === snapshot.assistantIndex
+            ? {
+                ...message,
+                completed: completedAt,
+                ...(event.type === "done" && !message.finish
+                    ? { finish: "stop" }
+                    : {}),
+            }
+            : message);
+        this.lastTerminalRun = {
+            ...snapshot,
+            transcript,
+            outcome: event.type === "done"
+                ? "done"
+                : event.type === "stopped"
+                    ? "stopped"
+                    : "failed",
+            completedAt,
+        };
     }
     async ensureSessionForPrompt(payload, baseUrl) {
         if (payload.sessionId) {
@@ -2063,11 +2357,13 @@ class SidebarProvider {
             setPendingPermission: (event) => {
                 if (this.currentRun?.requestId === requestId) {
                     this.currentRun.pendingPermission = event;
+                    this.currentRun.revision += 1;
                 }
             },
             setPendingQuestion: (event) => {
                 if (this.currentRun?.requestId === requestId) {
                     this.currentRun.pendingQuestion = event;
+                    this.currentRun.revision += 1;
                 }
             },
             requestServeJson: (pathname) => this.requestServeJson(pathname),

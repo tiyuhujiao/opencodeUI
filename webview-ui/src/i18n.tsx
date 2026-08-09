@@ -49,6 +49,8 @@ const ZH_CN: Record<string, string> = {
   'Review': '审阅',
   'View': '查看',
   'Open': '打开',
+  'Reject': '拒绝',
+  'Available when the run finishes': '任务完成后可用',
   'Model': '模型',
   'Send': '发送',
   'Stop': '停止',

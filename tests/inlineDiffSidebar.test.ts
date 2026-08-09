@@ -57,6 +57,9 @@ describe('SidebarProvider Inline Diff seam', () => {
     expect(controller).toContain("typeof item.patch === 'string'");
     expect(controller).toContain('reverseUnifiedPatch(actual.snapshot.text, item.patchText');
     expect(controller).toContain('await this.editor.openNativeDiff(firstPending.fileId)');
+    expect(controller).toContain("if (evidence.status === 'completed') {");
+    expect(controller).toContain('this.queueEvidenceReconcile(state, key, next)');
+    expect(controller).toContain('await state.reconcileQueue');
     expect(controller).toContain('const opened = await this.editor.openNativeDiff(fileId)');
     expect(adapter).toContain("'vscode.diff'");
   });
@@ -80,9 +83,11 @@ describe('SidebarProvider Inline Diff seam', () => {
         type: 'inlineDiff.state',
         payload: {
           revision: 4,
+          activeRun: false,
           files: [
             expect.objectContaining({
               fileId: 'file-1',
+              revision: 2,
               hunks: 3,
               additions: 5,
               deletions: 2
@@ -94,14 +99,50 @@ describe('SidebarProvider Inline Diff seam', () => {
     expect(JSON.stringify(posted)).not.toContain('hunkCount');
   });
 
+  it('把 Webview 的保存与拒绝操作转发到文件级 resolve', async () => {
+    const inlineDiff = createInlineDiff();
+    const resolve = vi.spyOn(inlineDiff.controller, 'resolve');
+    const provider = createProvider(inlineDiff.controller) as unknown as {
+      handleInlineDiffResolveRequest: (
+        webview: { postMessage: (message: unknown) => Thenable<boolean> },
+        requestId: string,
+        input: { fileId: string; revision: number; decision: 'accept' | 'reject' }
+      ) => Promise<void>;
+    };
+    const posted: unknown[] = [];
+
+    await provider.handleInlineDiffResolveRequest({
+      postMessage: async (message) => {
+        posted.push(message);
+        return true;
+      }
+    }, 'resolve-1', { fileId: 'file-1', revision: 2, decision: 'reject' });
+
+    expect(resolve).toHaveBeenCalledWith({ fileId: 'file-1', revision: 2, decision: 'reject' });
+    expect(posted).toContainEqual({
+      type: 'inlineDiff.resolve.response',
+      requestId: 'resolve-1',
+      ok: true,
+      payload: { fileId: 'file-1', decision: 'reject' }
+    });
+  });
+
   it('在现有 run lifecycle emit seam 先观察事件再转发 Webview', () => {
     const inlineDiff = createInlineDiff();
     const provider = createProvider(inlineDiff.controller) as unknown as {
       currentRun?: {
         requestId: string;
+        revision: number;
         controller: AbortController;
+        startedAt: number;
+        promptText: string;
+        placeholderTitle: string;
+        startedNewSession: boolean;
+        recoveryTranscript: Array<{ role: 'user' | 'assistant'; parts: [] }>;
+        recoveryAssistantIndex: number;
         inlineDiffRun: { observe: (event: unknown) => void };
       };
+      runEventWebview?: { postMessage: (message: unknown) => Thenable<boolean> };
       createRunLifecycleAdapter: (
         webview: { postMessage: (message: unknown) => Thenable<boolean> },
         requestId: string
@@ -110,18 +151,27 @@ describe('SidebarProvider Inline Diff seam', () => {
     const calls: string[] = [];
     provider.currentRun = {
       requestId: 'run-1',
+      revision: 0,
       controller: new AbortController(),
+      startedAt: 1,
+      promptText: 'test',
+      placeholderTitle: 'test',
+      startedNewSession: true,
+      recoveryTranscript: [
+        { role: 'user', parts: [] },
+        { role: 'assistant', parts: [] }
+      ],
+      recoveryAssistantIndex: 1,
       inlineDiffRun: { observe: () => calls.push('observe') }
     };
-    const lifecycle = provider.createRunLifecycleAdapter(
-      {
-        postMessage: async () => {
-          calls.push('post');
-          return true;
-        }
-      },
-      'run-1'
-    );
+    const webview = {
+      postMessage: async () => {
+        calls.push('post');
+        return true;
+      }
+    };
+    provider.runEventWebview = webview;
+    const lifecycle = provider.createRunLifecycleAdapter(webview, 'run-1');
 
     lifecycle.emit({ type: 'done' });
 

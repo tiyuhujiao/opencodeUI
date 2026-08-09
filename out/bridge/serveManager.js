@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.configureServePortStorage = configureServePortStorage;
+exports.disposeServeManager = disposeServeManager;
 exports.ensureServeRunning = ensureServeRunning;
 exports.restartServeForConfigChange = restartServeForConfigChange;
 exports.requestServeJson = requestServeJson;
@@ -41,6 +42,7 @@ exports.probeHealth = probeHealth;
 const node_child_process_1 = require("node:child_process");
 const http = __importStar(require("node:http"));
 const net = __importStar(require("node:net"));
+const node_os_1 = require("node:os");
 const opencodeDirectory_1 = require("./opencodeDirectory");
 const opencodeEnv_1 = require("./opencodeEnv");
 const HOSTNAME = '127.0.0.1';
@@ -54,11 +56,35 @@ let restartPromise;
 let currentPort;
 let managedPort;
 let managedChild;
+let disposePromise;
 let portStorage;
 function configureServePortStorage(storage) {
     portStorage = storage;
 }
+function disposeServeManager() {
+    if (disposePromise) {
+        return disposePromise;
+    }
+    const child = managedChild;
+    const port = managedPort;
+    managedChild = undefined;
+    managedPort = undefined;
+    if (currentPort === port) {
+        currentPort = undefined;
+    }
+    const pending = child ? stopManagedChild(child) : Promise.resolve();
+    const promise = pending.finally(() => {
+        if (disposePromise === promise) {
+            disposePromise = undefined;
+        }
+    });
+    disposePromise = promise;
+    return promise;
+}
 async function ensureServeRunning() {
+    if (disposePromise) {
+        await disposePromise;
+    }
     if (restartPromise) {
         return restartPromise;
     }
@@ -71,6 +97,9 @@ async function ensureServeRunning() {
     return ensurePromise;
 }
 async function restartServeForConfigChange() {
+    if (disposePromise) {
+        await disposePromise;
+    }
     if (restartPromise) {
         return restartPromise;
     }
@@ -143,7 +172,7 @@ async function restartServeForConfigChangeInternal() {
     currentPort = targetPort;
     await persistLastPort(targetPort);
     if (previousChild && previousChild !== child) {
-        stopManagedChild(previousChild);
+        await stopManagedChild(previousChild);
     }
     return buildRuntime(targetPort, true);
 }
@@ -185,6 +214,7 @@ async function startServe(port) {
         shell: (0, opencodeEnv_1.shouldUseShellForOpencode)(command),
         stdio: ['ignore', 'pipe', 'pipe'],
         env,
+        cwd: (0, node_os_1.homedir)(),
         windowsHide: (0, opencodeEnv_1.shouldHideOpencodeWindow)()
     });
     const stderrBuffer = [];
@@ -203,7 +233,7 @@ async function startServe(port) {
         return child;
     }
     catch (error) {
-        stopManagedChild(child);
+        await stopManagedChild(child);
         throw error;
     }
 }
@@ -226,7 +256,12 @@ function isManagedPort(port) {
 }
 function stopManagedChild(child) {
     if (child.exitCode !== null) {
-        return;
+        return Promise.resolve();
+    }
+    if (process.platform === 'win32' && child.pid) {
+        return new Promise((resolve) => {
+            (0, node_child_process_1.execFile)('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 5000 }, () => resolve());
+        });
     }
     try {
         child.kill();
@@ -234,6 +269,7 @@ function stopManagedChild(child) {
     catch {
         // The process may already be exiting between the exitCode check and kill().
     }
+    return Promise.resolve();
 }
 function waitForSpawnReady(child) {
     return new Promise((resolve, reject) => {

@@ -5,11 +5,13 @@ export type TranscriptRole = 'user' | 'assistant' | 'unknown';
 export type TranscriptPartText = {
   type: 'text';
   text: string;
+  streamKey?: string;
 };
 
 export type TranscriptPartReasoning = {
   type: 'reasoning';
   text: string;
+  streamKey?: string;
   raw?: unknown;
 };
 
@@ -53,7 +55,7 @@ export function exportToTranscript(payload: ExportPayload): TranscriptMessage[] 
       ...(completed !== undefined ? { completed } : {}),
       ...(finish ? { finish } : {}),
       role: resolveRole(message.info),
-      parts: message.parts.map(mapPart),
+      parts: message.parts.map((part) => mapPart(part, id)),
       ...(contextUsage ? { contextUsage } : {})
     };
   });
@@ -148,13 +150,15 @@ function resolveContextUsage(info: unknown): TranscriptMessage['contextUsage'] {
   };
 }
 
-function mapPart(part: unknown): TranscriptPart {
+function mapPart(part: unknown, messageId?: string): TranscriptPart {
   if (isRecord(part)) {
     const text = getStringFromRecord(part, 'text');
+    const streamKey = resolveStreamKey(part, messageId);
     if (getStringFromRecord(part, 'type') === 'text' && typeof text === 'string') {
       return {
         type: 'text',
-        text
+        text,
+        ...(streamKey ? { streamKey } : {})
       };
     }
 
@@ -163,6 +167,7 @@ function mapPart(part: unknown): TranscriptPart {
       return {
         type: 'reasoning',
         text,
+        ...(streamKey ? { streamKey } : {}),
         raw: part
       };
     }
@@ -183,6 +188,15 @@ function mapPart(part: unknown): TranscriptPart {
     type: 'unknown',
     raw: part
   };
+}
+
+function resolveStreamKey(part: Record<string, unknown>, messageId?: string): string | undefined {
+  const partId = getStringFromRecord(part, 'id')?.trim();
+  if (!partId) {
+    return undefined;
+  }
+  const ownerMessageId = getStringFromRecord(part, 'messageID')?.trim() || messageId || 'message';
+  return `${ownerMessageId}:${partId}`;
 }
 
 function isToolLikePart(part: Record<string, unknown>): boolean {

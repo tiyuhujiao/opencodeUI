@@ -15,6 +15,7 @@ export const WEBVIEW_REQUEST_WHITELIST = [
   'question.reject',
   'file.open',
   'inlineDiff.open',
+  'inlineDiff.resolve',
   'inlineDiff.dismiss',
   'tempfile.write',
   'providers.list',
@@ -46,6 +47,9 @@ export type WebviewRequestType = (typeof WEBVIEW_REQUEST_WHITELIST)[number];
 export type WebviewReadyRequest = {
   type: 'webview.ready';
   requestId: string;
+  payload?: {
+    selectedSessionId?: string;
+  };
 };
 
 export type SessionsListRequest = {
@@ -350,6 +354,7 @@ export type WebviewRequestMessage =
   | QuestionRejectRequest
   | FileOpenRequest
   | InlineDiffOpenRequest
+  | InlineDiffResolveRequest
   | InlineDiffDismissRequest
   | TempfileWriteRequest
   | ProvidersListRequest
@@ -412,6 +417,8 @@ export type WebviewReadyAckMessage = {
     lastSelectedModel?: string;
     lastSelectedAgent?: string;
     opencode?: OpencodeCompatibility;
+    activeRun?: ActiveRunSnapshot;
+    terminalRun?: TerminalRunSnapshot;
   };
 };
 
@@ -436,11 +443,13 @@ export type TranscriptRole = 'user' | 'assistant' | 'unknown';
 export type TranscriptPartText = {
   type: 'text';
   text: string;
+  streamKey?: string;
 };
 
 export type TranscriptPartReasoning = {
   type: 'reasoning';
   text: string;
+  streamKey?: string;
   raw?: unknown;
 };
 
@@ -477,6 +486,35 @@ export type TranscriptMessage = {
   role: TranscriptRole;
   parts: TranscriptPart[];
   contextUsage?: ContextUsage;
+};
+
+export type ActiveRunSnapshot = {
+  requestId: string;
+  revision: number;
+  sessionId?: string;
+  startedAt: number;
+  promptText: string;
+  placeholderTitle: string;
+  startedNewSession: boolean;
+  transcript: TranscriptMessage[];
+  assistantIndex: number;
+  pendingPermission?: {
+    permissionId: string;
+    sessionId: string;
+    toolName: string;
+    patterns: string[];
+    message?: string;
+  };
+  pendingQuestion?: {
+    questionId: string;
+    sessionId: string;
+    questions: QuestionInfo[];
+  };
+};
+
+export type TerminalRunSnapshot = ActiveRunSnapshot & {
+  outcome: 'done' | 'stopped' | 'failed';
+  completedAt: number;
 };
 
 export type ContextUsage = {
@@ -1010,6 +1048,17 @@ export type RunEventMessage = {
   ok: true;
   payload: {
     event: RunStreamEvent;
+    revision: number;
+  };
+};
+
+export type RunSnapshotMessage = {
+  type: 'run.snapshot';
+  requestId: string;
+  ok: true;
+  payload: {
+    activeRun?: ActiveRunSnapshot;
+    terminalRun?: TerminalRunSnapshot;
   };
 };
 
@@ -1071,6 +1120,16 @@ export type InlineDiffOpenRequest = {
   };
 };
 
+export type InlineDiffResolveRequest = {
+  type: 'inlineDiff.resolve';
+  requestId: string;
+  payload: {
+    fileId: string;
+    revision: number;
+    decision: 'accept' | 'reject';
+  };
+};
+
 export type InlineDiffDismissRequest = {
   type: 'inlineDiff.dismiss';
   requestId: string;
@@ -1094,6 +1153,7 @@ export type InlineDiffFileStatus = 'pending' | 'stale' | 'unavailable';
 
 export type InlineDiffFileSummary = {
   fileId: string;
+  revision: number;
   path: string;
   displayPath: string;
   additions: number;
@@ -1112,6 +1172,16 @@ export type InlineDiffOpenResponseMessage = {
   };
 };
 
+export type InlineDiffResolveResponseMessage = {
+  type: 'inlineDiff.resolve.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    fileId: string;
+    decision: 'accept' | 'reject';
+  };
+};
+
 export type InlineDiffDismissResponseMessage = {
   type: 'inlineDiff.dismiss.response';
   requestId: string;
@@ -1127,6 +1197,7 @@ export type InlineDiffStateMessage = {
   ok: true;
   payload: {
     revision: number;
+    activeRun: boolean;
     files: InlineDiffFileSummary[];
   };
 };
@@ -1193,6 +1264,7 @@ export type ExtensionResponseMessage =
   | QuestionRejectResponseMessage
   | FileOpenResponseMessage
   | InlineDiffOpenResponseMessage
+  | InlineDiffResolveResponseMessage
   | InlineDiffDismissResponseMessage
   | InlineDiffStateMessage
   | TempfileWriteResponseMessage
@@ -1218,6 +1290,7 @@ export type ExtensionResponseMessage =
   | RunStartResponseMessage
   | RunStopResponseMessage
   | RunEventMessage
+  | RunSnapshotMessage
   | WebviewErrorMessage;
 
 export type SidebarMessage = WebviewRequestMessage | ExtensionResponseMessage;
@@ -1237,6 +1310,7 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set<string>([
   'session.delete.response',
   'file.open.response',
   'inlineDiff.open.response',
+  'inlineDiff.resolve.response',
   'inlineDiff.dismiss.response',
   'inlineDiff.state',
   'tempfile.write.response',
@@ -1264,6 +1338,7 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set<string>([
   'question.reply.response',
   'question.reject.response',
   'run.event',
+  'run.snapshot',
   'selfcheck.response',
   'webview.error'
 ]);
@@ -1574,8 +1649,21 @@ export function isExtensionResponseMessage(message: unknown): message is Extensi
     return message.ok === true && isObject(message.payload) && isNonEmptyString(message.payload.fileId);
   }
 
+  if (message.type === 'inlineDiff.resolve.response') {
+    return message.ok === true
+      && isObject(message.payload)
+      && isNonEmptyString(message.payload.fileId)
+      && (message.payload.decision === 'accept' || message.payload.decision === 'reject');
+  }
+
   if (message.type === 'inlineDiff.state') {
-    if (message.ok !== true || !isObject(message.payload) || !isNonNegativeInteger(message.payload.revision) || !Array.isArray(message.payload.files)) {
+    if (
+      message.ok !== true
+      || !isObject(message.payload)
+      || !isNonNegativeInteger(message.payload.revision)
+      || typeof message.payload.activeRun !== 'boolean'
+      || !Array.isArray(message.payload.files)
+    ) {
       return false;
     }
 
@@ -1808,6 +1896,17 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
 
   if (message.type === 'inlineDiff.open' || message.type === 'inlineDiff.dismiss') {
     if (!isObject(message.payload) || !isNonEmptyString(message.payload.fileId)) {
+      return false;
+    }
+  }
+
+  if (message.type === 'inlineDiff.resolve') {
+    if (
+      !isObject(message.payload)
+      || !isNonEmptyString(message.payload.fileId)
+      || !isNonNegativeInteger(message.payload.revision)
+      || (message.payload.decision !== 'accept' && message.payload.decision !== 'reject')
+    ) {
       return false;
     }
   }
@@ -2045,6 +2144,7 @@ function isInlineDiffFileSummary(value: unknown): value is InlineDiffFileSummary
   }
 
   return isNonEmptyString(value.fileId)
+    && isNonNegativeInteger(value.revision)
     && isNonEmptyString(value.path)
     && isNonEmptyString(value.displayPath)
     && isNonNegativeInteger(value.additions)

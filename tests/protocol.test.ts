@@ -139,11 +139,23 @@ describe('webview request protocol guards', () => {
     })).toBe(true);
   });
 
-  it('允许打开与忽略 inline diff review', () => {
+  it('允许打开、保存、拒绝与忽略 inline diff review', () => {
     expect(isWebviewRequestMessage({
       type: 'inlineDiff.open',
       requestId: 'inline-open-1',
       payload: { fileId: 'file-1' }
+    })).toBe(true);
+
+    expect(isWebviewRequestMessage({
+      type: 'inlineDiff.resolve',
+      requestId: 'inline-resolve-1',
+      payload: { fileId: 'file-1', revision: 2, decision: 'accept' }
+    })).toBe(true);
+
+    expect(isWebviewRequestMessage({
+      type: 'inlineDiff.resolve',
+      requestId: 'inline-resolve-2',
+      payload: { fileId: 'file-1', revision: 2, decision: 'reject' }
     })).toBe(true);
 
     expect(isWebviewRequestMessage({
@@ -156,6 +168,12 @@ describe('webview request protocol guards', () => {
       type: 'inlineDiff.open',
       requestId: 'inline-open-2',
       payload: { fileId: '' }
+    })).toBe(false);
+
+    expect(isWebviewRequestMessage({
+      type: 'inlineDiff.resolve',
+      requestId: 'inline-resolve-invalid',
+      payload: { fileId: 'file-1', revision: -1, decision: 'later' }
     })).toBe(false);
   });
 
@@ -295,8 +313,10 @@ describe('webview request protocol guards', () => {
       ok: true,
       payload: {
         revision: 3,
+        activeRun: false,
         files: [{
           fileId: 'file-1',
+          revision: 2,
           path: 'webview-ui/src/App.tsx',
           displayPath: 'webview-ui/src/App.tsx',
           additions: 12,
@@ -305,6 +325,13 @@ describe('webview request protocol guards', () => {
           status: 'pending'
         }]
       }
+    })).toBe(true);
+
+    expect(isExtensionResponseMessage({
+      type: 'inlineDiff.resolve.response',
+      requestId: 'inline-resolve-1',
+      ok: true,
+      payload: { fileId: 'file-1', decision: 'accept' }
     })).toBe(true);
 
     expect(isExtensionResponseMessage({
@@ -327,6 +354,7 @@ describe('webview request protocol guards', () => {
       ok: true,
       payload: {
         revision: -1,
+        activeRun: false,
         files: []
       }
     })).toBe(false);

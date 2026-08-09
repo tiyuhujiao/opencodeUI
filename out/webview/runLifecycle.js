@@ -459,11 +459,13 @@ function toTokenDeltaServePart(properties, sessionId, streamState) {
         return {
             type: "text",
             text: properties.delta,
+            streamKey: partKey,
         };
     }
     return {
         type: "reasoning",
         text: properties.delta,
+        streamKey: partKey,
     };
 }
 function isAssistantPartMessage(messageId, streamState) {
@@ -489,11 +491,13 @@ function toIncrementalServePart(partRecord, parsedPart, streamState) {
                 return {
                     type: "text",
                     text: pendingDelta,
+                    streamKey: partKey,
                 };
             }
             return {
                 type: "reasoning",
                 text: pendingDelta,
+                streamKey: partKey,
                 raw: parsedPart.raw,
             };
         }
@@ -520,11 +524,13 @@ function toIncrementalServePart(partRecord, parsedPart, streamState) {
         return {
             type: "text",
             text: nextText,
+            streamKey: partKey,
         };
     }
     return {
         type: "reasoning",
         text: nextText,
+        streamKey: partKey,
         raw: parsedPart.raw,
     };
 }

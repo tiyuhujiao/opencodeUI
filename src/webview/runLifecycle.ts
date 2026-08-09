@@ -680,12 +680,14 @@ function toTokenDeltaServePart(
 		return {
 			type: "text",
 			text: properties.delta,
+			streamKey: partKey,
 		};
 	}
 
 	return {
 		type: "reasoning",
 		text: properties.delta,
+		streamKey: partKey,
 	};
 }
 
@@ -724,11 +726,13 @@ function toIncrementalServePart(
 				return {
 					type: "text",
 					text: pendingDelta,
+					streamKey: partKey,
 				};
 			}
 			return {
 				type: "reasoning",
 				text: pendingDelta,
+				streamKey: partKey,
 				raw: parsedPart.raw,
 			};
 		}
@@ -761,12 +765,14 @@ function toIncrementalServePart(
 		return {
 			type: "text",
 			text: nextText,
+			streamKey: partKey,
 		};
 	}
 
 	return {
 		type: "reasoning",
 		text: nextText,
+		streamKey: partKey,
 		raw: parsedPart.raw,
 	};
 }

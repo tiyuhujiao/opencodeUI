@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   MINIMUM_OPENCODE_VERSION,
   buildOpencodeCompatibility,
@@ -26,5 +28,17 @@ describe('opencode compatibility checks', () => {
     });
     expect(buildOpencodeCompatibility('opencode', '1.14.0').warning).toContain('请升级 opencode');
     expect(buildOpencodeCompatibility('opencode', undefined).warning).toContain('无法识别 opencode 版本');
+  });
+
+  it('优先复用 serve health 版本并把 CLI 超时限制在诊断面板', () => {
+    const provider = readFileSync(join(process.cwd(), 'src/webview/SidebarProvider.ts'), 'utf8');
+    const app = readFileSync(join(process.cwd(), 'webview-ui/src/App.tsx'), 'utf8');
+
+    expect(provider).toContain('health.ok ? health.version : undefined');
+    expect(provider).toContain('getCachedOpencodeCompatibility(binary)');
+    expect(provider).toContain('OPENCODE_COMPATIBILITY_FAILURE_TTL_MS');
+    expect(app).toContain('opencode: {selfcheck.opencode.state}');
+    expect(app).toContain("? { state: 'error', detail: opencode.warning, lastRequestId: rid }");
+    expect(app).not.toContain('setRunStatus(message.payload.opencode.warning)');
   });
 });

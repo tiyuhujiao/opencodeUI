@@ -46,7 +46,7 @@ export function buildTranscriptDisplayBlocks(messages: TranscriptMessage[]): Tra
       blocks.push({
         kind: 'assistant-turn',
         turn: {
-          key: message.id ? `turn-${message.id}` : `turn-${String(index)}-${String(message.created ?? 'local')}`,
+          key: `turn-${String(index)}`,
           user: entry,
           responses
         }

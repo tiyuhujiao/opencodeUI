@@ -677,6 +677,7 @@ p {
 }
 
 .edit-summary {
+  --edit-summary-row-height: 3.75rem;
   position: relative;
   width: 100%;
   max-width: 100%;
@@ -737,41 +738,52 @@ p {
   box-shadow: var(--ui-floating-shadow);
   padding: 0.25rem;
   display: grid;
+  grid-auto-rows: var(--edit-summary-row-height);
   gap: 0.1rem;
+  max-height: calc(var(--edit-summary-row-height) + var(--edit-summary-row-height) + var(--edit-summary-row-height) + 0.7rem);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.edit-summary__list::-webkit-scrollbar {
+  width: 7px;
+}
+
+.edit-summary__list::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: var(--ui-border-strong);
 }
 
 .edit-summary__item {
   min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch;
-  gap: 0.15rem;
-  border-radius: 8px;
-}
-
-.edit-summary__open {
-  width: 100%;
-  max-width: 100%;
+  height: var(--edit-summary-row-height);
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.8rem;
-  min-width: 0;
-  border: 0;
+  gap: 0.15rem;
   border-radius: 8px;
-  background: transparent;
+  overflow: hidden;
+}
+
+.edit-summary__content {
+  width: 100%;
+  max-width: 100%;
+  display: grid;
+  align-content: center;
+  gap: 0.18rem;
+  min-width: 0;
   color: var(--ui-text);
-  cursor: pointer;
   font: inherit;
   font-size: 0.82rem;
   padding: 0.45rem 0.5rem;
   text-align: left;
 }
 
-.edit-summary__open:hover,
-.edit-summary__open:focus-visible,
-.edit-summary__dismiss:hover,
-.edit-summary__dismiss:focus-visible {
+.edit-summary__action-button:hover,
+.edit-summary__action-button:focus-visible {
   background: var(--ui-hover-bg);
 }
 
@@ -799,25 +811,40 @@ p {
   white-space: nowrap;
 }
 
-.edit-summary__action {
-  color: var(--ui-accent);
-}
-
 .edit-summary__state {
   color: var(--ui-danger);
   text-transform: capitalize;
 }
 
-.edit-summary__dismiss {
-  align-self: center;
+.edit-summary__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.12rem;
+  padding-right: 0.25rem;
+  white-space: nowrap;
+}
+
+.edit-summary__action-button {
+  min-height: 1.75rem;
   border: 0;
-  border-radius: 7px;
+  border-radius: 5px;
   background: transparent;
-  color: var(--ui-text-muted);
+  color: var(--ui-accent);
   cursor: pointer;
   font: inherit;
   font-size: 0.72rem;
-  padding: 0.35rem 0.45rem;
+  padding: 0.28rem 0.4rem;
+}
+
+.edit-summary__action-button--reject {
+  color: var(--ui-danger);
+}
+
+.edit-summary__action-button:disabled {
+  color: var(--ui-text-muted);
+  cursor: default;
+  opacity: 0.55;
 }
 
 .edit-summary__item--stale,
@@ -2258,6 +2285,36 @@ p {
   gap: 0.55rem;
 }
 
+.assistant-turn__process {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-0.2rem);
+  visibility: hidden;
+  transition:
+    grid-template-rows 220ms ease,
+    opacity 160ms ease,
+    transform 220ms ease,
+    visibility 0s linear 220ms;
+}
+
+.assistant-turn__process.is-expanded {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+.assistant-turn__process-inner {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  gap: 0.55rem;
+  overflow: hidden;
+}
+
 .turn-work {
   min-width: 0;
   display: grid;
@@ -2508,6 +2565,10 @@ p {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .assistant-turn__process {
+    transition: none;
+  }
+
   .activity-block__summary::after {
     animation: none;
     opacity: 0;
@@ -4652,9 +4713,23 @@ button.resource-dialog__item {
     padding-inline: 0.55rem;
   }
 
-  .edit-summary__open {
+  .edit-summary {
+    --edit-summary-row-height: 5.35rem;
+  }
+
+  .edit-summary__item {
     grid-template-columns: minmax(0, 1fr);
-    gap: 0.25rem;
+    grid-template-rows: minmax(0, 1fr) auto;
+    gap: 0;
+  }
+
+  .edit-summary__content {
+    padding-bottom: 0.12rem;
+  }
+
+  .edit-summary__actions {
+    justify-content: flex-start;
+    padding: 0 0.32rem 0.32rem;
   }
 
   .edit-summary__meta {

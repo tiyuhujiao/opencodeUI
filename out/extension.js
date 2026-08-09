@@ -79,7 +79,11 @@ function activate(context) {
             void vscode.window.showWarningMessage(`OpenCode serve 启动失败：${message}`);
         });
     }
-    context.subscriptions.push(sidebarProvider, vscode.window.registerWebviewViewProvider('opencodeUI.sidebar', sidebarProvider), vscode.commands.registerCommand('opencodeUI.refresh', () => {
+    context.subscriptions.push(sidebarProvider, vscode.window.registerWebviewViewProvider('opencodeUI.sidebar', sidebarProvider, {
+        webviewOptions: {
+            retainContextWhenHidden: true
+        }
+    }), vscode.commands.registerCommand('opencodeUI.refresh', () => {
         sidebarProvider.refresh();
     }), vscode.commands.registerCommand('opencodeUI.openSidebar', async () => {
         await vscode.commands.executeCommand('workbench.view.extension.opencodeUI');
@@ -88,6 +92,7 @@ function activate(context) {
     }));
 }
 function deactivate() {
+    return (0, serveManager_1.disposeServeManager)();
 }
 function resolveHostKind(remoteName, platform = process.platform) {
     if (remoteName === 'wsl' && platform === 'linux') {

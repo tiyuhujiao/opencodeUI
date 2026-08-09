@@ -9,7 +9,9 @@ describe('transcript streaming text styles', () => {
     const source = readFileSync(join(root, 'webview-ui/src/components/Transcript.tsx'), 'utf8')
 
     expect(source).not.toContain('stream-text')
-    expect(source).toContain("className={`md-body${item.isFinalAnswer ? ' md-body--final-answer' : ''}`}")
+    expect(source).toContain('<MarkdownTextBlock')
+    expect(source).toContain('const MarkdownTextBlock = memo(function MarkdownTextBlock({')
+    expect(source).toContain("className={`md-body${isFinalAnswer ? ' md-body--final-answer' : ''}`}")
     expect(source).not.toContain('insidePrefinal')
   })
 

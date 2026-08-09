@@ -16,7 +16,7 @@ function exportToTranscript(payload) {
             ...(completed !== undefined ? { completed } : {}),
             ...(finish ? { finish } : {}),
             role: resolveRole(message.info),
-            parts: message.parts.map(mapPart),
+            parts: message.parts.map((part) => mapPart(part, id)),
             ...(contextUsage ? { contextUsage } : {})
         };
     });
@@ -95,13 +95,15 @@ function resolveContextUsage(info) {
         ...(providerId && modelId ? { model: `${providerId}/${modelId}` } : {})
     };
 }
-function mapPart(part) {
+function mapPart(part, messageId) {
     if (isRecord(part)) {
         const text = getStringFromRecord(part, 'text');
+        const streamKey = resolveStreamKey(part, messageId);
         if (getStringFromRecord(part, 'type') === 'text' && typeof text === 'string') {
             return {
                 type: 'text',
-                text
+                text,
+                ...(streamKey ? { streamKey } : {})
             };
         }
         const partType = getStringFromRecord(part, 'type');
@@ -109,6 +111,7 @@ function mapPart(part) {
             return {
                 type: 'reasoning',
                 text,
+                ...(streamKey ? { streamKey } : {}),
                 raw: part
             };
         }
@@ -127,6 +130,14 @@ function mapPart(part) {
         type: 'unknown',
         raw: part
     };
+}
+function resolveStreamKey(part, messageId) {
+    const partId = getStringFromRecord(part, 'id')?.trim();
+    if (!partId) {
+        return undefined;
+    }
+    const ownerMessageId = getStringFromRecord(part, 'messageID')?.trim() || messageId || 'message';
+    return `${ownerMessageId}:${partId}`;
 }
 function isToolLikePart(part) {
     const partType = getStringFromRecord(part, 'type');
