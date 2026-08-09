@@ -46,6 +46,7 @@ const path = __importStar(require("node:path"));
 const node_url_1 = require("node:url");
 const opencodeCli_1 = require("../bridge/opencodeCli");
 const serveManager_1 = require("../bridge/serveManager");
+const opencodeDirectory_1 = require("../bridge/opencodeDirectory");
 const opencodeEnv_1 = require("../bridge/opencodeEnv");
 const opencodeCompatibility_1 = require("../bridge/opencodeCompatibility");
 const diagnostics_1 = require("../diagnostics");
@@ -2403,7 +2404,7 @@ class SidebarProvider {
         const headers = { ...(extra ?? {}) };
         const cwd = includeCwd ? this.getDefaultCwd() : undefined;
         if (cwd) {
-            headers["x-opencode-directory"] = cwd;
+            headers["x-opencode-directory"] = (0, opencodeDirectory_1.encodeOpencodeDirectory)(cwd);
         }
         return headers;
     }

@@ -1,6 +1,8 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
-import { ensureServeRunning } from '../../bridge/serveManager';
+import * as path from 'node:path';
+import { encodeOpencodeDirectory } from '../../bridge/opencodeDirectory';
+import { ensureServeRunning, requestServeJson } from '../../bridge/serveManager';
 import { resolveHostKind } from '../../extension';
 import { createInlineDiffController } from '../../inlineDiff';
 
@@ -14,6 +16,8 @@ export async function run(): Promise<void> {
 
   await extension?.activate();
   assert.ok(extension?.isActive, '扩展应能成功激活');
+
+  await verifyServeWorkspaceDirectory();
 
   if (process.platform === 'darwin') {
     assert.equal(resolveHostKind(undefined, 'darwin'), 'local-macos', 'macOS 扩展宿主应被识别为受支持的本机环境');
@@ -41,6 +45,50 @@ export async function run(): Promise<void> {
   }
 
   await verifyNativeInlineDiff();
+}
+
+async function verifyServeWorkspaceDirectory(): Promise<void> {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  assert.ok(workspaceFolder, '工作目录 smoke test 需要已打开的测试工作区');
+  const cwd = workspaceFolder.uri.fsPath;
+  assert.match(cwd, /\u4e2d\u6587/u, '扩展宿主必须在仓库外的中文路径中验证');
+
+  const pathResponse = await requestServeJson<{ directory?: string }>('/path', cwd);
+  assert.equal(normalizeDirectory(pathResponse.directory), normalizeDirectory(cwd), '/path 应解析为当前 VS Code 工作区');
+
+  const runtime = await ensureServeRunning();
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-opencode-directory': encodeOpencodeDirectory(cwd)
+  };
+  let sessionId: string | undefined;
+  try {
+    const response = await fetch(`${runtime.baseUrl}/session`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ title: 'OpenCode UI workspace smoke test' })
+    });
+    assert.equal(response.ok, true, `创建 workspace smoke session 失败（${String(response.status)}）`);
+    const session = (await response.json()) as { id?: string; directory?: string };
+    sessionId = session.id;
+    assert.ok(sessionId, 'OpenCode 应返回 workspace smoke session ID');
+    assert.equal(normalizeDirectory(session.directory), normalizeDirectory(cwd), '新 session 应绑定当前 VS Code 工作区');
+  } finally {
+    if (sessionId) {
+      await fetch(`${runtime.baseUrl}/session/${encodeURIComponent(sessionId)}`, {
+        method: 'DELETE',
+        headers
+      });
+    }
+  }
+}
+
+function normalizeDirectory(directory: string | undefined): string | undefined {
+  if (!directory) {
+    return undefined;
+  }
+  const normalized = path.normalize(directory);
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 async function verifyNativeInlineDiff(): Promise<void> {

@@ -186,7 +186,7 @@ afterEach(() => {
 });
 
 describe('ensureServeRunning 端口策略', () => {
-  it('serve JSON 请求复用已发现端口并携带 workspace cwd', async () => {
+  it('serve JSON 请求复用已发现端口并编码 workspace cwd', async () => {
     const { serveManager, requestMock } = await setup(5111);
     configureHealthResponses(requestMock, {
       5111: { type: 'status', statusCode: 200 }
@@ -197,7 +197,8 @@ describe('ensureServeRunning 端口策略', () => {
     }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(serveManager.requestServeJson('/session/s1/diff?messageID=m1', 'E:\\workspace')).resolves.toEqual({
+    const cwd = 'E:\\百分数与分数';
+    await expect(serveManager.requestServeJson('/session/s1/diff?messageID=m1', cwd)).resolves.toEqual({
       files: 2
     });
     expect(fetchMock).toHaveBeenCalledWith(
@@ -205,7 +206,7 @@ describe('ensureServeRunning 端口策略', () => {
       {
         headers: {
           'Content-Type': 'application/json',
-          'x-opencode-directory': 'E:\\workspace'
+          'x-opencode-directory': encodeURIComponent(cwd)
         }
       }
     );

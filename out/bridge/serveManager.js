@@ -41,6 +41,7 @@ exports.probeHealth = probeHealth;
 const node_child_process_1 = require("node:child_process");
 const http = __importStar(require("node:http"));
 const net = __importStar(require("node:net"));
+const opencodeDirectory_1 = require("./opencodeDirectory");
 const opencodeEnv_1 = require("./opencodeEnv");
 const HOSTNAME = '127.0.0.1';
 const HEALTH_PATH = '/global/health';
@@ -84,7 +85,7 @@ async function requestServeJson(pathname, cwd) {
         'Content-Type': 'application/json'
     };
     if (cwd) {
-        headers['x-opencode-directory'] = cwd;
+        headers['x-opencode-directory'] = (0, opencodeDirectory_1.encodeOpencodeDirectory)(cwd);
     }
     const response = await fetch(`${runtime.baseUrl}${pathname}`, { headers });
     if (!response.ok) {

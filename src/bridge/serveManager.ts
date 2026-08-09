@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as http from 'node:http';
 import * as net from 'node:net';
+import { encodeOpencodeDirectory } from './opencodeDirectory';
 import { resolveOpencodeBinary, shouldHideOpencodeWindow, shouldUseShellForOpencode, withOpencodeBinInPath } from './opencodeEnv';
 
 const HOSTNAME = '127.0.0.1';
@@ -64,7 +65,7 @@ export async function requestServeJson<T>(pathname: string, cwd?: string): Promi
     'Content-Type': 'application/json'
   };
   if (cwd) {
-    headers['x-opencode-directory'] = cwd;
+    headers['x-opencode-directory'] = encodeOpencodeDirectory(cwd);
   }
   const response = await fetch(`${runtime.baseUrl}${pathname}`, { headers });
   if (!response.ok) {

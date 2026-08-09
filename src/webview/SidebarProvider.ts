@@ -18,6 +18,7 @@ import {
 	ensureServeRunning,
 	restartServeForConfigChange,
 } from "../bridge/serveManager";
+import { encodeOpencodeDirectory } from "../bridge/opencodeDirectory";
 import {
 	resolveOpencodeBinary,
 	withOpencodeBinInPath,
@@ -3366,7 +3367,7 @@ export class SidebarProvider
 		const headers: Record<string, string> = { ...(extra ?? {}) };
 		const cwd = includeCwd ? this.getDefaultCwd() : undefined;
 		if (cwd) {
-			headers["x-opencode-directory"] = cwd;
+			headers["x-opencode-directory"] = encodeOpencodeDirectory(cwd);
 		}
 		return headers;
 	}
