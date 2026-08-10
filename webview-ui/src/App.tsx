@@ -1,5 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ArrowUp, History, Languages, Moon, Plus, RefreshCw, Settings2, ShieldCheck, Square, Sun } from 'lucide-react'
+import {
+  ArrowLeft,
+  ArrowUp,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  History,
+  Languages,
+  ListOrdered,
+  Moon,
+  Paperclip,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Settings2,
+  ShieldCheck,
+  Square,
+  Sun,
+  Trash2,
+  X
+} from 'lucide-react'
 import {
   createRequestId,
   getVsCodeApi,
@@ -43,6 +63,7 @@ import {
   type InlineDiffFileSummary,
   type ModelSummary,
   type ProviderSummary,
+  type QueuedPromptSummary,
   type QuestionInfo,
   type RunStreamEvent,
   type SessionSummary,
@@ -68,6 +89,7 @@ import {
 import { readThinkingPreferences, writeThinkingPreferences } from './thinkingPreferences'
 import { useI18n } from './i18n'
 import { isComposerCommandInvocation, resolveComposerCommandInvocation } from './composerCommands'
+import { getQuestionIndexAfterOption, getQuestionPage } from './questionPaging'
 import {
   appendWorkspaceMentions,
   getWorkspaceMentionState,
@@ -77,6 +99,13 @@ import {
 } from './workspaceMentions'
 
 type ThemeMode = 'light' | 'dark'
+type PastedImageState = { fileName: string; bytesBase64: string; previewUrl: string; mimeType: string }
+type QueuedDraftRecovery = {
+  message: string
+  pastedImage: PastedImageState | null
+  pastedImageFilePath: string | null
+  workspaceAttachments: WorkspaceResourceSummary[]
+}
 
 const THEME_STORAGE_KEY = 'opencode-ui.theme'
 
@@ -634,6 +663,143 @@ function AgentMenu({
   )
 }
 
+function QueuePanel({
+  items,
+  onUpdate,
+  onRemove
+}: {
+  items: QueuedPromptSummary[]
+  onUpdate: (id: string, message: string) => void
+  onRemove: (id: string) => void
+}) {
+  const { t } = useI18n()
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [draft, setDraft] = useState('')
+  const editInputRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    if (editingId && !items.some((item) => item.id === editingId)) {
+      setEditingId(null)
+      setDraft('')
+    }
+  }, [editingId, items])
+
+  useEffect(() => {
+    if (!editingId) {
+      return
+    }
+    const frame = window.requestAnimationFrame(() => {
+      editInputRef.current?.focus()
+      editInputRef.current?.select()
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [editingId])
+
+  if (items.length === 0) {
+    return null
+  }
+
+  const finishEdit = () => {
+    if (!editingId || !draft.trim()) {
+      return
+    }
+    onUpdate(editingId, draft)
+    setEditingId(null)
+    setDraft('')
+  }
+
+  return (
+    <section className="composer-queue" aria-label={t('Queue')}>
+      <div className="composer-queue__header">
+        <ListOrdered size={14} aria-hidden="true" />
+        <span className="composer-queue__title">{t('Queue')}</span>
+        <span className="composer-queue__count">{items.length}</span>
+      </div>
+      <div className="composer-queue__list">
+        {items.map((item, index) => {
+          const editing = editingId === item.id
+          return (
+            <div key={item.id} className="composer-queue__item">
+              <span className="composer-queue__index">{index + 1}</span>
+              {editing ? (
+                <input
+                  ref={editInputRef}
+                  className="composer-queue__input"
+                  value={draft}
+                  onChange={(event) => setDraft(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      finishEdit()
+                    } else if (event.key === 'Escape') {
+                      setEditingId(null)
+                      setDraft('')
+                    }
+                  }}
+                />
+              ) : (
+                <span className="composer-queue__message" title={item.message}>{item.message}</span>
+              )}
+              {item.attachmentCount > 0 ? (
+                <span className="composer-queue__attachments" title={t('{count} attachments', { count: item.attachmentCount })}>
+                  <Paperclip size={12} aria-hidden="true" />
+                  {item.attachmentCount}
+                </span>
+              ) : null}
+              <div className="composer-queue__actions">
+                {editing ? (
+                  <>
+                    <button type="button" onClick={finishEdit} disabled={!draft.trim()} aria-label={t('Save')} title={t('Save')}>
+                      <Check size={13} aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingId(null)
+                        setDraft('')
+                      }}
+                      aria-label={t('Cancel')}
+                      title={t('Cancel')}
+                    >
+                      <X size={13} aria-hidden="true" />
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingId(item.id)
+                      setDraft(item.message)
+                    }}
+                    disabled={item.locked || Boolean(item.commandName)}
+                    aria-label={t('Edit queued message')}
+                    title={item.locked
+                      ? t('Queued message is already being delivered')
+                      : item.commandName
+                        ? t('Queued commands cannot be edited')
+                        : t('Edit queued message')}
+                  >
+                    <Pencil size={13} aria-hidden="true" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onRemove(item.id)}
+                  disabled={item.locked}
+                  aria-label={t('Remove queued message')}
+                  title={item.locked ? t('Queued message is already being delivered') : t('Remove queued message')}
+                >
+                  <Trash2 size={13} aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
 function QuestionBanner({
   pending,
   onReply,
@@ -646,11 +812,13 @@ function QuestionBanner({
   const { t } = useI18n()
   const [selected, setSelected] = useState<string[][]>(() => pending.questions.map(() => []))
   const [customAnswers, setCustomAnswers] = useState<string[]>(() => pending.questions.map(() => ''))
+  const [questionIndex, setQuestionIndex] = useState(0)
 
   useEffect(() => {
     setSelected(pending.questions.map(() => []))
     setCustomAnswers(pending.questions.map(() => ''))
-  }, [pending.questions])
+    setQuestionIndex(0)
+  }, [pending])
 
   const answers = useMemo(
     () =>
@@ -669,6 +837,10 @@ function QuestionBanner({
   )
 
   const canReply = answers.length === pending.questions.length && answers.every((answer) => answer.length > 0)
+  const page = getQuestionPage(questionIndex, pending.questions.length)
+  const question = pending.questions[page.index]
+  const inputType = question?.multiple ? 'checkbox' : 'radio'
+  const groupName = `${pending.questionId}-${String(page.index)}`
 
   const toggleOption = (questionIndex: number, label: string, multiple: boolean | undefined) => {
     setSelected((current) => {
@@ -681,17 +853,40 @@ function QuestionBanner({
       next[questionIndex] = answer.includes(label) ? answer.filter((item) => item !== label) : [...answer, label]
       return next
     })
+    setQuestionIndex(getQuestionIndexAfterOption(questionIndex, pending.questions.length, multiple))
   }
 
   return (
     <div className="question-banner" role="alert">
-      <div className="question-banner__header">{t('Question needs input')}</div>
+      <div className="question-banner__header">
+        <span>{t('Question needs input')}</span>
+        <div className="question-banner__pager">
+          <button
+            type="button"
+            onClick={() => setQuestionIndex(Math.max(0, page.index - 1))}
+            disabled={!page.hasPrevious}
+            aria-label={t('Previous question')}
+            title={t('Previous question')}
+          >
+            <ChevronLeft size={15} aria-hidden="true" />
+          </button>
+          <span aria-live="polite" title={t('Question {current} of {total}', { current: page.current, total: page.total })}>
+            {page.label}
+          </span>
+          <button
+            type="button"
+            onClick={() => setQuestionIndex(Math.min(page.total - 1, page.index + 1))}
+            disabled={!page.hasNext}
+            aria-label={t('Next question')}
+            title={t('Next question')}
+          >
+            <ChevronRight size={15} aria-hidden="true" />
+          </button>
+        </div>
+      </div>
       <div className="question-banner__body">
-        {pending.questions.map((question, questionIndex) => {
-          const inputType = question.multiple ? 'checkbox' : 'radio'
-          const groupName = `${pending.questionId}-${String(questionIndex)}`
-          return (
-            <fieldset key={`${pending.questionId}-${String(questionIndex)}`} className="question-banner__question">
+        {question ? (
+          <fieldset key={`${pending.questionId}-${String(page.index)}`} className="question-banner__question">
               <legend>
                 <span className="question-banner__label">{question.header}</span>
                 <span className="question-banner__text">{question.question}</span>
@@ -702,8 +897,8 @@ function QuestionBanner({
                     <input
                       type={inputType}
                       name={groupName}
-                      checked={(selected[questionIndex] ?? []).includes(option.label)}
-                      onChange={() => toggleOption(questionIndex, option.label, question.multiple)}
+                      checked={(selected[page.index] ?? []).includes(option.label)}
+                      onChange={() => toggleOption(page.index, option.label, question.multiple)}
                     />
                     <span>
                       <span className="question-banner__optionLabel">{option.label}</span>
@@ -715,21 +910,20 @@ function QuestionBanner({
               {question.custom !== false ? (
                 <input
                   className="question-banner__custom"
-                  value={customAnswers[questionIndex] ?? ''}
+                  value={customAnswers[page.index] ?? ''}
                   placeholder={t('Custom answer')}
                   onChange={(event) => {
                     const value = event.currentTarget.value
                     setCustomAnswers((current) => {
                       const next = [...current]
-                      next[questionIndex] = value
+                      next[page.index] = value
                       return next
                     })
                   }}
                 />
               ) : null}
-            </fieldset>
-          )
-        })}
+          </fieldset>
+        ) : null}
       </div>
       <div className="question-banner__actions">
         <button type="button" onClick={() => onReply(pending.questionId, answers)} disabled={!canReply}>
@@ -839,11 +1033,10 @@ export default function App() {
   const [commandIndex, setCommandIndex] = useState(0)
   const [selectedNativeCommandName, setSelectedNativeCommandName] = useState<string | null>(null)
   const [deleteArmed, setDeleteArmed] = useState<null | { sessionId: string; armedAt: number }>(null)
-  const [pastedImage, setPastedImage] = useState<null | { fileName: string; bytesBase64: string; previewUrl: string; mimeType: string }>(
-    null
-  )
+  const [pastedImage, setPastedImage] = useState<PastedImageState | null>(null)
   const [pastedImageFilePath, setPastedImageFilePath] = useState<string | null>(null)
   const [isRunning, setIsRunning] = useState(false)
+  const [runQueue, setRunQueue] = useState<QueuedPromptSummary[]>([])
   const [runStatus, setRunStatus] = useState<string | null>(null)
   const clearSettledRunIndicator = useCallback(() => setRunStatus(clearSettledRunStatus), [])
   const [editedFiles, setEditedFiles] = useState<EditedFileSummary[]>([])
@@ -935,6 +1128,9 @@ export default function App() {
   const tempfileRequestIdsRef = useRef<Map<string, { previewUrl: string }>>(new Map())
   const runStartRequestIdRef = useRef<string | null>(null)
   const runStopRequestIdsRef = useRef<Set<string>>(new Set())
+  const runQueueAddRequestIdsRef = useRef<Map<string, QueuedDraftRecovery>>(new Map())
+  const runQueueUpdateRequestIdsRef = useRef<Set<string>>(new Set())
+  const runQueueRemoveRequestIdsRef = useRef<Set<string>>(new Set())
   const pendingInitialSelectedModelRef = useRef<string | null>(null)
   const pendingInitialSelectedAgentRef = useRef<string | null>(null)
   const activeRunRef = useRef<{
@@ -1305,6 +1501,7 @@ export default function App() {
     setLastRunPartKind(null)
     setPendingPermission(null)
     setPendingQuestion(null)
+    setRunQueue([])
 
     if (completion.type === 'done') {
       setRunStatus('Completed')
@@ -2168,6 +2365,60 @@ export default function App() {
     setWorkspaceAttachments([])
   }, [composerCommands, composerValue, isRunning, moveSessionExportsToBackground, pastedImage, pastedImageFilePath, pushDebug, selectedSessionId, selectedModel, selectedAgent, thinkingEnabled, thinkingVariant, workspaceAttachments])
 
+  const queuePrompt = useCallback(() => {
+    const vscode = getVsCodeApi()
+    const message = composerValue.trim()
+    if (!vscode) {
+      setRunStatus('Not running in VS Code')
+      return
+    }
+    if (!isRunning || !selectedModel || !selectedAgent || message.length === 0) {
+      return
+    }
+
+    const requestId = createRequestId()
+    const command = resolveComposerCommandInvocation(message, composerCommands)
+    const attachedFiles = [
+      ...(pastedImageFilePath ? [pastedImageFilePath] : []),
+      ...workspaceAttachments.filter((resource) => resource.kind === 'file').map((resource) => resource.absolutePath)
+    ].filter((filePath, index, files) => files.indexOf(filePath) === index)
+
+    runQueueAddRequestIdsRef.current.set(requestId, {
+      message,
+      pastedImage,
+      pastedImageFilePath,
+      workspaceAttachments: [...workspaceAttachments]
+    })
+    pushDebug({
+      at: new Date().toISOString(),
+      kind: 'tx',
+      type: 'run.queue.add',
+      requestId,
+      detail: `${selectedSessionId ?? 'pending'} | ${selectedModel} | ${selectedAgent}`
+    })
+    vscode.postMessage({
+      type: 'run.queue.add',
+      requestId,
+      payload: {
+        message,
+        model: selectedModel,
+        agent: selectedAgent,
+        sessionId: selectedSessionId ?? undefined,
+        thinking: thinkingEnabled,
+        variant: thinkingVariant || undefined,
+        files: attachedFiles.length > 0 ? attachedFiles : undefined,
+        command: command ?? undefined
+      }
+    })
+
+    setComposerValue('')
+    setComposerCursor(0)
+    setSelectedNativeCommandName(null)
+    setPastedImage(null)
+    setPastedImageFilePath(null)
+    setWorkspaceAttachments([])
+  }, [composerCommands, composerValue, isRunning, pastedImage, pastedImageFilePath, pushDebug, selectedAgent, selectedModel, selectedSessionId, thinkingEnabled, thinkingVariant, workspaceAttachments])
+
   const commands = useMemo(() => {
     type Cmd = {
       name: string
@@ -2557,14 +2808,46 @@ export default function App() {
     [commands]
   )
 
+  const updateQueuedPrompt = useCallback((id: string, message: string) => {
+    const vscode = getVsCodeApi()
+    if (!vscode || !message.trim()) {
+      return
+    }
+    const requestId = createRequestId()
+    runQueueUpdateRequestIdsRef.current.add(requestId)
+    vscode.postMessage({
+      type: 'run.queue.update',
+      requestId,
+      payload: { id, message: message.trim() }
+    })
+  }, [])
+
+  const removeQueuedPrompt = useCallback((id: string) => {
+    const vscode = getVsCodeApi()
+    if (!vscode) {
+      return
+    }
+    const requestId = createRequestId()
+    runQueueRemoveRequestIdsRef.current.add(requestId)
+    vscode.postMessage({
+      type: 'run.queue.remove',
+      requestId,
+      payload: { id }
+    })
+  }, [])
+
   const submitComposer = useCallback(() => {
     if (commandState.open) {
       const selected = filteredCommands[commandIndex]
       runCommand(selected?.name ?? commandState.query, commandState.args)
       return
     }
+    if (isRunning) {
+      queuePrompt()
+      return
+    }
     startRun()
-  }, [commandIndex, commandState, filteredCommands, runCommand, startRun])
+  }, [commandIndex, commandState, filteredCommands, isRunning, queuePrompt, runCommand, startRun])
 
   const stopRun = useCallback(() => {
     const vscode = getVsCodeApi()
@@ -2679,6 +2962,7 @@ export default function App() {
         pendingInitialSelectedAgentRef.current = message.payload.lastSelectedAgent ?? null
         setSelectedModel(message.payload.lastSelectedModel ?? '')
         setSelectedAgent(message.payload.lastSelectedAgent ?? '')
+        setRunQueue(message.payload.queue.items)
         if (message.payload.activeRun && shouldRestoreActiveSnapshot(message.payload.activeRun, {
           activeRequestId: activeRunRef.current?.requestId ?? null,
           currentRevision: activeRunRevisionRef.current
@@ -3242,7 +3526,31 @@ export default function App() {
         return
       }
 
+      if (message.type === 'run.queue.state' && message.ok) {
+        setRunQueue(message.payload.items)
+        return
+      }
+
+      if (message.type === 'run.queue.add.response' && message.ok) {
+        runQueueAddRequestIdsRef.current.delete(message.requestId)
+        setRunQueue(message.payload.state.items)
+        return
+      }
+
+      if (message.type === 'run.queue.update.response' && message.ok) {
+        runQueueUpdateRequestIdsRef.current.delete(message.requestId)
+        setRunQueue(message.payload.state.items)
+        return
+      }
+
+      if (message.type === 'run.queue.remove.response' && message.ok) {
+        runQueueRemoveRequestIdsRef.current.delete(message.requestId)
+        setRunQueue(message.payload.state.items)
+        return
+      }
+
       if (message.type === 'run.snapshot' && message.ok) {
+        setRunQueue(message.payload.queue.items)
         if (message.payload.activeRun && shouldRestoreActiveSnapshot(message.payload.activeRun, {
           activeRequestId: activeRunRef.current?.requestId ?? null,
           currentRevision: activeRunRevisionRef.current
@@ -3312,6 +3620,40 @@ export default function App() {
             questions: message.payload.event.questions
           })
           setRunStatus('Question needs input')
+          return
+        }
+
+        if (message.payload.event.type === 'turn.start') {
+          const created = message.payload.event.created
+          const prompts = message.payload.event.prompts
+          const current = [...transcriptRef.current]
+          const previousAssistant = current[active.assistantIndex]
+          if (previousAssistant) {
+            current[active.assistantIndex] = {
+              ...previousAssistant,
+              completed: created,
+              finish: previousAssistant.finish ?? 'stop'
+            }
+          }
+          active.assistantIndex = current.length + prompts.length
+          current.push(
+            ...prompts.map((prompt) => ({
+              id: prompt.messageId,
+              created: prompt.created,
+              role: 'user' as const,
+              parts: [{ type: 'text' as const, text: prompt.message }]
+            })),
+            {
+              created,
+              role: 'assistant',
+              parts: []
+            }
+          )
+          transcriptRef.current = current
+          setTranscript(current)
+          setPendingPermission(null)
+          setPendingQuestion(null)
+          setRunStatus('Running…')
           return
         }
 
@@ -3634,6 +3976,30 @@ export default function App() {
         if (fileOpenRequestIdsRef.current.has(message.requestId)) {
           fileOpenRequestIdsRef.current.delete(message.requestId)
           setRunStatus(`Open file failed: ${message.error}`)
+          return
+        }
+
+        const queuedDraft = runQueueAddRequestIdsRef.current.get(message.requestId)
+        if (queuedDraft) {
+          runQueueAddRequestIdsRef.current.delete(message.requestId)
+          setComposerValue((current) => current.trim() ? current : queuedDraft.message)
+          setComposerCursor(queuedDraft.message.length)
+          setPastedImage((current) => current ?? queuedDraft.pastedImage)
+          setPastedImageFilePath((current) => current ?? queuedDraft.pastedImageFilePath)
+          setWorkspaceAttachments((current) => current.length > 0 ? current : queuedDraft.workspaceAttachments)
+          setRunStatus(`Queue failed: ${message.error}`)
+          return
+        }
+
+        if (runQueueUpdateRequestIdsRef.current.has(message.requestId)) {
+          runQueueUpdateRequestIdsRef.current.delete(message.requestId)
+          setRunStatus(`Queue update failed: ${message.error}`)
+          return
+        }
+
+        if (runQueueRemoveRequestIdsRef.current.has(message.requestId)) {
+          runQueueRemoveRequestIdsRef.current.delete(message.requestId)
+          setRunStatus(`Queue remove failed: ${message.error}`)
           return
         }
 
@@ -4025,7 +4391,7 @@ export default function App() {
             </div>
           </section>
         ) : null}
-        <div className="chat">
+        <div className={`chat${pendingQuestion ? ' chat--has-question' : ''}`}>
           {pendingQuestion ? (
             <QuestionBanner pending={pendingQuestion} onReply={requestQuestionReply} onReject={requestQuestionReject} />
           ) : null}
@@ -4105,7 +4471,7 @@ export default function App() {
         ) : null}
 
         <section
-          className={`composer-stack${pastedImage ? ' has-preview' : ''}${activeTodos.length > 0 ? ' has-todos' : ''}`}
+          className={`composer-stack${pastedImage ? ' has-preview' : ''}${runQueue.length > 0 ? ' has-queue' : ''}${activeTodos.length > 0 ? ' has-todos' : ''}`}
           aria-label={t('Message composer')}
         >
           {pastedImage ? (
@@ -4124,6 +4490,8 @@ export default function App() {
               </button>
             </div>
           ) : null}
+
+          <QueuePanel items={runQueue} onUpdate={updateQueuedPrompt} onRemove={removeQueuedPrompt} />
 
           <TodoPanel todos={activeTodos} />
 
@@ -4307,8 +4675,8 @@ export default function App() {
               setComposerValue(`${composerValue.slice(0, -1)}\n`)
               return
             }
-            if (!isRunning && composerValue.trim().length > 0 && selectedModel && selectedAgent) {
-              startRun()
+            if (composerValue.trim().length > 0 && selectedModel && selectedAgent) {
+              submitComposer()
             }
           }}
         />
@@ -4416,24 +4784,32 @@ export default function App() {
 
           {contextUsage ? <ContextUsageIndicator usage={contextUsage.usage} contextWindow={contextUsage.contextWindow} /> : null}
 
-          <button
-            type="button"
-            className={`composer-stack__send${isRunning ? ' composer-stack__send--running' : ''}`}
-            onClick={isRunning ? stopRun : submitComposer}
-            disabled={!isRunning && (composerValue.trim().length === 0 || (!commandState.open && (!selectedModel || !selectedAgent)))}
-            aria-label={isRunning ? t('Stop') : t('Send')}
-            title={isRunning ? t('Stop') : t('Send')}
-          >
-            {isRunning ? (
+          {isRunning ? (
+            <button
+              type="button"
+              className="composer-stack__send composer-stack__send--stop"
+              onClick={stopRun}
+              aria-label={t('Stop')}
+              title={t('Stop')}
+            >
               <span className="composer-stack__stop-icon" aria-hidden="true">
                 <Square size={11} fill="currentColor" strokeWidth={0} />
               </span>
-            ) : (
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="composer-stack__send"
+              onClick={submitComposer}
+              disabled={composerValue.trim().length === 0 || (!commandState.open && (!selectedModel || !selectedAgent))}
+              aria-label={t('Send')}
+              title={t('Send')}
+            >
               <span className="composer-stack__send-arrow" aria-hidden="true">
                 <ArrowUp size={19} strokeWidth={2.4} />
               </span>
-            )}
-          </button>
+            </button>
+          )}
         </div>
         </section>
       </section>

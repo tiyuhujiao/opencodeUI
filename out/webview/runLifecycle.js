@@ -2,6 +2,9 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.BLOCKER_POLL_INTERVAL_MS = void 0;
 exports.createServeStreamState = createServeStreamState;
+exports.armServeStreamTurn = armServeStreamTurn;
+exports.canCompleteServeStreamTurn = canCompleteServeStreamTurn;
+exports.isSessionIdleStatus = isSessionIdleStatus;
 exports.dispatchServeEvent = dispatchServeEvent;
 exports.pollServeBlockers = pollServeBlockers;
 exports.hasPendingServeBlockers = hasPendingServeBlockers;
@@ -12,6 +15,8 @@ function createServeStreamState() {
     return {
         assistantMessageIds: new Set(),
         lastAssistantMessageId: null,
+        turnArmed: false,
+        turnLive: false,
         partTextByKey: new Map(),
         partKindByKey: new Map(),
         deltaSeenPartKeys: new Set(),
@@ -19,6 +24,29 @@ function createServeStreamState() {
         pendingPermissionIds: new Set(),
         pendingQuestionIds: new Set(),
     };
+}
+function armServeStreamTurn(streamState, options) {
+    streamState.turnArmed = true;
+    if (options?.live) {
+        streamState.turnLive = true;
+    }
+}
+function canCompleteServeStreamTurn(streamState) {
+    return (streamState.turnArmed &&
+        streamState.turnLive &&
+        !hasPendingServeBlockers(streamState));
+}
+function isSessionIdleStatus(value, sessionId) {
+    if (typeof value !== "object" || value === null) {
+        return false;
+    }
+    const status = value[sessionId];
+    if (status === undefined) {
+        return true;
+    }
+    return (typeof status === "object" &&
+        status !== null &&
+        status.type === "idle");
 }
 function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
     if (typeof event !== "object" || event === null) {
@@ -29,6 +57,7 @@ function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
     const properties = typeof record.properties === "object" && record.properties !== null
         ? record.properties
         : {};
+    markServeTurnLive(type, properties, sessionId, streamState);
     if (type === "permission.asked") {
         const permissionEvent = normalizePermissionRequest(properties);
         if (permissionEvent &&
@@ -69,31 +98,42 @@ function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
         const info = typeof properties.info === "object" && properties.info !== null
             ? properties.info
             : null;
-        if (!info || info.sessionID !== sessionId || info.role !== "assistant") {
+        if (!info || info.sessionID !== sessionId) {
             return { done: false };
         }
         const messageId = typeof info.id === "string" ? info.id : null;
+        if (info.role === "user") {
+            if (messageId) {
+                adapter.onUserMessage?.({ id: messageId });
+            }
+            return { done: false };
+        }
+        if (info.role !== "assistant") {
+            return { done: false };
+        }
         if (messageId) {
             streamState.assistantMessageIds.add(messageId);
             streamState.lastAssistantMessageId = messageId;
+            adapter.onAssistantMessage?.({
+                id: messageId,
+                ...(typeof info.parentID === "string"
+                    ? { parentId: info.parentID }
+                    : {}),
+            });
         }
         const usage = normalizeContextUsage(info);
         if (usage) {
             adapter.emit({ type: "context.usage", usage });
         }
-        if (messageId &&
-            typeof info.finish === "string" &&
-            !["tool-calls", "unknown"].includes(info.finish) &&
-            !hasPendingServeBlockers(streamState)) {
-            return { done: true };
-        }
+        // OpenCode can publish a final-looking assistant message before its
+        // session status reaches idle. Queue turns only advance on that status.
         return { done: false };
     }
     if (type === "session.error") {
         if (properties.sessionID === sessionId) {
             const message = extractEventErrorMessage(properties.error) ?? "运行失败。";
             adapter.emit({ type: "error", error: message });
-            return { done: true };
+            return { done: true, error: message };
         }
         return { done: false };
     }
@@ -131,12 +171,34 @@ function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
             : null;
         if (properties.sessionID === sessionId &&
             status?.type === "idle" &&
-            streamState.lastAssistantMessageId &&
-            !hasPendingServeBlockers(streamState)) {
+            canCompleteServeStreamTurn(streamState)) {
             return { done: true };
         }
     }
     return { done: false };
+}
+function markServeTurnLive(type, properties, sessionId, streamState) {
+    if (properties.sessionID !== sessionId) {
+        return;
+    }
+    if (type === "message.updated") {
+        const info = isRecord(properties.info) ? properties.info : null;
+        if (info?.role === "assistant") {
+            streamState.turnLive = true;
+        }
+        return;
+    }
+    if (type === "message.part.delta" || type === "message.part.updated") {
+        return;
+    }
+    if (type === "session.status") {
+        const status = isRecord(properties.status) ? properties.status : null;
+        if (status?.type !== "idle") {
+            streamState.turnLive = true;
+        }
+        return;
+    }
+    streamState.turnLive = true;
 }
 function normalizeContextUsage(info) {
     const metadata = isRecord(info.metadata) ? info.metadata : undefined;

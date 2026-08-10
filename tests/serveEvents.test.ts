@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+	armServeStreamTurn,
 	createServeStreamState,
 	dispatchServeEvent,
 	pollServeBlockers,
@@ -64,7 +65,10 @@ describe("run lifecycle serve event dispatch", () => {
 			streamState,
 		);
 
-		expect(result).toEqual({ done: true });
+		expect(result).toEqual({
+			done: true,
+			error: "Model not found: cpa111/gpt-5.6-sol.",
+		});
 		expect(posted).toContainEqual(
 			expect.objectContaining({
 				payload: {
@@ -75,6 +79,117 @@ describe("run lifecycle serve event dispatch", () => {
 				},
 			}),
 		);
+	});
+
+	it("只在 prompt 已提交、当前 turn 已活动且 session 真正 idle 后完成", () => {
+		const lifecycle = createLifecycle();
+		const streamState = createServeStreamState();
+		const idleEvent = {
+			type: "session.status",
+			properties: {
+				sessionID: "session-1",
+				status: { type: "idle" },
+			},
+		};
+
+		expect(
+			dispatchServeEvent(
+				lifecycle,
+				"request-1",
+				"session-1",
+				idleEvent,
+				streamState,
+			),
+		).toEqual({ done: false });
+
+		armServeStreamTurn(streamState);
+		expect(
+			dispatchServeEvent(
+				lifecycle,
+				"request-1",
+				"session-1",
+				idleEvent,
+				streamState,
+			),
+		).toEqual({ done: false });
+
+		expect(
+			dispatchServeEvent(
+				lifecycle,
+				"request-1",
+				"session-1",
+				{
+					type: "message.updated",
+					properties: {
+						sessionID: "session-1",
+						info: {
+							id: "assistant-1",
+							sessionID: "session-1",
+							role: "assistant",
+							finish: "stop",
+						},
+					},
+				},
+				streamState,
+			),
+		).toEqual({ done: false });
+
+		expect(
+			dispatchServeEvent(
+				lifecycle,
+				"request-1",
+				"session-1",
+				idleEvent,
+				streamState,
+			),
+		).toEqual({ done: true });
+	});
+
+	it("reports user and assistant message boundaries used by running Queue delivery", () => {
+		const onUserMessage = vi.fn();
+		const onAssistantMessage = vi.fn();
+		const lifecycle: RunLifecycleAdapter = {
+			...createLifecycle(),
+			onUserMessage,
+			onAssistantMessage,
+		};
+		const streamState = createServeStreamState();
+
+		dispatchServeEvent(
+			lifecycle,
+			"request-1",
+			"session-1",
+			{
+				type: "message.updated",
+				properties: {
+					info: { id: "msg-user-2", sessionID: "session-1", role: "user" },
+				},
+			},
+			streamState,
+		);
+		dispatchServeEvent(
+			lifecycle,
+			"request-1",
+			"session-1",
+			{
+				type: "message.updated",
+				properties: {
+					info: {
+						id: "msg-assistant-2",
+						parentID: "msg-user-2",
+						sessionID: "session-1",
+						role: "assistant",
+					},
+				},
+			},
+			streamState,
+		);
+
+		expect(onUserMessage).toHaveBeenCalledWith({ id: "msg-user-2" });
+		expect(onAssistantMessage).toHaveBeenCalledWith({
+			id: "msg-assistant-2",
+			parentId: "msg-user-2",
+		});
 	});
 
 	it("只转发当前 session 的权限请求，并过滤非字符串 pattern", () => {
@@ -123,6 +238,7 @@ describe("run lifecycle serve event dispatch", () => {
 		const lifecycle = createLifecycle({ posted });
 		const streamState = createServeStreamState();
 		streamState.lastAssistantMessageId = "message-1";
+		armServeStreamTurn(streamState);
 
 		const questionResult = dispatchServeEvent(
 			lifecycle,
@@ -238,6 +354,20 @@ describe("run lifecycle serve event dispatch", () => {
 		});
 		const streamState = createServeStreamState();
 		streamState.lastAssistantMessageId = "message-1";
+		armServeStreamTurn(streamState);
+		dispatchServeEvent(
+			lifecycle,
+			"request-1",
+			"parent-session",
+			{
+				type: "session.status",
+				properties: {
+					sessionID: "parent-session",
+					status: { type: "busy" },
+				},
+			},
+			streamState,
+		);
 
 		const questionResult = dispatchServeEvent(
 			lifecycle,

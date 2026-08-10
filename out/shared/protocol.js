@@ -46,6 +46,9 @@ exports.WEBVIEW_REQUEST_WHITELIST = [
     'workspace.resources.resolve',
     'selfcheck.run',
     'run.start',
+    'run.queue.add',
+    'run.queue.update',
+    'run.queue.remove',
     'run.stop'
 ];
 const WEBVIEW_REQUEST_WHITELIST_SET = new Set(exports.WEBVIEW_REQUEST_WHITELIST);
@@ -86,6 +89,10 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set([
     'workspace.resources.search.response',
     'workspace.resources.resolve.response',
     'run.start.response',
+    'run.queue.add.response',
+    'run.queue.update.response',
+    'run.queue.remove.response',
+    'run.queue.state',
     'run.stop.response',
     'permission.reply.response',
     'question.reply.response',
@@ -103,6 +110,58 @@ function isProviderSettingsScope(value) {
 }
 function isBoundedString(value, maxLength = 100000) {
     return typeof value === 'string' && value.length <= maxLength;
+}
+function isQueuedPromptSummary(value) {
+    return isObject(value)
+        && isNonEmptyString(value.id)
+        && isBoundedString(value.message)
+        && value.message.trim().length > 0
+        && typeof value.createdAt === 'number'
+        && Number.isFinite(value.createdAt)
+        && value.createdAt >= 0
+        && isNonNegativeInteger(value.attachmentCount)
+        && typeof value.locked === 'boolean'
+        && (value.commandName === undefined || isNonEmptyString(value.commandName));
+}
+function isRunQueueState(value) {
+    return isObject(value)
+        && Array.isArray(value.items)
+        && value.items.length <= 500
+        && value.items.every(isQueuedPromptSummary);
+}
+function isRunPromptPayload(value) {
+    if (!isObject(value)
+        || !isNonEmptyString(value.message)
+        || !isNonEmptyString(value.model)
+        || !isNonEmptyString(value.agent)) {
+        return false;
+    }
+    if (value.sessionId !== undefined && !isNonEmptyString(value.sessionId)) {
+        return false;
+    }
+    if (value.title !== undefined && typeof value.title !== 'string') {
+        return false;
+    }
+    if (value.thinking !== undefined && typeof value.thinking !== 'boolean') {
+        return false;
+    }
+    if (value.variant !== undefined && typeof value.variant !== 'string') {
+        return false;
+    }
+    if (value.files !== undefined) {
+        if (!isStringArray(value.files, 100, 16384)
+            || value.files.some((file) => file.trim().length === 0)) {
+            return false;
+        }
+    }
+    if (value.command !== undefined) {
+        if (!isObject(value.command)
+            || !isNonEmptyString(value.command.name)
+            || typeof value.command.arguments !== 'string') {
+            return false;
+        }
+    }
+    return true;
 }
 function isStringArray(value, maxItems = 500, maxItemLength = 2048) {
     return Array.isArray(value)
@@ -328,6 +387,24 @@ function isExtensionResponseMessage(message) {
     }
     if (typeof message.ok !== 'boolean') {
         return false;
+    }
+    if (message.type === 'webview.ready.ack' || message.type === 'run.snapshot') {
+        return message.ok === true
+            && isObject(message.payload)
+            && isRunQueueState(message.payload.queue);
+    }
+    if (message.type === 'run.queue.state') {
+        return message.ok === true && isRunQueueState(message.payload);
+    }
+    if (message.type === 'run.queue.add.response') {
+        return message.ok === true
+            && isObject(message.payload)
+            && isRunQueueState(message.payload.state);
+    }
+    if (message.type === 'run.queue.update.response' || message.type === 'run.queue.remove.response') {
+        return message.ok === true
+            && isObject(message.payload)
+            && isRunQueueState(message.payload.state);
     }
     if (message.type === 'subtask.transcript.response') {
         return message.ok === true
@@ -667,24 +744,22 @@ function isWebviewRequestMessage(message) {
             return false;
         }
     }
-    if (message.type === 'run.start') {
-        if (!isObject(message.payload)) {
+    if (message.type === 'run.start' || message.type === 'run.queue.add') {
+        if (!isRunPromptPayload(message.payload)) {
             return false;
         }
-        if (Array.isArray(message.payload.files)) {
-            for (const file of message.payload.files) {
-                if (typeof file !== 'string' || file.trim().length === 0) {
-                    return false;
-                }
-            }
+    }
+    if (message.type === 'run.queue.update') {
+        if (!isObject(message.payload)
+            || !isNonEmptyString(message.payload.id)
+            || !isBoundedString(message.payload.message)
+            || message.payload.message.trim().length === 0) {
+            return false;
         }
-        if (typeof message.payload.command !== 'undefined') {
-            if (!isObject(message.payload.command)) {
-                return false;
-            }
-            if (!isNonEmptyString(message.payload.command.name) || typeof message.payload.command.arguments !== 'string') {
-                return false;
-            }
+    }
+    if (message.type === 'run.queue.remove') {
+        if (!isObject(message.payload) || !isNonEmptyString(message.payload.id)) {
+            return false;
         }
     }
     if (message.type === 'models.list.byProvider') {
@@ -696,40 +771,6 @@ function isWebviewRequestMessage(message) {
         }
         if (typeof message.payload.forceRefresh !== 'undefined' && typeof message.payload.forceRefresh !== 'boolean') {
             return false;
-        }
-    }
-    if (message.type === 'run.start') {
-        if (!isObject(message.payload)) {
-            return false;
-        }
-        if (typeof message.payload.message !== 'string' || message.payload.message.trim().length === 0) {
-            return false;
-        }
-        if (typeof message.payload.model !== 'string' || message.payload.model.trim().length === 0) {
-            return false;
-        }
-        if (typeof message.payload.agent !== 'string' || message.payload.agent.trim().length === 0) {
-            return false;
-        }
-        if (typeof message.payload.sessionId !== 'undefined') {
-            if (typeof message.payload.sessionId !== 'string' || message.payload.sessionId.trim().length === 0) {
-                return false;
-            }
-        }
-        if (typeof message.payload.title !== 'undefined') {
-            if (typeof message.payload.title !== 'string') {
-                return false;
-            }
-        }
-        if (typeof message.payload.thinking !== 'undefined') {
-            if (typeof message.payload.thinking !== 'boolean') {
-                return false;
-            }
-        }
-        if (typeof message.payload.variant !== 'undefined') {
-            if (typeof message.payload.variant !== 'string') {
-                return false;
-            }
         }
     }
     return true;

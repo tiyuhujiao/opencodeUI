@@ -21,6 +21,8 @@ type ServeStreamPartKind = "text" | "reasoning";
 export type ServeStreamState = {
 	assistantMessageIds: Set<string>;
 	lastAssistantMessageId: string | null;
+	turnArmed: boolean;
+	turnLive: boolean;
 	partTextByKey: Map<string, string>;
 	partKindByKey: Map<string, ServeStreamPartKind>;
 	deltaSeenPartKeys: Set<string>;
@@ -37,6 +39,11 @@ type SessionTreeItem = {
 export type RunLifecycleAdapter = {
 	isCurrentRun(requestId: string): boolean;
 	emit(event: RunStreamEvent): void;
+	onUserMessage?(message: { id: string }): void;
+	onAssistantMessage?(message: {
+		id: string;
+		parentId?: string;
+	}): void;
 	acceptBlockerSession(
 		requestId: string,
 		sessionId: string,
@@ -51,6 +58,8 @@ export function createServeStreamState(): ServeStreamState {
 	return {
 		assistantMessageIds: new Set<string>(),
 		lastAssistantMessageId: null,
+		turnArmed: false,
+		turnLive: false,
 		partTextByKey: new Map<string, string>(),
 		partKindByKey: new Map<string, ServeStreamPartKind>(),
 		deltaSeenPartKeys: new Set<string>(),
@@ -60,13 +69,48 @@ export function createServeStreamState(): ServeStreamState {
 	};
 }
 
+export function armServeStreamTurn(
+	streamState: ServeStreamState,
+	options?: { live?: boolean },
+): void {
+	streamState.turnArmed = true;
+	if (options?.live) {
+		streamState.turnLive = true;
+	}
+}
+
+export function canCompleteServeStreamTurn(
+	streamState: ServeStreamState,
+): boolean {
+	return (
+		streamState.turnArmed &&
+		streamState.turnLive &&
+		!hasPendingServeBlockers(streamState)
+	);
+}
+
+export function isSessionIdleStatus(value: unknown, sessionId: string): boolean {
+	if (typeof value !== "object" || value === null) {
+		return false;
+	}
+	const status = (value as Record<string, unknown>)[sessionId];
+	if (status === undefined) {
+		return true;
+	}
+	return (
+		typeof status === "object" &&
+		status !== null &&
+		(status as Record<string, unknown>).type === "idle"
+	);
+}
+
 export function dispatchServeEvent(
 	adapter: RunLifecycleAdapter,
 	requestId: string,
 	sessionId: string,
 	event: unknown,
 	streamState: ServeStreamState,
-): { done: boolean } {
+): { done: boolean; error?: string } {
 	if (typeof event !== "object" || event === null) {
 		return { done: false };
 	}
@@ -76,6 +120,7 @@ export function dispatchServeEvent(
 		typeof record.properties === "object" && record.properties !== null
 			? (record.properties as Record<string, unknown>)
 			: {};
+	markServeTurnLive(type, properties, sessionId, streamState);
 
 	if (type === "permission.asked") {
 		const permissionEvent = normalizePermissionRequest(properties);
@@ -151,26 +196,35 @@ export function dispatchServeEvent(
 			typeof properties.info === "object" && properties.info !== null
 				? (properties.info as Record<string, unknown>)
 				: null;
-		if (!info || info.sessionID !== sessionId || info.role !== "assistant") {
+		if (!info || info.sessionID !== sessionId) {
 			return { done: false };
 		}
 		const messageId = typeof info.id === "string" ? info.id : null;
+		if (info.role === "user") {
+			if (messageId) {
+				adapter.onUserMessage?.({ id: messageId });
+			}
+			return { done: false };
+		}
+		if (info.role !== "assistant") {
+			return { done: false };
+		}
 		if (messageId) {
 			streamState.assistantMessageIds.add(messageId);
 			streamState.lastAssistantMessageId = messageId;
+			adapter.onAssistantMessage?.({
+				id: messageId,
+				...(typeof info.parentID === "string"
+					? { parentId: info.parentID }
+					: {}),
+			});
 		}
 		const usage = normalizeContextUsage(info);
 		if (usage) {
 			adapter.emit({ type: "context.usage", usage });
 		}
-		if (
-			messageId &&
-			typeof info.finish === "string" &&
-			!["tool-calls", "unknown"].includes(info.finish) &&
-			!hasPendingServeBlockers(streamState)
-		) {
-			return { done: true };
-		}
+		// OpenCode can publish a final-looking assistant message before its
+		// session status reaches idle. Queue turns only advance on that status.
 		return { done: false };
 	}
 
@@ -179,7 +233,7 @@ export function dispatchServeEvent(
 			const message =
 				extractEventErrorMessage(properties.error) ?? "运行失败。";
 			adapter.emit({ type: "error", error: message });
-			return { done: true };
+			return { done: true, error: message };
 		}
 		return { done: false };
 	}
@@ -228,14 +282,46 @@ export function dispatchServeEvent(
 		if (
 			properties.sessionID === sessionId &&
 			status?.type === "idle" &&
-			streamState.lastAssistantMessageId &&
-			!hasPendingServeBlockers(streamState)
+			canCompleteServeStreamTurn(streamState)
 		) {
 			return { done: true };
 		}
 	}
 
 	return { done: false };
+}
+
+function markServeTurnLive(
+	type: string,
+	properties: Record<string, unknown>,
+	sessionId: string,
+	streamState: ServeStreamState,
+): void {
+	if (properties.sessionID !== sessionId) {
+		return;
+	}
+
+	if (type === "message.updated") {
+		const info = isRecord(properties.info) ? properties.info : null;
+		if (info?.role === "assistant") {
+			streamState.turnLive = true;
+		}
+		return;
+	}
+
+	if (type === "message.part.delta" || type === "message.part.updated") {
+		return;
+	}
+
+	if (type === "session.status") {
+		const status = isRecord(properties.status) ? properties.status : null;
+		if (status?.type !== "idle") {
+			streamState.turnLive = true;
+		}
+		return;
+	}
+
+	streamState.turnLive = true;
 }
 
 function normalizeContextUsage(

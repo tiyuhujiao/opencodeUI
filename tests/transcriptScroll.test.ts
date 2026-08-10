@@ -38,6 +38,17 @@ describe('anchored transcript scrolling', () => {
     expect(source).toContain('transcript__run-spacer');
   });
 
+  it('用户离开跟随位置后不再被流式更新拉回', () => {
+    const source = readFileSync('webview-ui/src/components/Transcript.tsx', 'utf8');
+
+    expect(source).toContain('const programmaticScrollTargetRef = useRef<number | null>(null)');
+    expect(source).toContain('const setProgrammaticScrollTop = (top: number) => {');
+    expect(source).toContain('if (isRunning && !autoScrollPausedRef.current) {');
+    expect(source).toContain('onPointerDown={(event) => {');
+    expect(source).toContain("['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' ']");
+    expect(source).toContain('Math.abs(followTarget - el.scrollTop) < 24');
+  });
+
   it('使用短促 ease-out 动画而不是瞬间跳到锚点', () => {
     expect(TURN_ANCHOR_SCROLL_DURATION_MS).toBe(180);
     expect(interpolateFastScrollTop(100, 500, 0)).toBe(100);

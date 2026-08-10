@@ -179,6 +179,13 @@ body {
   overflow: hidden;
 }
 
+.chat--has-question {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
 .main-shell {
   flex: 1 1 auto;
   min-height: 0;
@@ -1317,10 +1324,43 @@ p {
 }
 
 .question-banner__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
   font-size: 0.72rem;
   font-weight: 800;
   letter-spacing: 0;
   text-transform: uppercase;
+}
+
+.question-banner__pager {
+  display: inline-grid;
+  grid-template-columns: 1.65rem minmax(2.5rem, auto) 1.65rem;
+  align-items: center;
+  justify-items: center;
+  gap: 0.18rem;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.question-banner__pager button {
+  width: 1.65rem;
+  height: 1.65rem;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--ui-warning-button-border);
+  border-radius: 5px;
+  padding: 0;
+  background: var(--ui-warning-button-bg);
+  color: inherit;
+  cursor: pointer;
+}
+
+.question-banner__pager button:disabled {
+  cursor: default;
+  opacity: 0.38;
 }
 
 .question-banner__body {
@@ -1680,6 +1720,130 @@ p {
   margin-bottom: -0.25rem;
 }
 
+.composer-queue {
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-surface-muted);
+  overflow: hidden;
+}
+
+.composer-queue__header {
+  min-height: 1.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  padding: 0.32rem 0.45rem;
+  color: var(--ui-text);
+  font-size: 0.82rem;
+}
+
+.composer-queue__title {
+  font-weight: 750;
+}
+
+.composer-queue__count {
+  min-width: 1.3rem;
+  border: 1px solid var(--ui-border);
+  border-radius: 999px;
+  padding: 0.03rem 0.34rem;
+  text-align: center;
+  color: var(--ui-text-muted);
+  background: var(--ui-composer-input-bg);
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+}
+
+.composer-queue__list {
+  max-height: 7rem;
+  overflow: auto;
+  border-top: 1px solid var(--ui-border-subtle);
+  scrollbar-width: thin;
+}
+
+.composer-stack.has-queue.has-todos .composer-queue__list,
+.composer-stack.has-queue.has-todos .composer-todo__list {
+  max-height: 4rem;
+}
+
+.composer-queue__item {
+  min-height: 2rem;
+  display: grid;
+  grid-template-columns: 1.2rem minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.38rem;
+  border-bottom: 1px solid var(--ui-border-subtle);
+  font-size: 0.8rem;
+}
+
+.composer-queue__item:last-child {
+  border-bottom: 0;
+}
+
+.composer-queue__index {
+  color: var(--ui-text-muted);
+  text-align: center;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+}
+
+.composer-queue__message {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-text);
+}
+
+.composer-queue__input {
+  min-width: 0;
+  width: 100%;
+  height: 1.6rem;
+  border: 1px solid var(--vscode-focusBorder, var(--ui-accent));
+  border-radius: 4px;
+  padding: 0.18rem 0.35rem;
+  background: var(--ui-input-bg);
+  color: var(--ui-text);
+  font: inherit;
+}
+
+.composer-queue__attachments {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.12rem;
+  color: var(--ui-text-muted);
+  font-size: 0.7rem;
+}
+
+.composer-queue__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.08rem;
+}
+
+.composer-queue__actions button {
+  width: 1.55rem;
+  height: 1.55rem;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  padding: 0;
+  background: transparent;
+  color: var(--ui-text-muted);
+  cursor: pointer;
+}
+
+.composer-queue__actions button:hover:not(:disabled) {
+  background: var(--ui-button-bg);
+  color: var(--ui-text);
+}
+
+.composer-queue__actions button:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
 .composer-todo__summary {
   list-style: none;
   min-height: 2rem;
@@ -1829,7 +1993,18 @@ p {
   left: auto;
 }
 
+.composer-stack.has-preview.has-queue .composer-stack__preview {
+  position: relative;
+  top: auto;
+  left: auto;
+}
+
 .composer-stack.has-preview.has-todos .composer-stack__textarea {
+  min-height: 2.8rem;
+  padding-top: 0.65rem;
+}
+
+.composer-stack.has-preview.has-queue .composer-stack__textarea {
   min-height: 2.8rem;
   padding-top: 0.65rem;
 }
@@ -2079,15 +2254,6 @@ p {
   font-weight: 800;
   line-height: 1;
   transform: translateY(-0.05rem) scaleX(1.28);
-}
-
-.composer-stack__send--running {
-  background: #111827;
-  box-shadow: 0 0 0 4px rgba(17, 24, 39, 0.08);
-}
-
-.composer-stack__send--running:hover {
-  box-shadow: 0 10px 22px rgba(17, 24, 39, 0.24);
 }
 
 .composer-stack__stop-icon {
@@ -4004,6 +4170,12 @@ summary:focus-visible {
   background: var(--ui-button-bg);
   color: var(--ui-placeholder);
   opacity: 1;
+}
+
+.composer-stack__send--stop,
+.composer-stack__send--stop:hover:not(:disabled) {
+  background: var(--ui-danger);
+  color: var(--ui-inverse-text);
 }
 
 .composer-stack__send-arrow,

@@ -44,6 +44,7 @@ export function Transcript({
   const containerRef = useRef<HTMLDivElement | null>(null)
   const autoScrollPausedRef = useRef(false)
   const scrollLockRef = useRef<{ top: number; until: number } | null>(null)
+  const programmaticScrollTargetRef = useRef<number | null>(null)
   const turnAnchorRef = useRef<HTMLElement | null>(null)
   const runSpacerRef = useRef<HTMLDivElement | null>(null)
   const anchorScrollFrameRef = useRef<number | null>(null)
@@ -111,6 +112,12 @@ export function Transcript({
       return last ? last.offsetTop + last.offsetHeight : 0
     }
 
+    const setProgrammaticScrollTop = (top: number) => {
+      const target = Math.max(0, Math.min(top, Math.max(0, el.scrollHeight - el.clientHeight)))
+      programmaticScrollTargetRef.current = target
+      el.scrollTop = target
+    }
+
     const updateRunSpacerHeight = () => {
       const anchor = turnAnchorRef.current
       const spacer = runSpacerRef.current
@@ -144,7 +151,7 @@ export function Transcript({
       const lock = scrollLockRef.current
       if (lock) {
         if (Date.now() <= lock.until) {
-          el.scrollTop = lock.top
+          setProgrammaticScrollTop(lock.top)
           return
         }
         scrollLockRef.current = null
@@ -161,16 +168,16 @@ export function Transcript({
       if (isRunning) {
         const target = anchoredScrollTop()
         if (target === null) {
-          el.scrollTop = el.scrollHeight
+          setProgrammaticScrollTop(el.scrollHeight)
           return
         }
-        el.scrollTop = target
+        setProgrammaticScrollTop(target)
         return
       }
 
       const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
       if (distanceToBottom < 80) {
-        el.scrollTop = el.scrollHeight
+        setProgrammaticScrollTop(el.scrollHeight)
       }
     }
 
@@ -184,7 +191,7 @@ export function Transcript({
       const start = el.scrollTop
       const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
       if (reduceMotion || Math.abs(initialTarget - start) < 0.5) {
-        el.scrollTop = initialTarget
+        setProgrammaticScrollTop(initialTarget)
         return
       }
 
@@ -196,7 +203,7 @@ export function Transcript({
         }
         const target = anchoredScrollTop() ?? initialTarget
         const elapsed = now - startedAt
-        el.scrollTop = interpolateFastScrollTop(start, target, elapsed)
+        setProgrammaticScrollTop(interpolateFastScrollTop(start, target, elapsed))
         if (elapsed >= TURN_ANCHOR_SCROLL_DURATION_MS) {
           anchorScrollFrameRef.current = null
           anchorScrollActiveRef.current = false
@@ -237,12 +244,27 @@ export function Transcript({
     resizeObserver.observe(el)
 
     const onScroll = () => {
+      const programmaticTarget = programmaticScrollTargetRef.current
+      if (programmaticTarget !== null && Math.abs(el.scrollTop - programmaticTarget) < 1) {
+        programmaticScrollTargetRef.current = null
+        return
+      }
+      programmaticScrollTargetRef.current = null
+
+      if (isRunning && !autoScrollPausedRef.current) {
+        cancelAnchorScroll()
+        autoScrollPausedRef.current = true
+        scrollLockRef.current = null
+      }
+
       if (!autoScrollPausedRef.current) {
         return
       }
 
-      const distanceToBottom = contentBottom() - el.scrollTop - el.clientHeight
-      if (distanceToBottom < 80) {
+      const followTarget = isRunning
+        ? anchoredScrollTop()
+        : Math.max(0, el.scrollHeight - el.clientHeight)
+      if (followTarget !== null && Math.abs(followTarget - el.scrollTop) < 24) {
         autoScrollPausedRef.current = false
         scrollLockRef.current = null
       }
@@ -286,6 +308,14 @@ export function Transcript({
         autoScrollPausedRef.current = true
         scrollLockRef.current = null
       }}
+      onPointerDown={(event) => {
+        if (event.target !== event.currentTarget) {
+          return
+        }
+        cancelAnchorScroll()
+        autoScrollPausedRef.current = true
+        scrollLockRef.current = null
+      }}
       onClick={(event) => {
         const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-file-path]') : null
         const filePath = target?.dataset.filePath
@@ -300,6 +330,11 @@ export function Transcript({
         })
       }}
       onKeyDown={(event) => {
+        if (['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' '].includes(event.key)) {
+          cancelAnchorScroll()
+          autoScrollPausedRef.current = true
+          scrollLockRef.current = null
+        }
         if (event.key !== 'Enter' && event.key !== ' ') {
           return
         }

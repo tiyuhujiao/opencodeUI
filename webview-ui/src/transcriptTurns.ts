@@ -9,6 +9,7 @@ export type AssistantTurn = {
   key: string
   user: IndexedTranscriptMessage
   responses: IndexedTranscriptMessage[]
+  startedAt?: number
 }
 
 export type TranscriptDisplayBlock =
@@ -24,6 +25,10 @@ export type AssistantTurnTiming = {
 export function buildTranscriptDisplayBlocks(messages: TranscriptMessage[]): TranscriptDisplayBlock[] {
   const blocks: TranscriptDisplayBlock[] = []
   let index = 0
+  let previousRunStartedAt: number | undefined
+  let previousAssistantCompletedAt: number | undefined
+  let previousAssistantIncomplete = false
+  let previousAssistantContinuesRun = false
 
   while (index < messages.length) {
     const message = messages[index]
@@ -42,15 +47,44 @@ export function buildTranscriptDisplayBlocks(messages: TranscriptMessage[]): Tra
       responseIndex += 1
     }
 
-    if (responses.some((response) => response.message.role === 'assistant')) {
+    const assistantMessages = responses
+      .map((response) => response.message)
+      .filter((response) => response.role === 'assistant')
+    if (assistantMessages.length > 0) {
+      const continuesPreviousRun = previousRunStartedAt !== undefined && (
+        previousAssistantIncomplete
+        || previousAssistantContinuesRun
+        || (
+          message.created !== undefined
+          && previousAssistantCompletedAt !== undefined
+          && message.created <= previousAssistantCompletedAt
+        )
+      )
+      const startedAt = continuesPreviousRun ? previousRunStartedAt : message.created
       blocks.push({
         kind: 'assistant-turn',
         turn: {
           key: `turn-${String(index)}`,
           user: entry,
-          responses
+          responses,
+          ...(startedAt !== undefined ? { startedAt } : {})
         }
       })
+      const completedTimes = assistantMessages
+        .map((response) => response.completed)
+        .filter((value): value is number => value !== undefined)
+      previousRunStartedAt = startedAt
+      previousAssistantCompletedAt = completedTimes.length > 0 ? Math.max(...completedTimes) : undefined
+      const lastAssistant = assistantMessages[assistantMessages.length - 1]
+      previousAssistantIncomplete = lastAssistant?.completed === undefined
+      previousAssistantContinuesRun = Boolean(
+        lastAssistant
+        && (
+          lastAssistant.finish === 'tool-calls'
+          || lastAssistant.finish === 'unknown'
+          || lastAssistant.parts.some((part) => part.type === 'tool')
+        )
+      )
     } else {
       blocks.push(...responses.map((response) => ({ kind: 'message' as const, entry: response })))
     }
@@ -68,7 +102,8 @@ export function resolveAssistantTurnTiming(
   const assistantMessages = turn.responses
     .map((entry) => entry.message)
     .filter((message) => message.role === 'assistant')
-  const startedAt = turn.user.message.created
+  const startedAt = turn.startedAt
+    ?? turn.user.message.created
     ?? assistantMessages.find((message) => message.created !== undefined)?.created
     ?? options.fallbackStartedAt
     ?? null

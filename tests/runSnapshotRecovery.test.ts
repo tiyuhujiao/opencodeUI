@@ -6,6 +6,7 @@ vi.mock('vscode', () => ({ workspace: {} }), { virtual: true });
 
 import type { RunStreamEvent, TranscriptMessage } from '../src/shared/protocol';
 import { SidebarProvider } from '../src/webview/SidebarProvider';
+import type { QueuedPromptEntry } from '../src/webview/promptQueue';
 
 type FakeWebview = {
   postMessage: (message: unknown) => Thenable<boolean>;
@@ -22,6 +23,7 @@ type TestRun = {
   startedNewSession: boolean;
   recoveryTranscript: TranscriptMessage[];
   recoveryAssistantIndex: number;
+  queue: QueuedPromptEntry[];
   sessionId?: string;
   pendingPermission?: {
     type: 'permission';
@@ -88,6 +90,7 @@ function createRun(): TestRun {
     startedNewSession: false,
     sessionId: 'session-1',
     recoveryAssistantIndex: 1,
+    queue: [],
     recoveryTranscript: [
       { role: 'user', created: 1_000, parts: [{ type: 'text', text: 'inspect recovery' }] },
       { role: 'assistant', created: 1_000, parts: [] }
@@ -144,6 +147,7 @@ describe('run snapshot recovery', () => {
       type: 'run.snapshot',
       ok: true,
       payload: {
+        queue: { items: [] },
         activeRun: {
           requestId: 'run-1',
           sessionId: 'session-1',

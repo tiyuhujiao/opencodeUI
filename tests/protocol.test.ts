@@ -75,6 +75,17 @@ describe('webview request protocol guards', () => {
         command: { name: '', arguments: [] }
       }
     })).toBe(false);
+
+    expect(isWebviewRequestMessage({
+      type: 'run.queue.add',
+      requestId: 'run-queue-invalid-file',
+      payload: {
+        message: 'continue',
+        model: 'cpa/gpt-5',
+        agent: 'build',
+        files: ['  ']
+      }
+    })).toBe(false);
   });
 
   it('允许扩展返回 composer 资源清单', () => {
@@ -402,6 +413,7 @@ describe('webview request protocol guards', () => {
       payload: {
         hostKind: 'wsl',
         isSupportedHost: true,
+        queue: { items: [] },
         opencode: {
           binary: 'opencode',
           version: '1.15.10',

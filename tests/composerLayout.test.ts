@@ -21,11 +21,17 @@ describe('composer layout', () => {
     expect(styles).not.toContain('calc(100vh - 250px)');
   });
 
-  it('keeps todo and pasted-image affordances attached to the composer above the textarea', () => {
+  it('keeps queue, todo, and pasted-image affordances in document flow above the textarea', () => {
     const source = readFileSync(join(root, 'webview-ui/src/App.tsx'), 'utf8');
+    const styles = readFileSync(join(root, 'webview-ui/src/styles.css'), 'utf8');
 
-    expect(source.indexOf("className={`composer-stack${pastedImage ? ' has-preview' : ''}${activeTodos.length > 0 ? ' has-todos' : ''}`")).toBeGreaterThan(-1);
+    expect(source.indexOf("className={`composer-stack${pastedImage ? ' has-preview' : ''}${runQueue.length > 0 ? ' has-queue' : ''}${activeTodos.length > 0 ? ' has-todos' : ''}`")).toBeGreaterThan(-1);
     expect(source.indexOf('className="composer-stack__preview"')).toBeLessThan(source.indexOf('<textarea'));
+    expect(source.indexOf('<QueuePanel items={runQueue}')).toBeLessThan(source.indexOf('<TodoPanel todos={activeTodos} />'));
     expect(source.indexOf('<TodoPanel todos={activeTodos} />')).toBeLessThan(source.indexOf('<textarea'));
+    expect(source).toContain("className={`chat${pendingQuestion ? ' chat--has-question' : ''}`}");
+    expect(styles).toContain('.chat--has-question {');
+    expect(styles).toContain('.composer-stack.has-queue.has-todos .composer-queue__list,');
+    expect(styles).toContain('.composer-stack.has-queue.has-todos .composer-todo__list {');
   });
 });

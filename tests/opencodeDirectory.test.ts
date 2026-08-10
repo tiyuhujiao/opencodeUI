@@ -55,7 +55,16 @@ describe('OpenCode workspace directory header', () => {
       .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
-      .mockResolvedValueOnce(new Response('', { status: 200 }));
+      .mockResolvedValueOnce(new Response(
+        `data: ${JSON.stringify({
+          type: 'session.error',
+          properties: {
+            sessionID: 'session-1',
+            error: { message: 'stop test stream' }
+          }
+        })}\n\n`,
+        { status: 200 }
+      ));
     mocks.ensureServeRunning.mockResolvedValue({ baseUrl: 'http://127.0.0.1:4096' });
     vi.stubGlobal('fetch', fetchMock);
 
@@ -87,7 +96,7 @@ describe('OpenCode workspace directory header', () => {
           new AbortController().signal,
           createServeStreamState()
         )
-      ).resolves.toBe('done');
+      ).resolves.toBeInstanceOf(Error);
     } finally {
       provider.dispose();
     }

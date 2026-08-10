@@ -63,6 +63,7 @@ import {
 	type ProviderAuthAuthorization,
 	type ProviderSettingsScope,
 	type ProviderSettingsSnapshot,
+	type RunPromptPayload,
 	type RunStreamEvent,
 	type TranscriptMessage,
 	type ActiveRunSnapshot,
@@ -71,16 +72,27 @@ import {
 import { applyRunEventToTranscript } from "../shared/runTranscript";
 import {
 	BLOCKER_POLL_INTERVAL_MS,
+	armServeStreamTurn,
+	canCompleteServeStreamTurn,
 	createServeStreamState,
 	delay,
 	dispatchServeEvent,
 	hasPendingServeBlockers,
+	isSessionIdleStatus,
 	pollServeBlockers,
 	type PendingPermissionEvent,
 	type PendingQuestionEvent,
 	type RunLifecycleAdapter,
 	type ServeStreamState,
 } from "./runLifecycle";
+import {
+	MAX_PROMPT_QUEUE_ITEMS,
+	createQueuedPrompt,
+	removeQueuedPrompt,
+	toRunQueueState,
+	updateQueuedPromptMessage,
+	type QueuedPromptEntry,
+} from "./promptQueue";
 import {
 	type InlineDiffController,
 	type InlineDiffRun,
@@ -120,6 +132,13 @@ const TEMPFILE_MAX_BASE64_CHARS = Math.ceil(TEMPFILE_MAX_BYTES / 3) * 4 + 4;
 const TEMPFILE_TTL_MS = 30 * 60_000;
 const MCP_TRANSITION_POLL_DELAYS_MS = [0, 250, 500, 750, 1_000, 1_500, 2_000, 2_500, 3_000] as const;
 
+class EmittedRunError extends Error {
+	public constructor(message: string) {
+		super(message);
+		this.name = "EmittedRunError";
+	}
+}
+
 export class SidebarProvider
 	implements vscode.WebviewViewProvider, vscode.Disposable
 {
@@ -149,6 +168,8 @@ export class SidebarProvider
 		pendingPermission?: PendingPermissionEvent;
 		pendingQuestion?: PendingQuestionEvent;
 		inlineDiffRun?: InlineDiffRun;
+		queue: QueuedPromptEntry[];
+		initialPromptSubmitted: boolean;
 	};
 	private readonly sessionExportCache = new Map<string, CachedSessionExport>();
 	private readonly sessionExportInFlight = new Map<
@@ -745,6 +766,28 @@ export class SidebarProvider
 						message.payload,
 					);
 					return;
+				case "run.queue.add":
+					this.handleRunQueueAddRequest(
+						webview,
+						message.requestId,
+						message.payload,
+					);
+					return;
+				case "run.queue.update":
+					this.handleRunQueueUpdateRequest(
+						webview,
+						message.requestId,
+						message.payload.id,
+						message.payload.message,
+					);
+					return;
+				case "run.queue.remove":
+					this.handleRunQueueRemoveRequest(
+						webview,
+						message.requestId,
+						message.payload.id,
+					);
+					return;
 				case "run.stop":
 					void this.handleRunStopRequest(webview, message.requestId);
 					return;
@@ -803,6 +846,7 @@ export class SidebarProvider
 				lastSelectedModel,
 				lastSelectedAgent,
 				opencode,
+				queue: this.getRunQueueState(),
 				...(activeRun ? { activeRun } : {}),
 				...(terminalRun ? { terminalRun } : {}),
 			},
@@ -823,6 +867,7 @@ export class SidebarProvider
 			requestId: `run-snapshot-${Date.now().toString(36)}`,
 			ok: true,
 			payload: {
+				queue: this.getRunQueueState(),
 				...(activeRun ? { activeRun } : {}),
 				...(terminalRun ? { terminalRun } : {}),
 			},
@@ -2596,20 +2641,7 @@ export class SidebarProvider
 	private async handleRunStartRequest(
 		webview: vscode.Webview,
 		requestId: string,
-		payload: {
-			message: string;
-			model: string;
-			agent: string;
-			sessionId?: string;
-			title?: string;
-			thinking?: boolean;
-			variant?: string;
-			files?: string[];
-			command?: {
-				name: string;
-				arguments: string;
-			};
-		},
+		payload: RunPromptPayload,
 	): Promise<void> {
 		if (this.currentRun) {
 			this.respond(webview, {
@@ -2659,7 +2691,6 @@ export class SidebarProvider
 		}
 
 		const controller = new AbortController();
-		const eventAbort = new AbortController();
 		const startedAt = Date.now();
 		const placeholderTitle = resolveNewSessionTitle(payload);
 		const recoveryTranscript: TranscriptMessage[] = [
@@ -2696,13 +2727,14 @@ export class SidebarProvider
 			requestId,
 			revision: 0,
 			controller,
-			eventAbort,
 			startedAt,
 			promptText: payload.message,
 			placeholderTitle,
 			startedNewSession: !payload.sessionId,
 			recoveryTranscript,
 			recoveryAssistantIndex: 1,
+			queue: [],
+			initialPromptSubmitted: false,
 		};
 		this.lastTerminalRun = undefined;
 
@@ -2748,118 +2780,126 @@ export class SidebarProvider
 			});
 			this.currentRun.inlineDiffRun = inlineDiffRun;
 
-			const streamState = createServeStreamState();
-			const eventTask = this.consumeServeEvents(
-				webview,
-				requestId,
-				sessionId,
-				runtime.baseUrl,
-				eventAbort.signal,
-				streamState,
-			);
-			const blockerPoll = this.startBlockerPoll(
-				webview,
-				requestId,
-				sessionId,
-				streamState,
-			);
-			if (this.currentRun?.requestId === requestId) {
+			let turnPayload = payload;
+			while (this.currentRun?.requestId === requestId) {
+				const turnStartedAt = Date.now();
+				const streamState = createServeStreamState();
+				const eventAbort = new AbortController();
+				this.currentRun.eventAbort = eventAbort;
+				let markEventStreamReady!: () => void;
+				const eventStreamReady = new Promise<void>((resolve) => {
+					markEventStreamReady = resolve;
+				});
+				const eventTask = this.consumeServeEvents(
+					webview,
+					requestId,
+					sessionId,
+					runtime.baseUrl,
+					eventAbort.signal,
+					streamState,
+					markEventStreamReady,
+				);
+				const blockerPoll = this.startBlockerPoll(
+					webview,
+					requestId,
+					sessionId,
+					streamState,
+				);
 				this.currentRun.blockerPoll = blockerPoll;
-			}
 
-			watchdog = setTimeout(() => {
+				watchdog = setTimeout(() => {
+					if (!this.currentRun || this.currentRun.requestId !== requestId) {
+						return;
+					}
+					const seconds = Math.max(
+						0,
+						Math.round((Date.now() - turnStartedAt) / 1000),
+					);
+					this.respondRunEvent(webview, requestId, {
+						type: "part",
+						part: {
+							type: "tool",
+							toolName: "status",
+							status: "waiting",
+							raw: {
+								message: `opencode 还没有产出可见事件（${String(seconds)}s）。这通常意味着：provider 首 token 很慢，或当前正在等待工具/权限流转。`,
+							},
+						},
+					});
+				}, 8000);
+
+				let completionResult: "done" | "stopped" | Error;
+				try {
+					const streamStart = await Promise.race([
+						eventStreamReady.then(() => ({ type: "ready" as const })),
+						eventTask.then((result) => ({
+							type: "complete" as const,
+							result,
+						})),
+					]);
+					if (streamStart.type === "complete") {
+						completionResult = streamStart.result;
+					} else {
+						await this.sendPromptTurn(
+							sessionId,
+							turnPayload,
+							controller.signal,
+						);
+						if (this.currentRun?.requestId === requestId) {
+							this.currentRun.initialPromptSubmitted = true;
+							this.scheduleQueuedPromptDelivery(webview, requestId);
+						}
+						armServeStreamTurn(streamState, {
+							live: Boolean(turnPayload.command),
+						});
+						completionResult = await eventTask;
+					}
+				} finally {
+					if (watchdog) {
+						clearTimeout(watchdog);
+						watchdog = undefined;
+					}
+					eventAbort.abort();
+					this.cleanupTempFiles(turnPayload.files);
+					if (this.currentRun?.requestId === requestId) {
+						this.clearCurrentRunBlockerPoll(this.currentRun);
+						this.currentRun.eventAbort = undefined;
+					}
+				}
+
 				if (!this.currentRun || this.currentRun.requestId !== requestId) {
 					return;
 				}
-				const seconds = Math.max(
-					0,
-					Math.round((Date.now() - startedAt) / 1000),
-				);
-				this.respondRunEvent(webview, requestId, {
-					type: "part",
-					part: {
-						type: "tool",
-						toolName: "status",
-						status: "waiting",
-						raw: {
-							message: `opencode 还没有产出可见事件（${String(seconds)}s）。这通常意味着：provider 首 token 很慢，或当前正在等待工具/权限流转。`,
-						},
-					},
-				});
-			}, 8000);
 
-			if (payload.command) {
-				const parts = buildPromptParts(
-					"",
-					payload.files,
-					this.hostKind,
-				).filter((part) => part.type === "file");
-				await this.requestServeJson<unknown>(
-					`/session/${encodeURIComponent(sessionId)}/command`,
-					{
-						method: "POST",
-						signal: controller.signal,
-						body: JSON.stringify({
-							agent: payload.agent,
-							model: payload.model,
-							variant: payload.variant || undefined,
-							command: payload.command.name,
-							arguments: payload.command.arguments,
-							...(parts.length > 0 ? { parts } : {}),
-						}),
-					},
-				);
-			} else {
-				await this.requestServeNoContent(
-					`/session/${encodeURIComponent(sessionId)}/prompt_async`,
-					{
-						method: "POST",
-						signal: controller.signal,
-						body: JSON.stringify({
-							agent: payload.agent,
-							model: splitModel(payload.model),
-							variant: payload.variant || undefined,
-							parts: buildPromptParts(
-								payload.message,
-								payload.files,
-								this.hostKind,
-							),
-						}),
-					},
-				);
-			}
-
-			const completionResult = await eventTask;
-
-			if (!this.currentRun || this.currentRun.requestId !== requestId) {
-				return;
-			}
-
-			if (completionResult === "stopped") {
-				this.respondRunEvent(webview, requestId, { type: "stopped" });
-				this.clearCurrentRunForRequest(requestId);
-				finishInlineDiff("stopped");
-				return;
-			}
-
-			if (completionResult instanceof Error) {
-				if (completionResult.name === "AbortError") {
+				if (completionResult === "stopped") {
 					this.respondRunEvent(webview, requestId, { type: "stopped" });
+					this.clearCurrentRunForRequest(requestId);
 					finishInlineDiff("stopped");
-				} else {
-					this.respondRunEvent(webview, requestId, {
-						type: "error",
-						error: completionResult.message || "运行失败。",
-					});
-					finishInlineDiff("failed");
+					return;
 				}
+
+				if (completionResult instanceof Error) {
+					if (completionResult.name === "AbortError") {
+						this.respondRunEvent(webview, requestId, { type: "stopped" });
+						finishInlineDiff("stopped");
+					} else {
+						if (!(completionResult instanceof EmittedRunError)) {
+							this.respondRunEvent(webview, requestId, {
+								type: "error",
+								error: completionResult.message || "运行失败。",
+							});
+						}
+						finishInlineDiff("failed");
+					}
+					this.clearCurrentRunForRequest(requestId);
+					return;
+				}
+
+				this.respondRunEvent(webview, requestId, { type: "done" });
 				this.clearCurrentRunForRequest(requestId);
+				finishInlineDiff("done");
 				return;
 			}
-
-			this.respondRunEvent(webview, requestId, { type: "done" });
-			this.clearCurrentRunForRequest(requestId);
-			finishInlineDiff("done");
 		} catch (error) {
 			if (!this.currentRun || this.currentRun.requestId !== requestId) {
 				return;
@@ -2888,13 +2928,414 @@ export class SidebarProvider
 			}
 			this.cleanupTempFiles(payload.files);
 			if (this.currentRun && this.currentRun.requestId === requestId) {
-				this.clearCurrentRunBlockerPoll(this.currentRun);
-				this.currentRun = undefined;
+				this.clearCurrentRunForRequest(requestId);
 			}
 			if (!inlineDiffFinished) {
 				finishInlineDiff("stopped");
 			}
 		}
+	}
+
+	private async sendPromptTurn(
+		sessionId: string,
+		payload: RunPromptPayload,
+		signal: AbortSignal,
+		messageId?: string,
+	): Promise<void> {
+		if (payload.command) {
+			const parts = buildPromptParts(
+				"",
+				payload.files,
+				this.hostKind,
+			).filter((part) => part.type === "file");
+			await this.requestServeJson<unknown>(
+				`/session/${encodeURIComponent(sessionId)}/command`,
+				{
+					method: "POST",
+					signal,
+					body: JSON.stringify({
+						...(messageId ? { messageID: messageId } : {}),
+						agent: payload.agent,
+						model: payload.model,
+						variant: payload.variant || undefined,
+						command: payload.command.name,
+						arguments: payload.command.arguments,
+						...(parts.length > 0 ? { parts } : {}),
+					}),
+				},
+			);
+			return;
+		}
+
+		await this.requestServeNoContent(
+			`/session/${encodeURIComponent(sessionId)}/prompt_async`,
+			{
+				method: "POST",
+				signal,
+				body: JSON.stringify({
+					...(messageId ? { messageID: messageId } : {}),
+					agent: payload.agent,
+					model: splitModel(payload.model),
+					variant: payload.variant || undefined,
+					parts: buildPromptParts(
+						payload.message,
+						payload.files,
+						this.hostKind,
+					),
+				}),
+			},
+		);
+	}
+
+	private beginQueuedPromptTurn(
+		webview: vscode.Webview,
+		requestId: string,
+		queued: readonly QueuedPromptEntry[],
+	): void {
+		const run = this.currentRun;
+		if (!run || run.requestId !== requestId || queued.length === 0) {
+			return;
+		}
+		run.pendingPermission = undefined;
+		run.pendingQuestion = undefined;
+		this.respondRunEvent(webview, requestId, {
+			type: "turn.start",
+			prompts: queued.map((item) => ({
+				queueId: item.id,
+				messageId: item.messageId,
+				message: item.payload.message,
+				created: item.createdAt,
+			})),
+			created: Date.now(),
+		});
+	}
+
+	private scheduleQueuedPromptDelivery(
+		webview: vscode.Webview,
+		requestId: string,
+	): void {
+		const run = this.currentRun;
+		if (
+			!run ||
+			run.requestId !== requestId ||
+			!run.sessionId ||
+			!run.initialPromptSubmitted ||
+			run.pendingPermission ||
+			run.pendingQuestion ||
+			run.queue.some((item) => item.delivery === "submitting")
+		) {
+			return;
+		}
+		const queued = run.queue.find((item) => item.delivery === "queued");
+		if (!queued) {
+			return;
+		}
+
+		queued.delivery = "submitting";
+		run.revision += 1;
+		this.postRunQueueState(webview);
+		void this.deliverQueuedPrompt(webview, requestId, run.sessionId, queued);
+	}
+
+	private async deliverQueuedPrompt(
+		webview: vscode.Webview,
+		requestId: string,
+		sessionId: string,
+		queued: QueuedPromptEntry,
+	): Promise<void> {
+		const run = this.currentRun;
+		if (!run || run.requestId !== requestId) {
+			return;
+		}
+
+		try {
+			await this.sendPromptTurn(
+				sessionId,
+				{ ...queued.payload, sessionId },
+				run.controller.signal,
+				queued.messageId,
+			);
+			const current = this.currentRun;
+			if (
+				current?.requestId === requestId &&
+				current.queue.includes(queued)
+			) {
+				queued.delivery = "submitted";
+				current.revision += 1;
+				this.postRunQueueState(webview);
+				this.scheduleQueuedPromptDelivery(webview, requestId);
+			}
+		} catch (error) {
+			const current = this.currentRun;
+			if (
+				current?.requestId !== requestId ||
+				!current.queue.includes(queued) ||
+				current.controller.signal.aborted
+			) {
+				return;
+			}
+			queued.delivery = "queued";
+			current.revision += 1;
+			this.postRunQueueState(webview);
+			const message = error instanceof Error ? error.message : String(error);
+			logWarn(`deliver queued prompt failed: ${message}`);
+			console.warn("[opencode-ui] deliver queued prompt failed:", message);
+		}
+	}
+
+	private observeQueuedUserMessage(
+		webview: vscode.Webview,
+		requestId: string,
+		messageId: string,
+	): void {
+		const run = this.currentRun;
+		if (!run || run.requestId !== requestId) {
+			return;
+		}
+		const queued = run.queue.find(
+			(item) => item.delivery !== "queued" && item.messageId === messageId,
+		);
+		if (!queued) {
+			return;
+		}
+		if (queued.delivery !== "submitted") {
+			queued.delivery = "submitted";
+			run.revision += 1;
+			this.postRunQueueState(webview);
+		}
+		// Native OpenCode fires command requests without waiting for their full
+		// response. Once the user message exists, the next queued item is safe to
+		// submit even when the command request itself is still pending.
+		this.scheduleQueuedPromptDelivery(webview, requestId);
+	}
+
+	private observeQueuedAssistantMessage(
+		webview: vscode.Webview,
+		requestId: string,
+		message: { id: string; parentId?: string },
+	): void {
+		const run = this.currentRun;
+		if (!run || run.requestId !== requestId) {
+			return;
+		}
+		const matchedIndex = run.queue.findIndex(
+			(item) =>
+				item.delivery !== "queued" && message.parentId === item.messageId,
+		);
+		if (matchedIndex < 0) {
+			this.scheduleQueuedPromptDelivery(webview, requestId);
+			return;
+		}
+
+		const consumed = run.queue.splice(0, matchedIndex + 1);
+		for (const queued of consumed) {
+			this.cleanupTempFiles(queued.payload.files);
+		}
+		run.revision += 1;
+		this.postRunQueueState(webview);
+		this.beginQueuedPromptTurn(webview, requestId, consumed);
+		this.scheduleQueuedPromptDelivery(webview, requestId);
+	}
+
+	private async reconcileQueuedAssistantBoundary(
+		webview: vscode.Webview,
+		requestId: string,
+		sessionId: string,
+	): Promise<boolean> {
+		const queue = this.currentRun?.requestId === requestId
+			? this.currentRun.queue
+			: [];
+		if (!queue.some((item) => item.delivery !== "queued")) {
+			return false;
+		}
+
+		const rawMessages = await this.requestServeJson<unknown>(
+			`/session/${encodeURIComponent(sessionId)}/message`,
+		);
+		if (!Array.isArray(rawMessages)) {
+			return false;
+		}
+
+		let matched:
+			| { index: number; id: string; parentId: string }
+			| undefined;
+		for (const rawMessage of rawMessages) {
+			if (typeof rawMessage !== "object" || rawMessage === null) {
+				continue;
+			}
+			const rawInfo = (rawMessage as Record<string, unknown>).info;
+			if (typeof rawInfo !== "object" || rawInfo === null) {
+				continue;
+			}
+			const info = rawInfo as Record<string, unknown>;
+			if (
+				info.role !== "assistant" ||
+				typeof info.parentID !== "string" ||
+				typeof info.id !== "string"
+			) {
+				continue;
+			}
+			const index = queue.findIndex(
+				(item) =>
+					item.delivery !== "queued" && item.messageId === info.parentID,
+			);
+			if (index >= 0 && (!matched || index > matched.index)) {
+				matched = { index, id: info.id, parentId: info.parentID };
+			}
+		}
+		if (!matched) {
+			return false;
+		}
+		this.observeQueuedAssistantMessage(webview, requestId, matched);
+		return true;
+	}
+
+	private handleRunQueueAddRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		payload: RunPromptPayload,
+	): void {
+		const run = this.currentRun;
+		if (!run) {
+			this.respond(webview, {
+				type: "webview.error",
+				requestId,
+				ok: false,
+				error: "当前没有运行中的任务，消息未加入 Queue。",
+			});
+			return;
+		}
+		if (
+			payload.sessionId &&
+			run.sessionId &&
+			payload.sessionId !== run.sessionId
+		) {
+			this.respond(webview, {
+				type: "webview.error",
+				requestId,
+				ok: false,
+				error: "Queue 消息必须属于当前运行中的会话。",
+			});
+			return;
+		}
+		if (run.queue.length >= MAX_PROMPT_QUEUE_ITEMS) {
+			this.respond(webview, {
+				type: "webview.error",
+				requestId,
+				ok: false,
+				error: `Queue 最多保留 ${String(MAX_PROMPT_QUEUE_ITEMS)} 条消息。`,
+			});
+			return;
+		}
+
+		run.queue.push(createQueuedPrompt(requestId, Date.now(), payload));
+		const state = this.getRunQueueState();
+		this.respond(webview, {
+			type: "run.queue.add.response",
+			requestId,
+			ok: true,
+			payload: { state },
+		});
+		this.postRunQueueState();
+		this.scheduleQueuedPromptDelivery(webview, run.requestId);
+	}
+
+	private handleRunQueueUpdateRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		id: string,
+		message: string,
+	): void {
+		const run = this.currentRun;
+		const target = run?.queue.find((item) => item.id === id);
+		if (!run || !target || target.payload.command || target.delivery !== "queued") {
+			this.respond(webview, {
+				type: "webview.error",
+				requestId,
+				ok: false,
+				error: target?.delivery !== "queued"
+					? "这条 Queue 消息已经交给 OpenCode，不能再编辑。"
+					: target?.payload.command
+					? "Queue 中的命令不能直接编辑。"
+					: "Queue 中找不到这条消息。",
+			});
+			return;
+		}
+
+		const next = updateQueuedPromptMessage(run.queue, id, message);
+		if (!next) {
+			this.respond(webview, {
+				type: "webview.error",
+				requestId,
+				ok: false,
+				error: "Queue 消息不能为空。",
+			});
+			return;
+		}
+		run.queue = next;
+		const state = this.getRunQueueState();
+		this.respond(webview, {
+			type: "run.queue.update.response",
+			requestId,
+			ok: true,
+			payload: { state },
+		});
+		this.postRunQueueState();
+	}
+
+	private handleRunQueueRemoveRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		id: string,
+	): void {
+		const run = this.currentRun;
+		const target = run?.queue.find((item) => item.id === id);
+		if (target?.delivery !== "queued") {
+			this.respond(webview, {
+				type: "webview.error",
+				requestId,
+				ok: false,
+				error: "这条 Queue 消息已经交给 OpenCode，不能再移除。",
+			});
+			return;
+		}
+		const result = run ? removeQueuedPrompt(run.queue, id) : null;
+		if (!run || !result) {
+			this.respond(webview, {
+				type: "webview.error",
+				requestId,
+				ok: false,
+				error: "Queue 中找不到这条消息。",
+			});
+			return;
+		}
+
+		run.queue = result.queue;
+		this.cleanupTempFiles(result.removed.payload.files);
+		const state = this.getRunQueueState();
+		this.respond(webview, {
+			type: "run.queue.remove.response",
+			requestId,
+			ok: true,
+			payload: { state },
+		});
+		this.postRunQueueState();
+	}
+
+	private getRunQueueState() {
+		return toRunQueueState(this.currentRun?.queue ?? []);
+	}
+
+	private postRunQueueState(webview = this.runEventWebview): void {
+		if (!webview) {
+			return;
+		}
+		this.respond(webview, {
+			type: "run.queue.state",
+			requestId: `run-queue-${Date.now().toString(36)}`,
+			ok: true,
+			payload: this.getRunQueueState(),
+		});
 	}
 
 	private async prependSessionHistoryToCurrentRun(
@@ -2963,6 +3404,11 @@ export class SidebarProvider
 		if (!this.currentRun) {
 			return;
 		}
+		for (const queued of this.currentRun.queue ?? []) {
+			this.cleanupTempFiles(queued.payload.files);
+		}
+		this.currentRun.queue = [];
+		this.postRunQueueState();
 		this.clearCurrentRunBlockerPoll(this.currentRun);
 		this.currentRun.controller.abort();
 		this.currentRun.eventAbort?.abort();
@@ -2982,6 +3428,11 @@ export class SidebarProvider
 		if (!this.currentRun || this.currentRun.requestId !== requestId) {
 			return;
 		}
+		for (const queued of this.currentRun.queue ?? []) {
+			this.cleanupTempFiles(queued.payload.files);
+		}
+		this.currentRun.queue = [];
+		this.postRunQueueState();
 		this.clearCurrentRunBlockerPoll(this.currentRun);
 		this.currentRun = undefined;
 	}
@@ -3033,6 +3484,34 @@ export class SidebarProvider
 	): void {
 		const run = this.currentRun;
 		const isCurrentRun = run?.requestId === requestId;
+		if (isCurrentRun && event.type === "turn.start") {
+			const completedAt = event.created;
+			const previousAssistant = run.recoveryTranscript[
+				run.recoveryAssistantIndex
+			];
+			if (previousAssistant) {
+				run.recoveryTranscript[run.recoveryAssistantIndex] = {
+					...previousAssistant,
+					completed: completedAt,
+					finish: previousAssistant.finish ?? "stop",
+				};
+			}
+			run.recoveryTranscript = [
+				...run.recoveryTranscript,
+				...event.prompts.map((prompt) => ({
+					id: prompt.messageId,
+					created: prompt.created,
+					role: "user" as const,
+					parts: [{ type: "text" as const, text: prompt.message }],
+				})),
+				{
+					created: completedAt,
+					role: "assistant",
+					parts: [],
+				},
+			];
+			run.recoveryAssistantIndex = run.recoveryTranscript.length - 1;
+		}
 		if (
 			isCurrentRun &&
 			(event.type === "part" ||
@@ -3132,8 +3611,10 @@ export class SidebarProvider
 		baseUrl: string,
 		signal: AbortSignal,
 		streamState: ServeStreamState,
+		onReady?: () => void,
 	): Promise<"done" | "stopped" | Error> {
 		const lifecycle = this.createRunLifecycleAdapter(webview, requestId);
+		let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 		try {
 			const response = await fetch(`${baseUrl}/event`, {
 				headers: this.buildServeHeaders({ Accept: "text/event-stream" }),
@@ -3143,15 +3624,44 @@ export class SidebarProvider
 				return new Error(`订阅事件流失败（${String(response.status)}）。`);
 			}
 
-			const reader = response.body.getReader();
+			reader = response.body.getReader();
+			onReady?.();
 			const decoder = new TextDecoder();
 			let buffer = "";
+			let pendingRead = reader.read();
+			let streamEnded = false;
 
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) {
-					break;
+			while (!signal.aborted && !streamEnded) {
+				const next = await Promise.race([
+					pendingRead.then((result) => ({ type: "read" as const, result })),
+					delay(250, signal).then(() => ({ type: "poll" as const })),
+				]);
+				if (next.type === "poll") {
+					if (
+						await this.isServeTurnIdle(sessionId, streamState)
+					) {
+						await pollServeBlockers(
+							lifecycle,
+							requestId,
+							sessionId,
+							streamState,
+						);
+						if (
+							canCompleteServeStreamTurn(streamState) &&
+							(await this.isServeTurnIdle(sessionId, streamState))
+						) {
+							return "done";
+						}
+					}
+					continue;
 				}
+
+				const { done, value } = next.result;
+				if (done) {
+					streamEnded = true;
+					continue;
+				}
+				pendingRead = reader.read();
 				buffer += decoder.decode(value, { stream: true });
 				let boundary = buffer.indexOf("\n\n");
 				while (boundary >= 0) {
@@ -3179,6 +3689,9 @@ export class SidebarProvider
 						event,
 						streamState,
 					);
+					if (result.error) {
+						return new EmittedRunError(result.error);
+					}
 					if (result.done) {
 						await pollServeBlockers(
 							lifecycle,
@@ -3186,21 +3699,67 @@ export class SidebarProvider
 							sessionId,
 							streamState,
 						);
-						if (!hasPendingServeBlockers(streamState)) {
+						if (
+							canCompleteServeStreamTurn(streamState) &&
+							(await this.isServeTurnIdle(sessionId, streamState))
+						) {
 							return "done";
 						}
 					}
 				}
 			}
 
-			await pollServeBlockers(lifecycle, requestId, sessionId, streamState);
-			while (!signal.aborted && hasPendingServeBlockers(streamState)) {
-				await delay(BLOCKER_POLL_INTERVAL_MS, signal).catch(() => undefined);
+			while (!signal.aborted) {
 				await pollServeBlockers(lifecycle, requestId, sessionId, streamState);
+				if (
+					canCompleteServeStreamTurn(streamState) &&
+					(await this.isServeTurnIdle(sessionId, streamState))
+				) {
+					return "done";
+				}
+				await delay(250, signal).catch(() => undefined);
 			}
-			return signal.aborted ? "stopped" : "done";
+			return "stopped";
 		} catch (error) {
 			return error instanceof Error ? error : new Error(String(error));
+		} finally {
+			await reader?.cancel().catch(() => undefined);
+		}
+	}
+
+	private async isServeTurnIdle(
+		sessionId: string,
+		streamState: ServeStreamState,
+	): Promise<boolean> {
+		if (!canCompleteServeStreamTurn(streamState)) {
+			return false;
+		}
+		try {
+			const statuses = await this.requestServeJson<unknown>("/session/status");
+			const idle = isSessionIdleStatus(statuses, sessionId);
+			const run = this.currentRun;
+			if (idle && run?.sessionId === sessionId && run.queue.length > 0) {
+				const webview = this.runEventWebview ?? this.view?.webview;
+				if (webview) {
+					await this.reconcileQueuedAssistantBoundary(
+						webview,
+						run.requestId,
+						sessionId,
+					);
+					const current = this.currentRun;
+					if (!current || current.sessionId !== sessionId) {
+						return true;
+					}
+					if (current.queue.length === 0) {
+						return true;
+					}
+					this.scheduleQueuedPromptDelivery(webview, run.requestId);
+				}
+				return false;
+			}
+			return idle;
+		} catch {
+			return false;
 		}
 	}
 
@@ -3249,6 +3808,12 @@ export class SidebarProvider
 				}
 				this.respondRunEvent(webview, requestId, event);
 			},
+			onUserMessage: (message) => {
+				this.observeQueuedUserMessage(webview, requestId, message.id);
+			},
+			onAssistantMessage: (message) => {
+				this.observeQueuedAssistantMessage(webview, requestId, message);
+			},
 			acceptBlockerSession: (
 				candidateRequestId,
 				sessionId,
@@ -3266,12 +3831,18 @@ export class SidebarProvider
 				if (this.currentRun?.requestId === requestId) {
 					this.currentRun.pendingPermission = event;
 					this.currentRun.revision += 1;
+					if (!event) {
+						this.scheduleQueuedPromptDelivery(webview, requestId);
+					}
 				}
 			},
 			setPendingQuestion: (event) => {
 				if (this.currentRun?.requestId === requestId) {
 					this.currentRun.pendingQuestion = event;
 					this.currentRun.revision += 1;
+					if (!event) {
+						this.scheduleQueuedPromptDelivery(webview, requestId);
+					}
 				}
 			},
 			requestServeJson: (pathname) => this.requestServeJson(pathname),

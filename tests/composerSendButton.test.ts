@@ -5,15 +5,19 @@ import { describe, expect, it } from 'vitest';
 const root = process.cwd();
 
 describe('composer send button', () => {
-  it('switches from send to stop while a run is active', () => {
+  it('queues with Enter while showing only the original stop control during a run', () => {
     const source = readFileSync(join(root, 'webview-ui/src/App.tsx'), 'utf8');
 
-    expect(source).toContain("className={`composer-stack__send${isRunning ? ' composer-stack__send--running' : ''}`}");
-    expect(source).toContain('onClick={isRunning ? stopRun : submitComposer}');
+    expect(source).toContain('if (isRunning) {');
+    expect(source).toContain('queuePrompt()');
     expect(source).toContain("if (commandState.open) {");
     expect(source).toContain('runCommand(selected?.name ?? commandState.query, commandState.args)');
-    expect(source).toContain('disabled={!isRunning && (composerValue.trim().length === 0 || (!commandState.open && (!selectedModel || !selectedAgent)))}');
-    expect(source).toContain("aria-label={isRunning ? t('Stop') : t('Send')}");
+    expect(source).toContain('className="composer-stack__send composer-stack__send--stop"');
+    expect(source).toContain('onClick={stopRun}');
+    expect(source).toContain('onClick={submitComposer}');
+    expect(source).toContain("aria-label={t('Send')}");
+    expect(source).not.toContain("aria-label={isRunning ? t('Add to queue') : t('Send')}");
+    expect(source).toContain(') : (\n            <button');
     expect(source).toContain('className="composer-stack__send-arrow"');
     expect(source).toContain('className="composer-stack__stop-icon"');
   });
