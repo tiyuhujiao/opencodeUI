@@ -43,8 +43,8 @@ const node_child_process_1 = require("node:child_process");
 const http = __importStar(require("node:http"));
 const net = __importStar(require("node:net"));
 const node_os_1 = require("node:os");
-const opencodeDirectory_1 = require("./opencodeDirectory");
 const opencodeEnv_1 = require("./opencodeEnv");
+const opencodeServeClient_1 = require("./opencodeServeClient");
 const HOSTNAME = '127.0.0.1';
 const HEALTH_PATH = '/global/health';
 const PREFERRED_PORT = 4096;
@@ -58,6 +58,9 @@ let managedPort;
 let managedChild;
 let disposePromise;
 let portStorage;
+const serveClient = new opencodeServeClient_1.OpencodeServeClient({
+    ensureRuntime: () => ensureServeRunning()
+});
 function configureServePortStorage(storage) {
     portStorage = storage;
 }
@@ -109,21 +112,7 @@ async function restartServeForConfigChange() {
     return restartPromise;
 }
 async function requestServeJson(pathname, cwd) {
-    const runtime = await ensureServeRunning();
-    const headers = {
-        'Content-Type': 'application/json'
-    };
-    if (cwd) {
-        headers['x-opencode-directory'] = (0, opencodeDirectory_1.encodeOpencodeDirectory)(cwd);
-    }
-    const response = await fetch(`${runtime.baseUrl}${pathname}`, { headers });
-    if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(text.trim().length > 0
-            ? text.trim()
-            : `OpenCode serve 请求失败（${String(response.status)}）。`);
-    }
-    return (await response.json());
+    return serveClient.requestJson(pathname, { cwd });
 }
 async function ensureServeRunningInternal() {
     if (currentPort && (await probeHealth(currentPort))) {

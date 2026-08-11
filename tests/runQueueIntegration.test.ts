@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe('run Queue integration', () => {
-  it('pre-submits all follow-ups immediately and promotes the consumed batch on the next assistant boundary', async () => {
+  it('pre-submits follow-ups through blockers and promotes the consumed batch on the next assistant boundary', async () => {
     mocks.ensureServeRunning.mockResolvedValue({ baseUrl: 'http://127.0.0.1:4096' });
     const provider = new SidebarProvider(
       { fsPath: '/ext' } as never,
@@ -36,7 +36,11 @@ describe('run Queue integration', () => {
       'wsl',
       'wsl'
     ) as unknown as {
-      currentRun?: { queue: Array<{ id: string; delivery: string; messageId: string }> };
+      currentRun?: {
+        queue: Array<{ id: string; delivery: string; messageId: string }>;
+        pendingPermission?: unknown;
+        pendingQuestion?: unknown;
+      };
       runEventWebview?: { postMessage: (message: unknown) => Thenable<boolean> };
       requestServeJson: <T>(pathname: string, init?: RequestInit) => Promise<T>;
       requestServeNoContent: (pathname: string, init?: RequestInit) => Promise<void>;
@@ -139,6 +143,10 @@ describe('run Queue integration', () => {
     const run = provider.handleRunStartRequest(webview, 'run-1', basePayload);
     await vi.waitFor(() => expect(sentPrompts.map((item) => item.message)).toEqual(['first']));
 
+    if (provider.currentRun) {
+      provider.currentRun.pendingPermission = { id: 'permission-1' };
+      provider.currentRun.pendingQuestion = { id: 'question-1' };
+    }
     provider.handleRunQueueAddRequest(webview, 'queue-1', { ...basePayload, message: 'second' });
     provider.handleRunQueueAddRequest(webview, 'queue-2', { ...basePayload, message: 'third' });
     expect(provider.currentRun?.queue.map((item) => item.id)).toEqual(['queue-1', 'queue-2']);

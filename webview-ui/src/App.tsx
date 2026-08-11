@@ -994,7 +994,7 @@ export default function App() {
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [transcript, setTranscript] = useState<TranscriptMessage[]>([])
   const [transcriptError, setTranscriptError] = useState<string | null>(null)
-  const [loadingTranscript, setLoadingTranscript] = useState(false)
+  const [, setLoadingTranscript] = useState(false)
   const [activeSubtask, setActiveSubtask] = useState<ActiveSubtask | null>(null)
   const [subtaskTranscript, setSubtaskTranscript] = useState<TranscriptMessage[]>([])
   const [subtaskTranscriptError, setSubtaskTranscriptError] = useState<string | null>(null)
@@ -1095,7 +1095,7 @@ export default function App() {
   }>(null)
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestionState | null>(null)
 
-  const [lastRunPartKind, setLastRunPartKind] = useState<'text' | 'tool' | 'reasoning' | 'image' | 'unknown' | null>(null)
+  const [, setLastRunPartKind] = useState<'text' | 'tool' | 'reasoning' | 'image' | 'unknown' | null>(null)
 
   const readyRequestIdRef = useRef<string>('')
   const sessionsRequestIdsRef = useRef<Map<string, SessionListRequestMeta>>(new Map())

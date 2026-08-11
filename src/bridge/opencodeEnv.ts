@@ -12,18 +12,18 @@ export function resolveOpencodeBinary(baseEnv?: NodeJS.ProcessEnv): string {
   const overriddenBinary = sourceEnv.OPENCODE_BINARY?.trim();
 
   if (overriddenBinary) {
-    return normalizeResolvedBinary(overriddenBinary, sourceEnv);
+    return normalizeResolvedBinary(overriddenBinary);
   }
 
   for (const candidatePath of getBundledBinaryCandidates(sourceEnv)) {
     if (resolveExistsSync()(candidatePath)) {
-      return normalizeResolvedBinary(candidatePath, sourceEnv);
+      return normalizeResolvedBinary(candidatePath);
     }
   }
 
   const discovered = resolveFromWhere(sourceEnv);
   if (discovered) {
-    return normalizeResolvedBinary(discovered, sourceEnv);
+    return normalizeResolvedBinary(discovered);
   }
 
   return 'opencode';
@@ -278,7 +278,7 @@ function resolveFromWhere(env: NodeJS.ProcessEnv): string | undefined {
   }
 }
 
-function normalizeResolvedBinary(binary: string, env: NodeJS.ProcessEnv): string {
+function normalizeResolvedBinary(binary: string): string {
   if (resolvePlatform() !== 'win32') {
     return binary;
   }

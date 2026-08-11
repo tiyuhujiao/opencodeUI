@@ -5,112 +5,130 @@ export type IndexedTranscriptMessage = {
   messageIndex: number
 }
 
-export type AssistantTurn = {
+export type TranscriptRun = {
   key: string
-  user: IndexedTranscriptMessage
-  responses: IndexedTranscriptMessage[]
+  initialUser: IndexedTranscriptMessage
+  events: IndexedTranscriptMessage[]
   startedAt?: number
+  completedAt?: number
 }
 
 export type TranscriptDisplayBlock =
   | { kind: 'message'; entry: IndexedTranscriptMessage }
-  | { kind: 'assistant-turn'; turn: AssistantTurn }
+  | { kind: 'run'; run: TranscriptRun }
 
-export type AssistantTurnTiming = {
+export type TranscriptRunTiming = {
   startedAt: number | null
   completedAt: number | null
   elapsedMs: number | null
 }
 
-export function buildTranscriptDisplayBlocks(messages: TranscriptMessage[]): TranscriptDisplayBlock[] {
-  const blocks: TranscriptDisplayBlock[] = []
-  let index = 0
-  let previousRunStartedAt: number | undefined
-  let previousAssistantCompletedAt: number | undefined
-  let previousAssistantIncomplete = false
-  let previousAssistantContinuesRun = false
+type TranscriptSequence =
+  | { kind: 'message'; entry: IndexedTranscriptMessage }
+  | { kind: 'run'; run: TranscriptRun }
 
-  while (index < messages.length) {
-    const message = messages[index]
-    const entry = { message, messageIndex: index }
+export function buildTranscriptDisplayBlocks(messages: TranscriptMessage[]): TranscriptDisplayBlock[] {
+  const sequence: TranscriptSequence[] = []
+  let currentRun: TranscriptRun | null = null
+
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex]
+    if (!message) {
+      continue
+    }
+    const entry = { message, messageIndex }
+
     if (message.role !== 'user') {
-      blocks.push({ kind: 'message', entry })
-      index += 1
+      if (!currentRun) {
+        sequence.push({ kind: 'message', entry })
+        continue
+      }
+      currentRun.events.push(entry)
+      if (message.role === 'assistant' && message.completed !== undefined) {
+        currentRun.completedAt = currentRun.completedAt === undefined
+          ? message.completed
+          : Math.max(currentRun.completedAt, message.completed)
+      }
       continue
     }
 
-    blocks.push({ kind: 'message', entry })
-    const responses: IndexedTranscriptMessage[] = []
-    let responseIndex = index + 1
-    while (responseIndex < messages.length && messages[responseIndex]?.role !== 'user') {
-      responses.push({ message: messages[responseIndex], messageIndex: responseIndex })
-      responseIndex += 1
+    if (currentRun && userContinuesRun(currentRun, message)) {
+      currentRun.events.push(entry)
+      continue
     }
 
-    const assistantMessages = responses
-      .map((response) => response.message)
-      .filter((response) => response.role === 'assistant')
-    if (assistantMessages.length > 0) {
-      const continuesPreviousRun = previousRunStartedAt !== undefined && (
-        previousAssistantIncomplete
-        || previousAssistantContinuesRun
-        || (
-          message.created !== undefined
-          && previousAssistantCompletedAt !== undefined
-          && message.created <= previousAssistantCompletedAt
-        )
-      )
-      const startedAt = continuesPreviousRun ? previousRunStartedAt : message.created
-      blocks.push({
-        kind: 'assistant-turn',
-        turn: {
-          key: `turn-${String(index)}`,
-          user: entry,
-          responses,
-          ...(startedAt !== undefined ? { startedAt } : {})
-        }
-      })
-      const completedTimes = assistantMessages
-        .map((response) => response.completed)
-        .filter((value): value is number => value !== undefined)
-      previousRunStartedAt = startedAt
-      previousAssistantCompletedAt = completedTimes.length > 0 ? Math.max(...completedTimes) : undefined
-      const lastAssistant = assistantMessages[assistantMessages.length - 1]
-      previousAssistantIncomplete = lastAssistant?.completed === undefined
-      previousAssistantContinuesRun = Boolean(
-        lastAssistant
-        && (
-          lastAssistant.finish === 'tool-calls'
-          || lastAssistant.finish === 'unknown'
-          || lastAssistant.parts.some((part) => part.type === 'tool')
-        )
-      )
-    } else {
-      blocks.push(...responses.map((response) => ({ kind: 'message' as const, entry: response })))
+    currentRun = {
+      key: `run-${String(messageIndex)}`,
+      initialUser: entry,
+      events: [],
+      ...(message.created !== undefined ? { startedAt: message.created } : {})
     }
-
-    index = responseIndex
+    sequence.push({ kind: 'run', run: currentRun })
   }
 
+  const blocks: TranscriptDisplayBlock[] = []
+  for (const item of sequence) {
+    if (item.kind === 'message') {
+      blocks.push(item)
+      continue
+    }
+
+    blocks.push({ kind: 'message', entry: item.run.initialUser })
+    if (item.run.events.some((entry) => entry.message.role === 'assistant')) {
+      blocks.push(item)
+      continue
+    }
+    blocks.push(...item.run.events.map((entry) => ({ kind: 'message' as const, entry })))
+  }
   return blocks
 }
 
-export function resolveAssistantTurnTiming(
-  turn: AssistantTurn,
+function userContinuesRun(run: TranscriptRun, user: TranscriptMessage): boolean {
+  const previousEvent = run.events[run.events.length - 1]
+  if (!previousEvent || previousEvent.message.role === 'user') {
+    return true
+  }
+
+  let previousAssistant: TranscriptMessage | undefined
+  for (let index = run.events.length - 1; index >= 0; index -= 1) {
+    const candidate = run.events[index]?.message
+    if (candidate?.role === 'assistant') {
+      previousAssistant = candidate
+      break
+    }
+  }
+  if (!previousAssistant) {
+    return true
+  }
+
+  return previousAssistant.completed === undefined
+    || previousAssistant.finish === 'tool-calls'
+    || previousAssistant.finish === 'unknown'
+    || previousAssistant.parts.some((part) => part.type === 'tool')
+    || (
+      user.created !== undefined
+      && previousAssistant.completed !== undefined
+      && user.created <= previousAssistant.completed
+    )
+}
+
+export function resolveTranscriptRunTiming(
+  run: TranscriptRun,
   options: { isActive: boolean; now: number; fallbackStartedAt?: number }
-): AssistantTurnTiming {
-  const assistantMessages = turn.responses
+): TranscriptRunTiming {
+  const assistantMessages = run.events
     .map((entry) => entry.message)
     .filter((message) => message.role === 'assistant')
-  const startedAt = turn.startedAt
-    ?? turn.user.message.created
+  const startedAt = run.startedAt
+    ?? run.initialUser.message.created
     ?? assistantMessages.find((message) => message.created !== undefined)?.created
     ?? options.fallbackStartedAt
     ?? null
   const completedTimes = assistantMessages
     .map((message) => message.completed)
     .filter((value): value is number => value !== undefined)
-  const completedAt = completedTimes.length > 0 ? Math.max(...completedTimes) : null
+  const completedAt = run.completedAt
+    ?? (completedTimes.length > 0 ? Math.max(...completedTimes) : null)
 
   if (startedAt === null) {
     return { startedAt: null, completedAt, elapsedMs: null }

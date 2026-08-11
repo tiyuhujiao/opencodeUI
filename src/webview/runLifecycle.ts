@@ -134,7 +134,6 @@ export function dispatchServeEvent(
 		) {
 			surfacePendingPermission(
 				adapter,
-				requestId,
 				permissionEvent,
 				streamState,
 			);
@@ -152,7 +151,7 @@ export function dispatchServeEvent(
 				questionEvent.sessionId,
 			)
 		) {
-			surfacePendingQuestion(adapter, requestId, questionEvent, streamState);
+			surfacePendingQuestion(adapter, questionEvent, streamState);
 		}
 		return { done: false };
 	}
@@ -395,7 +394,7 @@ export async function pollServeBlockers(
 	const permission = pickCurrentRunBlocker(permissions, sessionId, sessions);
 	if (
 		permission &&
-		surfacePendingPermission(adapter, requestId, permission, streamState)
+		surfacePendingPermission(adapter, permission, streamState)
 	) {
 		surfaced += 1;
 	}
@@ -403,7 +402,7 @@ export async function pollServeBlockers(
 	const question = pickCurrentRunBlocker(questions, sessionId, sessions);
 	if (
 		question &&
-		surfacePendingQuestion(adapter, requestId, question, streamState)
+		surfacePendingQuestion(adapter, question, streamState)
 	) {
 		surfaced += 1;
 	}
@@ -472,7 +471,6 @@ function reconcilePendingQuestions(
 
 function surfacePendingPermission(
 	adapter: RunLifecycleAdapter,
-	requestId: string,
 	event: PendingPermissionEvent,
 	streamState: ServeStreamState,
 ): boolean {
@@ -487,7 +485,6 @@ function surfacePendingPermission(
 
 function surfacePendingQuestion(
 	adapter: RunLifecycleAdapter,
-	requestId: string,
 	event: PendingQuestionEvent,
 	streamState: ServeStreamState,
 ): boolean {

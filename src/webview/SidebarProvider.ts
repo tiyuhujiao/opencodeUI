@@ -19,7 +19,10 @@ import {
 	ensureServeRunning,
 	restartServeForConfigChange,
 } from "../bridge/serveManager";
-import { encodeOpencodeDirectory } from "../bridge/opencodeDirectory";
+import {
+	OpencodeServeClient,
+	type OpencodeServeRequestOptions,
+} from "../bridge/opencodeServeClient";
 import {
 	resolveOpencodeBinary,
 	withOpencodeBinInPath,
@@ -77,7 +80,6 @@ import {
 	createServeStreamState,
 	delay,
 	dispatchServeEvent,
-	hasPendingServeBlockers,
 	isSessionIdleStatus,
 	pollServeBlockers,
 	type PendingPermissionEvent,
@@ -198,6 +200,7 @@ export class SidebarProvider
 	private readonly tempFiles = new Map<string, NodeJS.Timeout>();
 	private readonly inlineDiff: InlineDiffController;
 	private readonly inlineDiffStateSubscription: vscode.Disposable;
+	private readonly serveClient: OpencodeServeClient;
 
 	public constructor(
 		private readonly extensionUri: vscode.Uri,
@@ -206,6 +209,10 @@ export class SidebarProvider
 		private readonly remoteName?: string,
 		inlineDiff?: InlineDiffController,
 	) {
+		this.serveClient = new OpencodeServeClient({
+			ensureRuntime: () => ensureServeRunning(),
+			getDefaultCwd: () => this.getDefaultCwd(),
+		});
 		this.inlineDiff = inlineDiff ?? createInactiveInlineDiffController();
 		this.inlineDiffStateSubscription = this.inlineDiff.onDidChange((snapshot) =>
 			this.postInlineDiffState(snapshot),
@@ -2757,10 +2764,7 @@ export class SidebarProvider
 
 		try {
 			const runtime = await ensureServeRunning();
-			const sessionId = await this.ensureSessionForPrompt(
-				payload,
-				runtime.baseUrl,
-			);
+			const sessionId = await this.ensureSessionForPrompt(payload);
 			if (this.currentRun?.requestId !== requestId) {
 				return;
 			}
@@ -3020,12 +3024,13 @@ export class SidebarProvider
 			run.requestId !== requestId ||
 			!run.sessionId ||
 			!run.initialPromptSubmitted ||
-			run.pendingPermission ||
-			run.pendingQuestion ||
 			run.queue.some((item) => item.delivery === "submitting")
 		) {
 			return;
 		}
+		// Native OpenCode stores follow-up user messages while a permission or
+		// question is still open. The runner remains blocked, but Queue delivery
+		// itself must not wait for that UI state to clear.
 		const queued = run.queue.find((item) => item.delivery === "queued");
 		if (!queued) {
 			return;
@@ -3589,7 +3594,6 @@ export class SidebarProvider
 			sessionId?: string;
 			title?: string;
 		},
-		baseUrl: string,
 	): Promise<string> {
 		if (payload.sessionId) {
 			return payload.sessionId;
@@ -3616,15 +3620,8 @@ export class SidebarProvider
 		const lifecycle = this.createRunLifecycleAdapter(webview, requestId);
 		let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 		try {
-			const response = await fetch(`${baseUrl}/event`, {
-				headers: this.buildServeHeaders({ Accept: "text/event-stream" }),
-				signal,
-			});
-			if (!response.ok || !response.body) {
-				return new Error(`订阅事件流失败（${String(response.status)}）。`);
-			}
-
-			reader = response.body.getReader();
+			const stream = await this.serveClient.openEventStream({ baseUrl }, signal);
+			reader = stream.getReader();
 			onReady?.();
 			const decoder = new TextDecoder();
 			let buffer = "";
@@ -3847,19 +3844,6 @@ export class SidebarProvider
 			},
 			requestServeJson: (pathname) => this.requestServeJson(pathname),
 		};
-	}
-
-	private pickSessionId(value: unknown): string | null {
-		if (typeof value !== "object" || value === null) {
-			return null;
-		}
-		const record = value as Record<string, unknown>;
-		const direct = record.sessionID ?? record.sessionId;
-		if (typeof direct === "string") {
-			const trimmed = direct.trim();
-			return trimmed.length > 0 ? trimmed : null;
-		}
-		return null;
 	}
 
 	private async computeUndoPayload(
@@ -4213,34 +4197,14 @@ export class SidebarProvider
 
 	private async requestServeJson<T>(
 		pathname: string,
-		init?: {
-			method?: string;
-			body?: string;
-			includeCwd?: boolean;
-			signal?: AbortSignal;
-		},
+		init?: OpencodeServeRequestOptions,
 	): Promise<T> {
-		const runtime = await ensureServeRunning();
-		const response = await fetch(`${runtime.baseUrl}${pathname}`, {
+		return this.serveClient.requestJson<T>(pathname, {
 			method: init?.method ?? "GET",
-			headers: this.buildServeHeaders(
-				{ "Content-Type": "application/json" },
-				init?.includeCwd ?? true,
-			),
 			body: init?.body,
+			includeCwd: init?.includeCwd ?? true,
 			signal: init?.signal,
 		});
-
-		if (!response.ok) {
-			const text = await response.text().catch(() => "");
-			throw new Error(
-				text.trim().length > 0
-					? text.trim()
-					: `OpenCode serve 请求失败（${String(response.status)}）。`,
-			);
-		}
-
-		return (await response.json()) as T;
 	}
 
 	private readConfiguredProviderLabels(): Map<string, string> {
@@ -4265,44 +4229,14 @@ export class SidebarProvider
 
 	private async requestServeNoContent(
 		pathname: string,
-		init?: {
-			method?: string;
-			body?: string;
-			includeCwd?: boolean;
-			signal?: AbortSignal;
-		},
+		init?: OpencodeServeRequestOptions,
 	): Promise<void> {
-		const runtime = await ensureServeRunning();
-		const response = await fetch(`${runtime.baseUrl}${pathname}`, {
+		return this.serveClient.requestNoContent(pathname, {
 			method: init?.method ?? "POST",
-			headers: this.buildServeHeaders(
-				{ "Content-Type": "application/json" },
-				init?.includeCwd ?? true,
-			),
 			body: init?.body,
+			includeCwd: init?.includeCwd ?? true,
 			signal: init?.signal,
 		});
-
-		if (!response.ok) {
-			const text = await response.text().catch(() => "");
-			throw new Error(
-				text.trim().length > 0
-					? text.trim()
-					: `OpenCode serve 请求失败（${String(response.status)}）。`,
-			);
-		}
-	}
-
-	private buildServeHeaders(
-		extra?: Record<string, string>,
-		includeCwd = true,
-	): Record<string, string> {
-		const headers: Record<string, string> = { ...(extra ?? {}) };
-		const cwd = includeCwd ? this.getDefaultCwd() : undefined;
-		if (cwd) {
-			headers["x-opencode-directory"] = encodeOpencodeDirectory(cwd);
-		}
-		return headers;
 	}
 
 	private getHtml(webview: vscode.Webview): string {
@@ -4623,17 +4557,6 @@ function buildTimelineItems(payload: {
 	}
 
 	return items;
-}
-
-function collectUserTimelineTargets(payload: {
-	messages: Array<{ info: unknown; parts: unknown[] }>;
-}) {
-	return buildTimelineItems(payload)
-		.filter((item) => item.messageId.trim().length > 0)
-		.map((item) => ({
-			messageId: item.messageId,
-			text: item.text,
-		}));
 }
 
 function collectUserTimelineTargetsFromItems(items: TimelineItem[]) {

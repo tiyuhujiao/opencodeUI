@@ -2451,15 +2451,22 @@ p {
   gap: 0.55rem;
 }
 
+.assistant-turn__timeline {
+  min-width: 0;
+  display: grid;
+}
+
 .assistant-turn__process {
   min-width: 0;
   display: grid;
   grid-template-rows: 0fr;
+  margin-bottom: 0;
   opacity: 0;
   transform: translateY(-0.2rem);
   visibility: hidden;
   transition:
     grid-template-rows 220ms ease,
+    margin-bottom 220ms ease,
     opacity 160ms ease,
     transform 220ms ease,
     visibility 0s linear 220ms;
@@ -2471,6 +2478,15 @@ p {
   transform: translateY(0);
   visibility: visible;
   transition-delay: 0s;
+}
+
+.assistant-turn__process.is-expanded.has-gap-after,
+.assistant-turn__visible.has-gap-after {
+  margin-bottom: 0.55rem;
+}
+
+.assistant-turn__visible {
+  min-width: 0;
 }
 
 .assistant-turn__process-inner {

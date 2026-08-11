@@ -46,7 +46,7 @@ const path = __importStar(require("node:path"));
 const node_url_1 = require("node:url");
 const opencodeCli_1 = require("../bridge/opencodeCli");
 const serveManager_1 = require("../bridge/serveManager");
-const opencodeDirectory_1 = require("../bridge/opencodeDirectory");
+const opencodeServeClient_1 = require("../bridge/opencodeServeClient");
 const opencodeEnv_1 = require("../bridge/opencodeEnv");
 const opencodeCompatibility_1 = require("../bridge/opencodeCompatibility");
 const diagnostics_1 = require("../diagnostics");
@@ -87,6 +87,10 @@ class SidebarProvider {
         this.modelsCache = new Map();
         this.modelsInFlight = new Map();
         this.tempFiles = new Map();
+        this.serveClient = new opencodeServeClient_1.OpencodeServeClient({
+            ensureRuntime: () => (0, serveManager_1.ensureServeRunning)(),
+            getDefaultCwd: () => this.getDefaultCwd(),
+        });
         this.inlineDiff = inlineDiff ?? createInactiveInlineDiffController();
         this.inlineDiffStateSubscription = this.inlineDiff.onDidChange((snapshot) => this.postInlineDiffState(snapshot));
     }
@@ -1961,7 +1965,7 @@ class SidebarProvider {
         };
         try {
             const runtime = await (0, serveManager_1.ensureServeRunning)();
-            const sessionId = await this.ensureSessionForPrompt(payload, runtime.baseUrl);
+            const sessionId = await this.ensureSessionForPrompt(payload);
             if (this.currentRun?.requestId !== requestId) {
                 return;
             }
@@ -2166,11 +2170,12 @@ class SidebarProvider {
             run.requestId !== requestId ||
             !run.sessionId ||
             !run.initialPromptSubmitted ||
-            run.pendingPermission ||
-            run.pendingQuestion ||
             run.queue.some((item) => item.delivery === "submitting")) {
             return;
         }
+        // Native OpenCode stores follow-up user messages while a permission or
+        // question is still open. The runner remains blocked, but Queue delivery
+        // itself must not wait for that UI state to clear.
         const queued = run.queue.find((item) => item.delivery === "queued");
         if (!queued) {
             return;
@@ -2611,7 +2616,7 @@ class SidebarProvider {
             completedAt,
         };
     }
-    async ensureSessionForPrompt(payload, baseUrl) {
+    async ensureSessionForPrompt(payload) {
         if (payload.sessionId) {
             return payload.sessionId;
         }
@@ -2627,14 +2632,8 @@ class SidebarProvider {
         const lifecycle = this.createRunLifecycleAdapter(webview, requestId);
         let reader;
         try {
-            const response = await fetch(`${baseUrl}/event`, {
-                headers: this.buildServeHeaders({ Accept: "text/event-stream" }),
-                signal,
-            });
-            if (!response.ok || !response.body) {
-                return new Error(`订阅事件流失败（${String(response.status)}）。`);
-            }
-            reader = response.body.getReader();
+            const stream = await this.serveClient.openEventStream({ baseUrl }, signal);
+            reader = stream.getReader();
             onReady?.();
             const decoder = new TextDecoder();
             let buffer = "";
@@ -2810,18 +2809,6 @@ class SidebarProvider {
             },
             requestServeJson: (pathname) => this.requestServeJson(pathname),
         };
-    }
-    pickSessionId(value) {
-        if (typeof value !== "object" || value === null) {
-            return null;
-        }
-        const record = value;
-        const direct = record.sessionID ?? record.sessionId;
-        if (typeof direct === "string") {
-            const trimmed = direct.trim();
-            return trimmed.length > 0 ? trimmed : null;
-        }
-        return null;
     }
     async computeUndoPayload(sessionId) {
         const [cachedExport, sessionInfo] = await Promise.all([
@@ -3088,20 +3075,12 @@ class SidebarProvider {
             .filter((entry) => entry.providerID.length > 0);
     }
     async requestServeJson(pathname, init) {
-        const runtime = await (0, serveManager_1.ensureServeRunning)();
-        const response = await fetch(`${runtime.baseUrl}${pathname}`, {
+        return this.serveClient.requestJson(pathname, {
             method: init?.method ?? "GET",
-            headers: this.buildServeHeaders({ "Content-Type": "application/json" }, init?.includeCwd ?? true),
             body: init?.body,
+            includeCwd: init?.includeCwd ?? true,
             signal: init?.signal,
         });
-        if (!response.ok) {
-            const text = await response.text().catch(() => "");
-            throw new Error(text.trim().length > 0
-                ? text.trim()
-                : `OpenCode serve 请求失败（${String(response.status)}）。`);
-        }
-        return (await response.json());
     }
     readConfiguredProviderLabels() {
         try {
@@ -3124,27 +3103,12 @@ class SidebarProvider {
         }
     }
     async requestServeNoContent(pathname, init) {
-        const runtime = await (0, serveManager_1.ensureServeRunning)();
-        const response = await fetch(`${runtime.baseUrl}${pathname}`, {
+        return this.serveClient.requestNoContent(pathname, {
             method: init?.method ?? "POST",
-            headers: this.buildServeHeaders({ "Content-Type": "application/json" }, init?.includeCwd ?? true),
             body: init?.body,
+            includeCwd: init?.includeCwd ?? true,
             signal: init?.signal,
         });
-        if (!response.ok) {
-            const text = await response.text().catch(() => "");
-            throw new Error(text.trim().length > 0
-                ? text.trim()
-                : `OpenCode serve 请求失败（${String(response.status)}）。`);
-        }
-    }
-    buildServeHeaders(extra, includeCwd = true) {
-        const headers = { ...(extra ?? {}) };
-        const cwd = includeCwd ? this.getDefaultCwd() : undefined;
-        if (cwd) {
-            headers["x-opencode-directory"] = (0, opencodeDirectory_1.encodeOpencodeDirectory)(cwd);
-        }
-        return headers;
     }
     getHtml(webview) {
         if (!this.isSupportedHost()) {
@@ -3365,14 +3329,6 @@ function buildTimelineItems(payload) {
         });
     }
     return items;
-}
-function collectUserTimelineTargets(payload) {
-    return buildTimelineItems(payload)
-        .filter((item) => item.messageId.trim().length > 0)
-        .map((item) => ({
-        messageId: item.messageId,
-        text: item.text,
-    }));
 }
 function collectUserTimelineTargetsFromItems(items) {
     return items

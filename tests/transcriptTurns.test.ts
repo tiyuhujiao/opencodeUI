@@ -3,10 +3,17 @@ import type { TranscriptMessage } from '../src/shared/protocol';
 import {
   buildTranscriptDisplayBlocks,
   formatTurnDuration,
-  resolveAssistantTurnTiming
+  resolveTranscriptRunTiming,
+  type TranscriptRun
 } from '../webview-ui/src/transcriptTurns';
 
-describe('transcript turn timing', () => {
+function getRuns(messages: TranscriptMessage[]): TranscriptRun[] {
+  return buildTranscriptDisplayBlocks(messages)
+    .filter((block) => block.kind === 'run')
+    .map((block) => block.run);
+}
+
+describe('transcript run timing', () => {
   const messages: TranscriptMessage[] = [
     {
       id: 'msg_user',
@@ -40,30 +47,25 @@ describe('transcript turn timing', () => {
     }
   ];
 
-  it('把同一用户消息后的多个 assistant 步骤归入一个计时轮次', () => {
+  it('把同一用户消息后的多个 assistant 步骤归入一个运行轮次', () => {
     const blocks = buildTranscriptDisplayBlocks(messages);
 
-    expect(blocks.map((block) => block.kind)).toEqual(['message', 'assistant-turn']);
-    const turnBlock = blocks[1];
-    expect(turnBlock?.kind).toBe('assistant-turn');
-    if (turnBlock?.kind !== 'assistant-turn') {
-      throw new Error('expected assistant turn');
-    }
-    expect(turnBlock.turn.responses.map((entry) => entry.message.id)).toEqual([
+    expect(blocks.map((block) => block.kind)).toEqual(['message', 'run']);
+    const run = getRuns(messages)[0];
+    expect(run?.events.map((entry) => entry.message.id)).toEqual([
       'msg_tool_1',
       'msg_tool_2',
       'msg_final'
     ]);
   });
 
-  it('历史轮次从用户发出时间计到最终 assistant 完成时间', () => {
-    const blocks = buildTranscriptDisplayBlocks(messages);
-    const turnBlock = blocks[1];
-    if (turnBlock?.kind !== 'assistant-turn') {
-      throw new Error('expected assistant turn');
+  it('历史轮次从初始用户消息计到最终 assistant 完成时间', () => {
+    const run = getRuns(messages)[0];
+    if (!run) {
+      throw new Error('expected transcript run');
     }
 
-    expect(resolveAssistantTurnTiming(turnBlock.turn, { isActive: false, now: 9_999_999 })).toEqual({
+    expect(resolveTranscriptRunTiming(run, { isActive: false, now: 9_999_999 })).toEqual({
       startedAt: 1_000,
       completedAt: 2_036_000,
       elapsedMs: 2_035_000
@@ -72,14 +74,13 @@ describe('transcript turn timing', () => {
   });
 
   it('运行中跟随当前时间，完成后冻结且忽略之后的 now', () => {
-    const blocks = buildTranscriptDisplayBlocks(messages);
-    const turnBlock = blocks[1];
-    if (turnBlock?.kind !== 'assistant-turn') {
-      throw new Error('expected assistant turn');
+    const run = getRuns(messages)[0];
+    if (!run) {
+      throw new Error('expected transcript run');
     }
 
-    expect(resolveAssistantTurnTiming(turnBlock.turn, { isActive: true, now: 34_000 }).elapsedMs).toBe(33_000);
-    expect(resolveAssistantTurnTiming(turnBlock.turn, { isActive: false, now: 50_000_000 }).elapsedMs).toBe(2_035_000);
+    expect(resolveTranscriptRunTiming(run, { isActive: true, now: 34_000 }).elapsedMs).toBe(33_000);
+    expect(resolveTranscriptRunTiming(run, { isActive: false, now: 50_000_000 }).elapsedMs).toBe(2_035_000);
   });
 
   it('显示秒、分钟与小时且不把运行时间四舍五入到下一秒', () => {
@@ -89,7 +90,7 @@ describe('transcript turn timing', () => {
     expect(formatTurnDuration(3_665_000)).toBe('1h 1m 5s');
   });
 
-  it('Queue 续写继承初始用户消息的计时起点', () => {
+  it('把 Queue 用户消息与前后 assistant 事件保留在同一个有序运行轮次', () => {
     const queuedMessages: TranscriptMessage[] = [
       {
         id: 'msg_user_1',
@@ -126,21 +127,24 @@ describe('transcript turn timing', () => {
       }
     ];
 
-    const turns = buildTranscriptDisplayBlocks(queuedMessages)
-      .filter((block) => block.kind === 'assistant-turn');
-    expect(turns).toHaveLength(2);
-    const finalTurn = turns[1];
-    if (finalTurn?.kind !== 'assistant-turn') {
-      throw new Error('expected final assistant turn');
-    }
-    expect(resolveAssistantTurnTiming(finalTurn.turn, { isActive: false, now: 99_000 })).toEqual({
+    const blocks = buildTranscriptDisplayBlocks(queuedMessages);
+    const runs = getRuns(queuedMessages);
+    expect(blocks.map((block) => block.kind)).toEqual(['message', 'run']);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.events.map((entry) => entry.message.id)).toEqual([
+      'msg_assistant_1',
+      'msg_queue_1',
+      'msg_queue_2',
+      'msg_assistant_2'
+    ]);
+    expect(resolveTranscriptRunTiming(runs[0]!, { isActive: false, now: 99_000 })).toEqual({
       startedAt: 1_000,
       completedAt: 12_000,
       elapsedMs: 11_000
     });
   });
 
-  it('工具步骤完成后才落库的 Queue 仍继承同一轮计时', () => {
+  it('工具步骤完成后才落库的 Queue 仍属于同一运行轮次', () => {
     const queuedAfterToolCompletion: TranscriptMessage[] = [
       {
         id: 'msg_user_start',
@@ -172,20 +176,36 @@ describe('transcript turn timing', () => {
       }
     ];
 
-    const turns = buildTranscriptDisplayBlocks(queuedAfterToolCompletion)
-      .filter((block) => block.kind === 'assistant-turn');
-    const finalTurn = turns[1];
-    if (finalTurn?.kind !== 'assistant-turn') {
-      throw new Error('expected queued assistant turn');
-    }
-    expect(resolveAssistantTurnTiming(finalTurn.turn, { isActive: false, now: 99_000 })).toEqual({
+    const runs = getRuns(queuedAfterToolCompletion);
+    expect(runs).toHaveLength(1);
+    expect(resolveTranscriptRunTiming(runs[0]!, { isActive: false, now: 99_000 })).toEqual({
       startedAt: 1_000,
       completedAt: 5_000,
       elapsedMs: 4_000
     });
   });
 
-  it('空闲后新发起的普通消息会重新开始计时', () => {
+  it('assistant 建立前连续落库的 Queue 也按发送顺序归入当前轮次', () => {
+    const queuedBeforeAssistant: TranscriptMessage[] = [
+      { id: 'user-1', created: 1_000, role: 'user', parts: [{ type: 'text', text: 'start' }] },
+      { id: 'queue-1', created: 1_100, role: 'user', parts: [{ type: 'text', text: 'second' }] },
+      { id: 'queue-2', created: 1_200, role: 'user', parts: [{ type: 'text', text: 'third' }] },
+      {
+        id: 'assistant-1',
+        created: 1_300,
+        completed: 2_000,
+        finish: 'stop',
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'done' }]
+      }
+    ];
+
+    const runs = getRuns(queuedBeforeAssistant);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.events.map((entry) => entry.message.id)).toEqual(['queue-1', 'queue-2', 'assistant-1']);
+  });
+
+  it('空闲后新发起的普通消息会建立新的运行轮次', () => {
     const separateMessages: TranscriptMessage[] = [
       ...messages,
       {
@@ -198,16 +218,15 @@ describe('transcript turn timing', () => {
         id: 'msg_assistant_next',
         created: 2_040_100,
         completed: 2_043_000,
+        finish: 'stop',
         role: 'assistant',
         parts: [{ type: 'text', text: 'new answer' }]
       }
     ];
-    const turns = buildTranscriptDisplayBlocks(separateMessages)
-      .filter((block) => block.kind === 'assistant-turn');
-    const finalTurn = turns[1];
-    if (finalTurn?.kind !== 'assistant-turn') {
-      throw new Error('expected separate assistant turn');
-    }
-    expect(resolveAssistantTurnTiming(finalTurn.turn, { isActive: false, now: 99_000 }).startedAt).toBe(2_040_000);
+    const runs = getRuns(separateMessages);
+
+    expect(runs).toHaveLength(2);
+    expect(runs.map((run) => run.initialUser.message.id)).toEqual(['msg_user', 'msg_user_next']);
+    expect(resolveTranscriptRunTiming(runs[1]!, { isActive: false, now: 99_000 }).startedAt).toBe(2_040_000);
   });
 });

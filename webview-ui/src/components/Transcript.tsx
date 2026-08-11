@@ -4,6 +4,7 @@ import { renderMarkdown } from '../markdown/renderMarkdown'
 import {
   computeAnchoredScrollTop,
   computeRunSpacerHeight,
+  findLatestAssistantTextOutput,
   interpolateFastScrollTop,
   TURN_ANCHOR_SCROLL_DURATION_MS
 } from '../transcriptScroll'
@@ -12,9 +13,9 @@ import { isFinalAssistantResponse } from '../transcriptState'
 import {
   buildTranscriptDisplayBlocks,
   formatTurnDuration,
-  resolveAssistantTurnTiming,
-  type AssistantTurn,
-  type IndexedTranscriptMessage
+  resolveTranscriptRunTiming,
+  type IndexedTranscriptMessage,
+  type TranscriptRun
 } from '../transcriptTurns'
 import type { TranscriptMessage, TranscriptPart, TranscriptPartTool } from '../../../src/shared/protocol'
 
@@ -49,8 +50,13 @@ export function Transcript({
   const runSpacerRef = useRef<HTMLDivElement | null>(null)
   const anchorScrollFrameRef = useRef<number | null>(null)
   const anchorScrollActiveRef = useRef(false)
+  const followLatestOutputRef = useRef<() => void>(() => undefined)
   const copyResetTimerRef = useRef<number | null>(null)
   const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null)
+  const [expandedRuns, setExpandedRuns] = useState<Record<string, boolean>>({})
+  const latestAssistantTextOutput = findLatestAssistantTextOutput(messages)
+  const latestAssistantTextKey = latestAssistantTextOutput?.key ?? null
+  const latestAssistantText = latestAssistantTextOutput?.text ?? null
 
   useEffect(() => () => {
     if (copyResetTimerRef.current !== null) {
@@ -82,14 +88,19 @@ export function Transcript({
     anchorScrollActiveRef.current = false
   }, [])
 
+  const pauseAutoScroll = useCallback(() => {
+    cancelAnchorScroll()
+    autoScrollPausedRef.current = true
+    scrollLockRef.current = null
+  }, [cancelAnchorScroll])
+
   const pauseAutoScrollForUserAction = useCallback(() => {
     const el = containerRef.current
     if (!el) {
       return
     }
 
-    cancelAnchorScroll()
-    autoScrollPausedRef.current = true
+    pauseAutoScroll()
     scrollLockRef.current = { top: el.scrollTop, until: Date.now() + 450 }
 
     window.requestAnimationFrame(() => {
@@ -98,7 +109,7 @@ export function Transcript({
         el.scrollTop = lock.top
       }
     })
-  }, [cancelAnchorScroll])
+  }, [pauseAutoScroll])
 
   useLayoutEffect(() => {
     const el = containerRef.current
@@ -215,6 +226,8 @@ export function Transcript({
       anchorScrollFrameRef.current = window.requestAnimationFrame(step)
     }
 
+    followLatestOutputRef.current = scrollIfNeeded
+
     if (isRunning) {
       const userRows = el.querySelectorAll<HTMLElement>(':scope > .msg-row--user')
       turnAnchorRef.current = userRows.item(userRows.length - 1)
@@ -251,12 +264,6 @@ export function Transcript({
       }
       programmaticScrollTargetRef.current = null
 
-      if (isRunning && !autoScrollPausedRef.current) {
-        cancelAnchorScroll()
-        autoScrollPausedRef.current = true
-        scrollLockRef.current = null
-      }
-
       if (!autoScrollPausedRef.current) {
         return
       }
@@ -274,22 +281,38 @@ export function Transcript({
 
     return () => {
       cancelAnchorScroll()
+      followLatestOutputRef.current = () => undefined
       observer.disconnect()
       resizeObserver.disconnect()
       el.removeEventListener('scroll', onScroll)
     }
   }, [cancelAnchorScroll, isRunning])
 
+  useLayoutEffect(() => {
+    if (!isRunning || latestAssistantTextKey === null || latestAssistantText === null) {
+      return
+    }
+    followLatestOutputRef.current()
+  }, [isRunning, latestAssistantTextKey, latestAssistantText])
+
   const rendered = buildTranscriptDisplayBlocks(messages)
-  let activeTurnKey: string | null = null
+  let activeRunKey: string | null = null
   if (isRunning) {
     for (let index = rendered.length - 1; index >= 0; index -= 1) {
       const entry = rendered[index]
-      if (entry.kind === 'assistant-turn') {
-        activeTurnKey = entry.turn.key
+      if (entry.kind === 'run') {
+        activeRunKey = entry.run.key
         break
       }
     }
+  }
+
+  const runPresentations = new Map<string, TranscriptRunPresentation>()
+  for (const block of rendered) {
+    if (block.kind !== 'run') {
+      continue
+    }
+    runPresentations.set(block.run.key, buildTranscriptRunPresentation(block.run, block.run.key === activeRunKey))
   }
 
   return (
@@ -298,24 +321,9 @@ export function Transcript({
       role="log"
       aria-live="polite"
       ref={containerRef}
-      onWheel={() => {
-        cancelAnchorScroll()
-        autoScrollPausedRef.current = true
-        scrollLockRef.current = null
-      }}
-      onTouchStart={() => {
-        cancelAnchorScroll()
-        autoScrollPausedRef.current = true
-        scrollLockRef.current = null
-      }}
-      onPointerDown={(event) => {
-        if (event.target !== event.currentTarget) {
-          return
-        }
-        cancelAnchorScroll()
-        autoScrollPausedRef.current = true
-        scrollLockRef.current = null
-      }}
+      onWheel={pauseAutoScroll}
+      onTouchStart={pauseAutoScroll}
+      onPointerDown={pauseAutoScroll}
       onClick={(event) => {
         const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-file-path]') : null
         const filePath = target?.dataset.filePath
@@ -331,9 +339,7 @@ export function Transcript({
       }}
       onKeyDown={(event) => {
         if (['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' '].includes(event.key)) {
-          cancelAnchorScroll()
-          autoScrollPausedRef.current = true
-          scrollLockRef.current = null
+          pauseAutoScroll()
         }
         if (event.key !== 'Enter' && event.key !== ' ') {
           return
@@ -352,18 +358,32 @@ export function Transcript({
       }}
     >
       {rendered.map((block) => {
-        if (block.kind === 'assistant-turn') {
+        if (block.kind === 'run') {
+          const presentation = runPresentations.get(block.run.key)
+            ?? buildTranscriptRunPresentation(block.run, false)
+          const defaultExpanded = presentation.hasProcessContent
+            && (block.run.key === activeRunKey || !presentation.hasFinalResponse)
+          const expanded = presentation.hasProcessContent
+            && (expandedRuns[block.run.key] ?? defaultExpanded)
           return (
-            <AssistantTurnBlock
-              key={block.turn.key}
-              turn={block.turn}
-              isActive={block.turn.key === activeTurnKey}
+            <TranscriptRunBlock
+              key={block.run.key}
+              run={block.run}
+              presentation={presentation}
+              isActive={block.run.key === activeRunKey}
+              expanded={expanded}
               isRunning={isRunning}
+              onToggle={() => {
+                pauseAutoScrollForUserAction()
+                setExpandedRuns((current) => ({ ...current, [block.run.key]: !expanded }))
+              }}
               onUserToggle={pauseAutoScrollForUserAction}
               onOpenSubtask={onOpenSubtask}
+              onRevertMessage={onRevertMessage}
               onForkMessage={onForkMessage}
               copyAssistantMessage={copyAssistantMessage}
               copiedMessageKey={copiedMessageKey}
+              revertingMessageId={revertingMessageId}
               forkingMessageId={forkingMessageId}
             />
           )
@@ -396,6 +416,7 @@ type MessageRowProps = {
   entry: IndexedTranscriptMessage
   isStreamingBubble: boolean
   contentMode: MessageContentMode
+  finalResponseOverride?: boolean
   isRunning: boolean
   onUserToggle: () => void
   onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
@@ -407,31 +428,133 @@ type MessageRowProps = {
   copyAssistantMessage: (messageKey: string, text: string) => Promise<void>
 }
 
-function AssistantTurnBlock({
-  turn,
+type TranscriptRunPresentation = {
+  finalResponseIndices: Set<number>
+  lastAssistantMessageIndex: number
+  hasFinalResponse: boolean
+  hasProcessContent: boolean
+}
+
+function buildTranscriptRunPresentation(run: TranscriptRun, isActive: boolean): TranscriptRunPresentation {
+  let lastAssistantMessageIndex = -1
+  let lastUserMessageIndex = run.initialUser.messageIndex
+  for (const entry of run.events) {
+    if (entry.message.role === 'assistant') {
+      lastAssistantMessageIndex = entry.messageIndex
+    } else if (entry.message.role === 'user') {
+      lastUserMessageIndex = entry.messageIndex
+    }
+  }
+
+  let finalCandidate: IndexedTranscriptMessage | undefined
+  for (let index = run.events.length - 1; index >= 0; index -= 1) {
+    const entry = run.events[index]
+    if (
+      entry?.message.role === 'assistant'
+      && entry.messageIndex > lastUserMessageIndex
+      && (isActive ? entry.messageIndex === lastAssistantMessageIndex : isFinalAssistantResponse(entry.message))
+    ) {
+      finalCandidate = entry
+      break
+    }
+  }
+  const finalResponseIndices = new Set<number>()
+  if (finalCandidate) {
+    const visibleParts = compressVisibleParts(finalCandidate.message.parts.filter((part) => part.type !== 'unknown'))
+    const items = buildMessageRenderItems(visibleParts, finalCandidate.messageIndex, true)
+    if (items.some((item) => item.kind === 'part' && item.isFinalAnswer)) {
+      finalResponseIndices.add(finalCandidate.messageIndex)
+    }
+  }
+  const hasFinalResponse = finalResponseIndices.size > 0
+  return {
+    finalResponseIndices,
+    lastAssistantMessageIndex,
+    hasFinalResponse,
+    hasProcessContent: run.events.some((entry) => entry.message.role !== 'user' &&
+      messageHasProcessContent(entry, finalResponseIndices.has(entry.messageIndex))
+    )
+  }
+}
+
+type TranscriptRunTimelineItem = {
+  key: string
+  kind: 'process' | 'visible'
+  entry: IndexedTranscriptMessage
+  contentMode: MessageContentMode
+}
+
+function buildTranscriptRunTimeline(
+  run: TranscriptRun,
+  presentation: TranscriptRunPresentation
+): TranscriptRunTimelineItem[] {
+  const items: TranscriptRunTimelineItem[] = []
+  for (const entry of run.events) {
+    if (entry.message.role === 'user') {
+      items.push({
+        key: `${getMessageKey(entry)}-queued-user`,
+        kind: 'visible',
+        entry,
+        contentMode: 'all'
+      })
+      continue
+    }
+
+    const isFinal = presentation.finalResponseIndices.has(entry.messageIndex)
+    if (messageHasProcessContent(entry, isFinal)) {
+      items.push({
+        key: `${getMessageKey(entry)}-process`,
+        kind: 'process',
+        entry,
+        contentMode: isFinal ? 'process' : 'all'
+      })
+    }
+    if (isFinal) {
+      items.push({
+        key: `${getMessageKey(entry)}-final`,
+        kind: 'visible',
+        entry,
+        contentMode: 'final'
+      })
+    }
+  }
+  return items
+}
+
+function TranscriptRunBlock({
+  run,
+  presentation,
   isActive,
+  expanded,
   isRunning,
+  onToggle,
   onUserToggle,
   onOpenSubtask,
+  onRevertMessage,
   onForkMessage,
   copyAssistantMessage,
   copiedMessageKey,
+  revertingMessageId,
   forkingMessageId
 }: {
-  turn: AssistantTurn
+  run: TranscriptRun
+  presentation: TranscriptRunPresentation
   isActive: boolean
+  expanded: boolean
   isRunning: boolean
+  onToggle: () => void
   onUserToggle: () => void
   onOpenSubtask?: (subtask: { sessionId: string; title: string }) => void
+  onRevertMessage?: (messageId: string) => void
   onForkMessage?: (messageId: string) => void
   copyAssistantMessage: (messageKey: string, text: string) => Promise<void>
   copiedMessageKey: string | null
+  revertingMessageId: string | null
   forkingMessageId: string | null
 }) {
   const { t } = useI18n()
   const fallbackStartedAtRef = useRef(Date.now())
   const [now, setNow] = useState(Date.now())
-  const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null)
 
   useEffect(() => {
     if (!isActive) {
@@ -443,41 +566,12 @@ function AssistantTurnBlock({
     return () => window.clearInterval(timer)
   }, [isActive])
 
-  const timing = resolveAssistantTurnTiming(turn, {
+  const timing = resolveTranscriptRunTiming(run, {
     isActive,
     now,
     fallbackStartedAt: fallbackStartedAtRef.current
   })
-  const completedFinalResponseIndices = new Set(
-    turn.responses
-      .filter((entry) => !isActive && isFinalAssistantResponse(entry.message))
-      .map((entry) => entry.messageIndex)
-  )
-  let lastAssistantMessageIndex = -1
-  for (let index = turn.responses.length - 1; index >= 0; index -= 1) {
-    if (turn.responses[index]?.message.role === 'assistant') {
-      lastAssistantMessageIndex = turn.responses[index].messageIndex
-      break
-    }
-  }
-  const finalResponseIndices = new Set<number>()
-  for (const entry of turn.responses) {
-    const canBeFinal = completedFinalResponseIndices.has(entry.messageIndex)
-      || (isActive && entry.messageIndex === lastAssistantMessageIndex)
-    if (!canBeFinal) {
-      continue
-    }
-    const visibleParts = compressVisibleParts(entry.message.parts.filter((part) => part.type !== 'unknown'))
-    const items = buildMessageRenderItems(visibleParts, entry.messageIndex, true)
-    if (items.some((item) => item.kind === 'part' && item.isFinalAnswer)) {
-      finalResponseIndices.add(entry.messageIndex)
-    }
-  }
-  const hasFinalResponse = finalResponseIndices.size > 0
-  const hasProcessContent = turn.responses.some((entry) =>
-    messageHasProcessContent(entry, finalResponseIndices.has(entry.messageIndex))
-  )
-  const expanded = hasProcessContent && (expandedOverride ?? (isActive || !hasFinalResponse))
+  const { lastAssistantMessageIndex, hasProcessContent } = presentation
   const durationLabel = timing.elapsedMs === null ? null : formatTurnDuration(timing.elapsedMs)
   const title = isActive
     ? timing.elapsedMs !== null && timing.elapsedMs >= 1000
@@ -486,18 +580,16 @@ function AssistantTurnBlock({
     : durationLabel
       ? t('Worked for {duration}', { duration: durationLabel })
       : t('Worked')
+  const timeline = buildTranscriptRunTimeline(run, presentation)
 
   return (
-    <section className={`assistant-turn${isActive ? ' assistant-turn--active' : ''}`} data-turn-key={turn.key}>
+    <section className={`assistant-turn${isActive ? ' assistant-turn--active' : ''}`} data-run-key={run.key}>
       <div className="turn-work">
         {hasProcessContent ? (
           <button
             type="button"
             className="turn-work__summary"
-            onClick={() => {
-              onUserToggle()
-              setExpandedOverride((current) => !(current ?? (isActive || !hasFinalResponse)))
-            }}
+            onClick={onToggle}
             aria-expanded={expanded}
           >
             <span className="turn-work__title">{title}</span>
@@ -515,47 +607,47 @@ function AssistantTurnBlock({
         )}
         <div className="turn-work__divider" aria-hidden="true" />
       </div>
-      {hasProcessContent ? (
-        <div
-          className={`assistant-turn__process${expanded ? ' is-expanded' : ''}`}
-          aria-hidden={!expanded}
-        >
-          <div className="assistant-turn__process-inner">
-            {turn.responses.map((entry) => (
+      <div className="assistant-turn__timeline">
+        {timeline.map((item, index) => {
+          const itemVisible = item.kind === 'visible' || expanded
+          const hasGapAfter = itemVisible && timeline
+            .slice(index + 1)
+            .some((candidate) => candidate.kind === 'visible' || expanded)
+          const row = (
               <MessageRow
-                key={`${getMessageKey(entry)}-process`}
-                entry={entry}
-                isStreamingBubble={isActive && entry.messageIndex === lastAssistantMessageIndex}
-                contentMode={finalResponseIndices.has(entry.messageIndex) ? 'process' : 'all'}
+                entry={item.entry}
+                isStreamingBubble={isActive && item.entry.messageIndex === lastAssistantMessageIndex}
+                contentMode={item.contentMode}
+                finalResponseOverride={item.contentMode === 'final'}
                 isRunning={isRunning}
                 onUserToggle={onUserToggle}
                 onOpenSubtask={onOpenSubtask}
+                onRevertMessage={item.entry.message.role === 'user' ? onRevertMessage : undefined}
                 onForkMessage={onForkMessage}
-                revertingMessageId={null}
+                revertingMessageId={revertingMessageId}
                 forkingMessageId={forkingMessageId}
                 copiedMessageKey={copiedMessageKey}
                 copyAssistantMessage={copyAssistantMessage}
               />
-            ))}
-          </div>
-        </div>
-      ) : null}
-      {turn.responses.map((entry) => finalResponseIndices.has(entry.messageIndex) ? (
-        <MessageRow
-          key={`${getMessageKey(entry)}-final`}
-          entry={entry}
-          isStreamingBubble={isActive && entry.messageIndex === lastAssistantMessageIndex}
-          contentMode="final"
-          isRunning={isRunning}
-          onUserToggle={onUserToggle}
-          onOpenSubtask={onOpenSubtask}
-          onForkMessage={onForkMessage}
-          revertingMessageId={null}
-          forkingMessageId={forkingMessageId}
-          copiedMessageKey={copiedMessageKey}
-          copyAssistantMessage={copyAssistantMessage}
-        />
-      ) : null)}
+          )
+          if (item.kind === 'process') {
+            return (
+              <div
+                key={item.key}
+                className={`assistant-turn__process${expanded ? ' is-expanded' : ''}${hasGapAfter ? ' has-gap-after' : ''}`}
+                aria-hidden={!expanded}
+              >
+                <div className="assistant-turn__process-inner">{row}</div>
+              </div>
+            )
+          }
+          return (
+            <div key={item.key} className={`assistant-turn__visible${hasGapAfter ? ' has-gap-after' : ''}`}>
+              {row}
+            </div>
+          )
+        })}
+      </div>
     </section>
   )
 }
@@ -564,6 +656,7 @@ function MessageRow({
   entry,
   isStreamingBubble,
   contentMode,
+  finalResponseOverride,
   isRunning,
   onUserToggle,
   onOpenSubtask,
@@ -581,7 +674,8 @@ function MessageRow({
     return null
   }
 
-  const isFinalResponse = !isStreamingBubble && isFinalAssistantResponse(message)
+  const isFinalResponse = !isStreamingBubble
+    && (finalResponseOverride ?? isFinalAssistantResponse(message))
   const renderItems = buildMessageRenderItems(visibleParts, messageIndex, isFinalResponse || contentMode !== 'all')
   const visibleItems = selectMessageRenderItems(renderItems, contentMode)
   if (visibleItems.length === 0) {
@@ -595,7 +689,7 @@ function MessageRow({
   const messageKey = getMessageKey(entry)
   const assistantCopyText = isFinalResponse && contentMode !== 'process' ? getAssistantCopyText(message.parts) : ''
   const canRevert = message.role === 'user' && Boolean(messageId && onRevertMessage)
-  const canFork = isFinalResponse && Boolean(messageId && onForkMessage)
+  const canFork = isFinalResponse && contentMode !== 'process' && Boolean(messageId && onForkMessage)
   const copied = copiedMessageKey === messageKey
 
   return (

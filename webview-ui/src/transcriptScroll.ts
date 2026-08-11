@@ -1,3 +1,5 @@
+import type { TranscriptMessage } from '../../src/shared/protocol'
+
 export type AnchoredScrollInput = {
   anchorTop: number
   contentBottom: number
@@ -16,6 +18,33 @@ export type RunSpacerInput = {
 
 export const TURN_ANCHOR_TOP_GAP = 20
 export const TURN_ANCHOR_SCROLL_DURATION_MS = 180
+
+export type AssistantTextOutput = {
+  key: string
+  text: string
+}
+
+export function findLatestAssistantTextOutput(messages: TranscriptMessage[]): AssistantTextOutput | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex]
+    if (message?.role !== 'assistant') {
+      continue
+    }
+
+    for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = message.parts[partIndex]
+      if (part?.type !== 'text' || part.text.trim().length === 0) {
+        continue
+      }
+      return {
+        key: `${message.id ?? String(messageIndex)}:${part.streamKey ?? String(partIndex)}`,
+        text: part.text
+      }
+    }
+    return null
+  }
+  return null
+}
 
 export function computeAnchoredScrollTop(input: AnchoredScrollInput): number {
   const bottomPadding = input.bottomPadding ?? 20

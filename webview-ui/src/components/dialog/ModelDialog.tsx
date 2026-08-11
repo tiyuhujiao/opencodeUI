@@ -118,8 +118,6 @@ export function ModelDialog({
     return null
   }
 
-  const selectedProvider = providers[providerIndex]
-
   return (
     <div className="overlay" role="dialog" aria-modal="true" aria-label={t('Select Model')}>
       <button type="button" className="overlay__backdrop" onClick={onClose} aria-label={t('Close')} />

@@ -62,7 +62,7 @@ function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
         const permissionEvent = normalizePermissionRequest(properties);
         if (permissionEvent &&
             adapter.acceptBlockerSession(requestId, sessionId, permissionEvent.sessionId)) {
-            surfacePendingPermission(adapter, requestId, permissionEvent, streamState);
+            surfacePendingPermission(adapter, permissionEvent, streamState);
         }
         return { done: false };
     }
@@ -70,7 +70,7 @@ function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
         const questionEvent = normalizeQuestionRequest(properties);
         if (questionEvent &&
             adapter.acceptBlockerSession(requestId, sessionId, questionEvent.sessionId)) {
-            surfacePendingQuestion(adapter, requestId, questionEvent, streamState);
+            surfacePendingQuestion(adapter, questionEvent, streamState);
         }
         return { done: false };
     }
@@ -250,12 +250,12 @@ async function pollServeBlockers(adapter, requestId, sessionId, streamState) {
     reconcilePendingQuestions(adapter, questions, streamState);
     const permission = pickCurrentRunBlocker(permissions, sessionId, sessions);
     if (permission &&
-        surfacePendingPermission(adapter, requestId, permission, streamState)) {
+        surfacePendingPermission(adapter, permission, streamState)) {
         surfaced += 1;
     }
     const question = pickCurrentRunBlocker(questions, sessionId, sessions);
     if (question &&
-        surfacePendingQuestion(adapter, requestId, question, streamState)) {
+        surfacePendingQuestion(adapter, question, streamState)) {
         surfaced += 1;
     }
     return surfaced;
@@ -302,7 +302,7 @@ function reconcilePendingQuestions(adapter, questions, streamState) {
         adapter.setPendingQuestion(undefined);
     }
 }
-function surfacePendingPermission(adapter, requestId, event, streamState) {
+function surfacePendingPermission(adapter, event, streamState) {
     adapter.setPendingPermission(event);
     if (streamState.pendingPermissionIds.has(event.permissionId)) {
         return false;
@@ -311,7 +311,7 @@ function surfacePendingPermission(adapter, requestId, event, streamState) {
     adapter.emit(event);
     return true;
 }
-function surfacePendingQuestion(adapter, requestId, event, streamState) {
+function surfacePendingQuestion(adapter, event, streamState) {
     adapter.setPendingQuestion(event);
     if (streamState.pendingQuestionIds.has(event.questionId)) {
         return false;

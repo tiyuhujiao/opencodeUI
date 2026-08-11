@@ -348,7 +348,7 @@ async function saveProviderConfigDraft(scope, expectedRevision, draft, options =
     const providers = asObject(document.config.provider) ?? {};
     const existingProvider = asObject(providers[draft.id]) ?? {};
     const desiredProvider = providerDraftToConfig(draft, existingProvider);
-    const nextRaw = patchConfigRaw(document.raw, document.config, ["provider", draft.id], existingProvider, desiredProvider);
+    const nextRaw = patchConfigRaw(document.raw, ["provider", draft.id], existingProvider, desiredProvider);
     await assertRevisionUnchanged(document);
     await writeFileAtomically(document.path, nextRaw);
     return readProviderConfigDocument(scope, options);
@@ -364,7 +364,7 @@ async function deleteProviderConfigDraft(scope, expectedRevision, providerId, op
     if (!providers || !(providerId in providers)) {
         return document;
     }
-    const nextRaw = patchConfigRaw(document.raw, document.config, ["provider", providerId], providers[providerId], undefined);
+    const nextRaw = patchConfigRaw(document.raw, ["provider", providerId], providers[providerId], undefined);
     await assertRevisionUnchanged(document);
     await writeFileAtomically(document.path, nextRaw);
     return readProviderConfigDocument(scope, options);
@@ -582,7 +582,7 @@ function parseConfigObject(raw, filePath) {
     }
     return parsed;
 }
-function patchConfigRaw(raw, config, propertyPath, existingValue, desiredValue) {
+function patchConfigRaw(raw, propertyPath, existingValue, desiredValue) {
     const parser = getJsoncParser();
     const hasBom = raw.startsWith("\uFEFF");
     let body = stripBom(raw);

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   computeAnchoredScrollTop,
   computeRunSpacerHeight,
+  findLatestAssistantTextOutput,
   interpolateFastScrollTop,
   TURN_ANCHOR_SCROLL_DURATION_MS,
   TURN_ANCHOR_TOP_GAP
@@ -43,10 +44,37 @@ describe('anchored transcript scrolling', () => {
 
     expect(source).toContain('const programmaticScrollTargetRef = useRef<number | null>(null)');
     expect(source).toContain('const setProgrammaticScrollTop = (top: number) => {');
-    expect(source).toContain('if (isRunning && !autoScrollPausedRef.current) {');
-    expect(source).toContain('onPointerDown={(event) => {');
+    expect(source).toContain('const pauseAutoScroll = useCallback(() => {');
+    expect(source).toContain('onPointerDown={pauseAutoScroll}');
     expect(source).toContain("['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' ']");
     expect(source).toContain('Math.abs(followTarget - el.scrollTop) < 24');
+    expect(source).not.toContain('if (isRunning && !autoScrollPausedRef.current) {');
+  });
+
+  it('首次 assistant 文本出现后启动跟随，且不会误用上一条历史文本', () => {
+    const historyAndEmptyActive = [
+      { role: 'assistant' as const, parts: [{ type: 'text' as const, text: 'history' }] },
+      { role: 'user' as const, parts: [{ type: 'text' as const, text: 'next' }] },
+      { role: 'assistant' as const, parts: [] }
+    ];
+    expect(findLatestAssistantTextOutput(historyAndEmptyActive)).toBeNull();
+
+    const withStreamingText = [
+      ...historyAndEmptyActive.slice(0, -1),
+      {
+        id: 'assistant-live',
+        role: 'assistant' as const,
+        parts: [{ type: 'text' as const, text: 'streaming', streamKey: 'text-1' }]
+      }
+    ];
+    expect(findLatestAssistantTextOutput(withStreamingText)).toEqual({
+      key: 'assistant-live:text-1',
+      text: 'streaming'
+    });
+
+    const source = readFileSync('webview-ui/src/components/Transcript.tsx', 'utf8');
+    expect(source).toContain('const latestAssistantTextOutput = findLatestAssistantTextOutput(messages)');
+    expect(source).toContain('followLatestOutputRef.current()');
   });
 
   it('使用短促 ease-out 动画而不是瞬间跳到锚点', () => {

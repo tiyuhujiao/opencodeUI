@@ -175,7 +175,9 @@ describe('session history message actions', () => {
     expect(transcript).toContain("title={t('Undo to this message')}");
     expect(transcript).toContain("title={t('Fork conversation')}");
     expect(transcript).toContain("title={t(copied ? 'Copied' : 'Copy response')}");
-    expect(transcript).toContain('const isFinalResponse = !isStreamingBubble && isFinalAssistantResponse(message)');
+    expect(transcript).toContain('&& (finalResponseOverride ?? isFinalAssistantResponse(message))');
+    expect(transcript).toContain("finalResponseOverride={item.contentMode === 'final'}");
+    expect(transcript).toContain("const canFork = isFinalResponse && contentMode !== 'process'");
     expect(timeline).toContain('onClick={() => onRevert(item.messageId)}');
     expect(timeline).toContain("import { LoaderCircle, Undo2 } from 'lucide-react'");
     expect(app).toContain("type: 'session.revert'");

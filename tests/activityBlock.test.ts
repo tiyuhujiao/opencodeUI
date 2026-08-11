@@ -26,22 +26,30 @@ describe('transcript activity block', () => {
     expect(source).not.toContain('let hasActivity = false');
   });
 
-  it('renders one turn-level timer before process blocks and keeps the final answer outside process collapse', () => {
+  it('renders one run-level timer and keeps Queue messages ordered between process and final output', () => {
     const source = readFileSync(join(root, 'webview-ui/src/components/Transcript.tsx'), 'utf8');
 
     expect(source).toContain('function MessageContent({');
     expect(source).toContain('const rendered = buildTranscriptDisplayBlocks(messages)');
-    expect(source).toContain('<AssistantTurnBlock');
+    expect(source).toContain('<TranscriptRunBlock');
+    expect(source).toContain('const [expandedRuns, setExpandedRuns]');
+    expect(source).toContain('function buildTranscriptRunTimeline(');
+    expect(source).toContain("if (entry.message.role === 'user') {");
+    expect(source).toContain("key: `${getMessageKey(entry)}-queued-user`");
+    expect(source).toContain("kind: 'visible'");
+    expect(source).toContain("contentMode: isFinal ? 'process' : 'all'");
+    expect(source).toContain("contentMode: 'final'");
+    expect(source).toContain('const timeline = buildTranscriptRunTimeline(run, presentation)');
     expect(source).toContain('<div className="turn-work">');
-    expect(source).toContain("className={`assistant-turn__process${expanded ? ' is-expanded' : ''}`}");
-    expect(source).toContain("contentMode={finalResponseIndices.has(entry.messageIndex) ? 'process' : 'all'}");
-    expect(source).toContain('contentMode="final"');
-    expect(source.indexOf('className={`assistant-turn__process')).toBeLessThan(source.indexOf('contentMode="final"'));
+    expect(source).toContain("className={`assistant-turn__process${expanded ? ' is-expanded' : ''}");
+    expect(source).toContain('className={`assistant-turn__visible${hasGapAfter');
+    expect(source).toContain("onRevertMessage={item.entry.message.role === 'user' ? onRevertMessage : undefined}");
     expect(source).toContain('const finalAnswerIndex = items.findIndex((item) => item.kind ===');
     expect(source).toContain("return mode === 'process' ? items.slice(0, finalAnswerIndex) : items.slice(finalAnswerIndex)");
-    expect(source).toContain('|| (isActive && entry.messageIndex === lastAssistantMessageIndex)');
+    expect(source).toContain("entry.messageIndex > lastUserMessageIndex");
+    expect(source).toContain("isActive ? entry.messageIndex === lastAssistantMessageIndex : isFinalAssistantResponse(entry.message)");
     expect(source).toContain('const timer = window.setInterval(tick, 1000)');
-    expect(source).toContain('const timing = resolveAssistantTurnTiming(turn, {');
+    expect(source).toContain('const timing = resolveTranscriptRunTiming(run, {');
     expect(source).toContain("t('Working for {duration}', { duration: durationLabel ?? '<1s' })");
     expect(source).toContain("t('Worked for {duration}', { duration: durationLabel })");
     expect(source).toContain('function ActivityBlock({');

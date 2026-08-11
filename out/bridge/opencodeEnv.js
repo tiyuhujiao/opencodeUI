@@ -51,16 +51,16 @@ function resolveOpencodeBinary(baseEnv) {
     const sourceEnv = baseEnv ?? process.env;
     const overriddenBinary = sourceEnv.OPENCODE_BINARY?.trim();
     if (overriddenBinary) {
-        return normalizeResolvedBinary(overriddenBinary, sourceEnv);
+        return normalizeResolvedBinary(overriddenBinary);
     }
     for (const candidatePath of getBundledBinaryCandidates(sourceEnv)) {
         if (resolveExistsSync()(candidatePath)) {
-            return normalizeResolvedBinary(candidatePath, sourceEnv);
+            return normalizeResolvedBinary(candidatePath);
         }
     }
     const discovered = resolveFromWhere(sourceEnv);
     if (discovered) {
-        return normalizeResolvedBinary(discovered, sourceEnv);
+        return normalizeResolvedBinary(discovered);
     }
     return 'opencode';
 }
@@ -284,7 +284,7 @@ function resolveFromWhere(env) {
         return undefined;
     }
 }
-function normalizeResolvedBinary(binary, env) {
+function normalizeResolvedBinary(binary) {
     if (resolvePlatform() !== 'win32') {
         return binary;
     }

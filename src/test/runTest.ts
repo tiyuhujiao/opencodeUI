@@ -4,6 +4,29 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+const delay = (milliseconds: number): Promise<void> =>
+  new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+
+async function removeWorkspace(workspacePath: string): Promise<void> {
+  // Electron can briefly retain a Windows file-watcher handle after the test host exits.
+  await delay(1_000);
+  try {
+    await rm(workspacePath, {
+      recursive: true,
+      force: true,
+      maxRetries: 12,
+      retryDelay: 500
+    });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (process.platform === 'win32' && (code === 'EBUSY' || code === 'EPERM')) {
+      console.warn(`Windows 仍占用烟测临时工作区，跳过本轮清理: ${workspacePath}`);
+      return;
+    }
+    throw error;
+  }
+}
+
 async function main(): Promise<void> {
   delete process.env.ELECTRON_RUN_AS_NODE;
 
@@ -28,12 +51,7 @@ async function main(): Promise<void> {
       }
     });
   } finally {
-    await rm(workspacePath, {
-      recursive: true,
-      force: true,
-      maxRetries: 10,
-      retryDelay: 200
-    });
+    await removeWorkspace(workspacePath);
   }
 }
 

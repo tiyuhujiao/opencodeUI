@@ -8,7 +8,6 @@ import {
   buildHunks,
   createTextSnapshot,
   hashText,
-  type ReviewHunk,
   type TextSnapshot
 } from './core';
 import { InlineDiffEditorAdapter, type EditorReviewFile } from './editorAdapter';

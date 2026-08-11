@@ -2,8 +2,8 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import * as http from 'node:http';
 import * as net from 'node:net';
 import { homedir } from 'node:os';
-import { encodeOpencodeDirectory } from './opencodeDirectory';
 import { resolveOpencodeBinary, shouldHideOpencodeWindow, shouldUseShellForOpencode, withOpencodeBinInPath } from './opencodeEnv';
+import { OpencodeServeClient } from './opencodeServeClient';
 
 const HOSTNAME = '127.0.0.1';
 const HEALTH_PATH = '/global/health';
@@ -30,6 +30,9 @@ let managedPort: number | undefined;
 let managedChild: ChildProcess | undefined;
 let disposePromise: Promise<void> | undefined;
 let portStorage: ServePortStorage | undefined;
+const serveClient = new OpencodeServeClient({
+  ensureRuntime: () => ensureServeRunning()
+});
 
 export function configureServePortStorage(storage: ServePortStorage): void {
   portStorage = storage;
@@ -89,23 +92,7 @@ export async function restartServeForConfigChange(): Promise<ServeRuntime> {
 }
 
 export async function requestServeJson<T>(pathname: string, cwd?: string): Promise<T> {
-  const runtime = await ensureServeRunning();
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json'
-  };
-  if (cwd) {
-    headers['x-opencode-directory'] = encodeOpencodeDirectory(cwd);
-  }
-  const response = await fetch(`${runtime.baseUrl}${pathname}`, { headers });
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(
-      text.trim().length > 0
-        ? text.trim()
-        : `OpenCode serve 请求失败（${String(response.status)}）。`
-    );
-  }
-  return (await response.json()) as T;
+  return serveClient.requestJson<T>(pathname, { cwd });
 }
 
 async function ensureServeRunningInternal(): Promise<ServeRuntime> {

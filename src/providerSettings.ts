@@ -369,7 +369,7 @@ export async function saveProviderConfigDraft(
 	const providers = asObject(document.config.provider) ?? {};
 	const existingProvider = asObject(providers[draft.id]) ?? {};
 	const desiredProvider = providerDraftToConfig(draft, existingProvider);
-	const nextRaw = patchConfigRaw(document.raw, document.config, ["provider", draft.id], existingProvider, desiredProvider);
+	const nextRaw = patchConfigRaw(document.raw, ["provider", draft.id], existingProvider, desiredProvider);
 	await assertRevisionUnchanged(document);
 	await writeFileAtomically(document.path, nextRaw);
 	return readProviderConfigDocument(scope, options);
@@ -392,7 +392,7 @@ export async function deleteProviderConfigDraft(
 		return document;
 	}
 
-	const nextRaw = patchConfigRaw(document.raw, document.config, ["provider", providerId], providers[providerId], undefined);
+	const nextRaw = patchConfigRaw(document.raw, ["provider", providerId], providers[providerId], undefined);
 	await assertRevisionUnchanged(document);
 	await writeFileAtomically(document.path, nextRaw);
 	return readProviderConfigDocument(scope, options);
@@ -666,7 +666,6 @@ function parseConfigObject(raw: string, filePath: string): JsonObject {
 
 function patchConfigRaw(
 	raw: string,
-	config: JsonObject,
 	propertyPath: Array<string | number>,
 	existingValue: unknown,
 	desiredValue: unknown,
