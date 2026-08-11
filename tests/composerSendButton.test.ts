@@ -6,7 +6,7 @@ const root = process.cwd();
 
 describe('composer send button', () => {
   it('queues with Enter while showing only the original stop control during a run', () => {
-    const source = readFileSync(join(root, 'webview-ui/src/App.tsx'), 'utf8');
+    const source = readFileSync(join(root, 'webview-ui/src/App.tsx'), 'utf8').replace(/\r\n?/g, '\n');
 
     expect(source).toContain('if (isRunning) {');
     expect(source).toContain('queuePrompt()');
