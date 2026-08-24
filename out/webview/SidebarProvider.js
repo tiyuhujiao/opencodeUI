@@ -52,6 +52,7 @@ const opencodeCompatibility_1 = require("../bridge/opencodeCompatibility");
 const diagnostics_1 = require("../diagnostics");
 const parsers_1 = require("../bridge/parsers");
 const protocol_1 = require("../shared/protocol");
+const search_1 = require("../shared/search");
 const runTranscript_1 = require("../shared/runTranscript");
 const runLifecycle_1 = require("./runLifecycle");
 const promptQueue_1 = require("./promptQueue");
@@ -61,6 +62,8 @@ const providerUpstreamModels_1 = require("../providerUpstreamModels");
 const providerCatalog_1 = require("../providerCatalog");
 const SESSION_EXPORT_CACHE_TTL_MS = 8000;
 const EMPTY_SESSION_EXPORT_CACHE_TTL_MS = 750;
+const SESSION_SEARCH_CONCURRENCY = 6;
+const SESSION_LIST_CACHE_TTL_MS = 15000;
 const MODELS_CACHE_TTL_MS = 15 * 60000;
 const PROVIDER_SETTINGS_CATALOG_TTL_MS = 5 * 60000;
 const OPENCODE_COMPATIBILITY_CACHE_TTL_MS = 15 * 60000;
@@ -84,17 +87,20 @@ class SidebarProvider {
         this.remoteName = remoteName;
         this.sessionExportCache = new Map();
         this.sessionExportInFlight = new Map();
+        this.sessionSearchMessageCache = new Map();
         this.modelsCache = new Map();
         this.modelsInFlight = new Map();
         this.tempFiles = new Map();
         this.serveClient = new opencodeServeClient_1.OpencodeServeClient({
-            ensureRuntime: () => (0, serveManager_1.ensureServeRunning)(),
+            ensureRuntime: (cwd) => (0, serveManager_1.ensureServeRunning)(cwd),
             getDefaultCwd: () => this.getDefaultCwd(),
         });
         this.inlineDiff = inlineDiff ?? createInactiveInlineDiffController();
         this.inlineDiffStateSubscription = this.inlineDiff.onDidChange((snapshot) => this.postInlineDiffState(snapshot));
     }
     dispose() {
+        this.activeSessionSearchController?.abort();
+        this.activeSessionSearchController = undefined;
         this.cancelHiddenViewExpiry();
         this.expiredHiddenView = undefined;
         this.inlineDiffStateSubscription.dispose();
@@ -262,7 +268,11 @@ class SidebarProvider {
         this.hiddenViewExpiryTimer = undefined;
     }
     clearHiddenViewCaches() {
+        this.activeSessionSearchController?.abort();
+        this.activeSessionSearchController = undefined;
         this.sessionExportCache.clear();
+        this.sessionSearchMessageCache.clear();
+        this.sessionListCache = undefined;
         this.modelsCache.clear();
         this.providerSettingsCatalogCache = undefined;
         this.opencodeCompatibilityCache = undefined;
@@ -309,6 +319,9 @@ class SidebarProvider {
                 }
                 case "sessions.list":
                     void this.handleSessionsListRequest(webview, message.requestId);
+                    return;
+                case "sessions.search":
+                    void this.handleSessionsSearchRequest(webview, message.requestId, message.payload.query);
                     return;
                 case "session.export":
                     void this.handleSessionExportRequest(webview, message.requestId, message.payload.sessionId);
@@ -564,7 +577,7 @@ class SidebarProvider {
     }
     async handleSessionsListRequest(webview, requestId) {
         try {
-            const parsed = await this.getSessionListForCurrentScopes();
+            const parsed = await this.getSessionListForCurrentScopes(true);
             const sessions = (0, parsers_1.sortSessionsByUpdatedDesc)(parsed).map((session) => ({
                 id: session.id,
                 title: session.title,
@@ -581,8 +594,134 @@ class SidebarProvider {
             this.respondError(webview, requestId, error, "获取 sessions 失败。");
         }
     }
-    async getSessionListForCurrentScopes() {
+    async handleSessionsSearchRequest(webview, requestId, query) {
+        this.activeSessionSearchController?.abort();
+        const controller = new AbortController();
+        this.activeSessionSearchController = controller;
+        const { signal } = controller;
+        try {
+            const normalizedQuery = query.trim();
+            if (!normalizedQuery) {
+                this.respond(webview, {
+                    type: "sessions.search.response",
+                    requestId,
+                    ok: true,
+                    payload: { query, hits: [] },
+                });
+                return;
+            }
+            const sessions = await this.getSessionListForCurrentScopes();
+            const sortedSessions = (0, parsers_1.sortSessionsByUpdatedDesc)(sessions);
+            const listedSessionIds = new Set(sortedSessions.map((session) => session.id));
+            for (const sessionId of this.sessionSearchMessageCache.keys()) {
+                if (!listedSessionIds.has(sessionId)) {
+                    this.sessionSearchMessageCache.delete(sessionId);
+                }
+            }
+            const hits = await this.loadSessionSearchHits(sortedSessions, normalizedQuery, signal);
+            if (signal.aborted) {
+                return;
+            }
+            this.respond(webview, {
+                type: "sessions.search.response",
+                requestId,
+                ok: true,
+                payload: { query, hits },
+            });
+        }
+        catch (error) {
+            if (signal.aborted) {
+                return;
+            }
+            this.respondError(webview, requestId, error, "搜索历史会话失败。");
+        }
+        finally {
+            if (this.activeSessionSearchController === controller) {
+                this.activeSessionSearchController = undefined;
+            }
+        }
+    }
+    async loadSessionSearchHits(sessions, query, signal) {
+        const results = new Array(sessions.length);
+        let nextIndex = 0;
+        const worker = async () => {
+            while (!signal.aborted) {
+                const index = nextIndex++;
+                const session = sessions[index];
+                if (!session) {
+                    return;
+                }
+                results[index] = await this.searchSessionMessages(session, query, signal);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(SESSION_SEARCH_CONCURRENCY, sessions.length) }, () => worker()));
+        return signal.aborted
+            ? []
+            : results.flatMap((result) => result ?? []).slice(0, 5000);
+    }
+    async searchSessionMessages(session, query, signal) {
+        if (signal.aborted) {
+            return [];
+        }
+        try {
+            const cachedMessages = await this.getSessionSearchMessages(session, signal);
+            let messages = cachedMessages.transcript;
+            let matches = (0, search_1.findTranscriptMatches)(messages, query, {}, 5000);
+            if (matches.length === 0) {
+                return [];
+            }
+            // Reverted sessions need their visibility boundary applied, but fetching
+            // session info only for probable hits avoids one request per session.
+            try {
+                const sessionInfo = await this.getSessionInfoForRead(session.id, signal);
+                if (sessionInfo.revert?.messageID) {
+                    messages = (0, parsers_1.exportToTranscript)({
+                        info: undefined,
+                        messages: applyRevertToExportMessages(cachedMessages.records, sessionInfo.revert),
+                    });
+                    matches = (0, search_1.findTranscriptMatches)(messages, query, {}, 5000);
+                }
+            }
+            catch (error) {
+                if (signal.aborted) {
+                    throw error;
+                }
+                (0, diagnostics_1.logWarn)(`Using unreverted session search messages ${session.id}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            return matches.flatMap((match) => {
+                const message = messages[match.messageIndex];
+                if (!message) {
+                    return [];
+                }
+                const text = (0, search_1.getSearchableMessageText)(message);
+                const snippet = (0, search_1.createSearchSnippetParts)(text, match.start, match.end);
+                return [{
+                        sessionId: session.id,
+                        title: session.title,
+                        updated: session.updated,
+                        messageIndex: match.messageIndex,
+                        ...(match.messageId ? { messageId: match.messageId } : {}),
+                        role: match.role,
+                        occurrence: match.messageOccurrence,
+                        snippet: snippet.text,
+                        snippetMatch: { start: snippet.matchStart, end: snippet.matchEnd },
+                    }];
+            });
+        }
+        catch (error) {
+            if (signal.aborted) {
+                throw error;
+            }
+            (0, diagnostics_1.logWarn)(`Skipping session search messages ${session.id}: ${error instanceof Error ? error.message : String(error)}`);
+            return [];
+        }
+    }
+    async getSessionListForCurrentScopes(forceRefresh = false) {
         const cwd = this.getDefaultCwd();
+        const cached = this.sessionListCache;
+        if (!forceRefresh && cached && cached.cwd === cwd && Date.now() - cached.loadedAt < SESSION_LIST_CACHE_TTL_MS) {
+            return cached.sessions;
+        }
         const scopedListTasks = [];
         let firstError;
         if (cwd) {
@@ -610,7 +749,10 @@ class SidebarProvider {
                 ? firstError
                 : new Error("获取 sessions 失败。");
         }
-        return (0, parsers_1.mergeSessionsById)(scopedLists);
+        const merged = (0, parsers_1.mergeSessionsById)(scopedLists);
+        const sessions = cwd ? (0, parsers_1.filterSessionsByDirectory)(merged, cwd) : merged;
+        this.sessionListCache = { cwd, loadedAt: Date.now(), sessions };
+        return sessions;
     }
     async handleSessionExportRequest(webview, requestId, sessionId) {
         try {
@@ -1206,7 +1348,7 @@ class SidebarProvider {
                 throw new Error(`配置文件已保存，但 credential 更新失败：${detail}`);
             }
             try {
-                await (0, serveManager_1.restartServeForConfigChange)();
+                await (0, serveManager_1.restartServeForConfigChange)(this.getDefaultCwd());
             }
             catch (error) {
                 const detail = error instanceof Error ? error.message : String(error);
@@ -1228,7 +1370,7 @@ class SidebarProvider {
     async handleProviderSettingsDeleteRequest(webview, requestId, scope, revision, providerId) {
         try {
             await (0, providerSettings_1.deleteProviderConfigDraft)(scope, revision, providerId, this.getProviderSettingsPathContext());
-            await (0, serveManager_1.restartServeForConfigChange)();
+            await (0, serveManager_1.restartServeForConfigChange)(this.getDefaultCwd());
             this.invalidateProviderCaches();
             const snapshot = await this.buildProviderSettingsSnapshot(scope, true);
             this.respond(webview, {
@@ -1964,7 +2106,7 @@ class SidebarProvider {
             });
         };
         try {
-            const runtime = await (0, serveManager_1.ensureServeRunning)();
+            const runtime = await (0, serveManager_1.ensureServeRunning)(this.getDefaultCwd());
             const sessionId = await this.ensureSessionForPrompt(payload);
             if (this.currentRun?.requestId !== requestId) {
                 return;
@@ -2947,9 +3089,40 @@ class SidebarProvider {
             timeoutMs: 120000,
         });
     }
-    async getSessionInfoForRead(sessionId) {
+    async getSessionSearchMessages(session, signal) {
+        const cached = this.sessionSearchMessageCache.get(session.id);
+        if (cached?.updated === session.updated) {
+            return cached;
+        }
+        if (cached) {
+            this.sessionSearchMessageCache.delete(session.id);
+        }
+        const rawMessages = await this.getSessionMessagesForRead(session.id, signal);
+        const records = parseSessionMessageRecords(rawMessages);
+        const value = {
+            updated: session.updated,
+            records,
+            transcript: (0, parsers_1.exportToTranscript)({ info: undefined, messages: records }),
+        };
+        if (!signal.aborted) {
+            this.sessionSearchMessageCache.set(session.id, value);
+        }
+        return value;
+    }
+    async getSessionMessagesForRead(sessionId, signal) {
         try {
-            return await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}`);
+            return await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}/message`, { signal });
+        }
+        catch (error) {
+            if (!isSessionNotFoundError(error)) {
+                throw error;
+            }
+        }
+        return this.requestServeJson(`/session/${encodeURIComponent(sessionId)}/message`, { includeCwd: false, signal });
+    }
+    async getSessionInfoForRead(sessionId, signal) {
+        try {
+            return await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}`, { signal });
         }
         catch (error) {
             if (!isSessionNotFoundError(error)) {
@@ -2957,7 +3130,7 @@ class SidebarProvider {
             }
         }
         try {
-            return await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}`, { includeCwd: false });
+            return await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}`, { includeCwd: false, signal });
         }
         catch (error) {
             if (!isSessionNotFoundError(error)) {
@@ -2995,6 +3168,7 @@ class SidebarProvider {
         }
         this.sessionExportCache.delete(sessionId);
         this.sessionExportInFlight.delete(sessionId);
+        this.sessionSearchMessageCache.delete(sessionId);
     }
     async getModelsPayload(providerId, forceRefresh = false) {
         const allModels = await this.getAllModelsPayload(forceRefresh);
@@ -3287,6 +3461,17 @@ function applyRevertToExportMessages(messages, revert) {
         break;
     }
     return next;
+}
+function parseSessionMessageRecords(value) {
+    if (!Array.isArray(value)) {
+        throw new Error("OpenCode session messages must be an array.");
+    }
+    return value.map((message, index) => {
+        if (!isRecord(message) || !Array.isArray(message.parts)) {
+            throw new Error(`OpenCode session messages[${String(index)}] must include a parts array.`);
+        }
+        return { info: message.info, parts: message.parts };
+    });
 }
 function buildTimelineItems(payload) {
     const items = [];

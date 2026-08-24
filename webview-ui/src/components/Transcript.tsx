@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronRight, Copy, GitFork, LoaderCircle, Undo2 } from 'lucide-react'
 import { renderMarkdown } from '../markdown/renderMarkdown'
 import {
@@ -9,6 +9,11 @@ import {
   TURN_ANCHOR_SCROLL_DURATION_MS
 } from '../transcriptScroll'
 import { useI18n, type TranslationValues } from '../i18n'
+import {
+  createSearchRegExp,
+  type TranscriptSearchMatch,
+  type TranscriptSearchOptions
+} from '../../../src/shared/search'
 import { isFinalAssistantResponse } from '../transcriptState'
 import {
   buildTranscriptDisplayBlocks,
@@ -21,6 +26,10 @@ import type { TranscriptMessage, TranscriptPart, TranscriptPartTool } from '../.
 
 type Translate = (source: string, values?: TranslationValues) => string
 
+const ACTIVITY_SHIMMER_INITIAL_DELAY_MS = 600
+const ACTIVITY_SHIMMER_INTERVAL_MS = 4_000
+const ACTIVITY_SHIMMER_DURATION_MS = 1_000
+
 type TranscriptProps = {
   messages: TranscriptMessage[]
   isRunning: boolean
@@ -30,6 +39,11 @@ type TranscriptProps = {
   onForkMessage?: (messageId: string) => void
   revertingMessageId?: string | null
   forkingMessageId?: string | null
+  searchQuery?: string
+  searchOptions?: TranscriptSearchOptions
+  activeSearchMatch?: TranscriptSearchMatch | null
+  onClearSearch?: () => void
+  clearSearchOnBlankClick?: boolean
 }
 
 export function Transcript({
@@ -40,7 +54,12 @@ export function Transcript({
   onRevertMessage,
   onForkMessage,
   revertingMessageId = null,
-  forkingMessageId = null
+  forkingMessageId = null,
+  searchQuery = '',
+  searchOptions,
+  activeSearchMatch = null,
+  onClearSearch,
+  clearSearchOnBlankClick = false
 }: TranscriptProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const autoScrollPausedRef = useRef(false)
@@ -54,6 +73,7 @@ export function Transcript({
   const copyResetTimerRef = useRef<number | null>(null)
   const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null)
   const [expandedRuns, setExpandedRuns] = useState<Record<string, boolean>>({})
+  const [searchRevealRevision, setSearchRevealRevision] = useState(0)
   const latestAssistantTextOutput = findLatestAssistantTextOutput(messages)
   const latestAssistantTextKey = latestAssistantTextOutput?.key ?? null
   const latestAssistantText = latestAssistantTextOutput?.text ?? null
@@ -295,7 +315,7 @@ export function Transcript({
     followLatestOutputRef.current()
   }, [isRunning, latestAssistantTextKey, latestAssistantText])
 
-  const rendered = buildTranscriptDisplayBlocks(messages)
+  const rendered = useMemo(() => buildTranscriptDisplayBlocks(messages), [messages])
   let activeRunKey: string | null = null
   if (isRunning) {
     for (let index = rendered.length - 1; index >= 0; index -= 1) {
@@ -315,6 +335,144 @@ export function Transcript({
     runPresentations.set(block.run.key, buildTranscriptRunPresentation(block.run, block.run.key === activeRunKey))
   }
 
+  useEffect(() => {
+    if (!activeSearchMatch) {
+      return
+    }
+    const targetRun = rendered.find((block) => (
+      block.kind === 'run'
+      && (block.run.initialUser.messageIndex === activeSearchMatch.messageIndex
+        || block.run.events.some((entry) => entry.messageIndex === activeSearchMatch.messageIndex))
+    ))
+    if (targetRun?.kind === 'run') {
+      setExpandedRuns((current) => {
+        if (current[targetRun.run.key]) {
+          return current
+        }
+        setSearchRevealRevision((revision) => revision + 1)
+        return { ...current, [targetRun.run.key]: true }
+      })
+    }
+  }, [activeSearchMatch, rendered])
+
+  useLayoutEffect(() => {
+    const root = containerRef.current
+    if (!root) {
+      return
+    }
+    root.dataset.searchRevealRevision = String(searchRevealRevision)
+
+    root.querySelectorAll<HTMLElement>('mark.search-hit').forEach((mark) => {
+      const parent = mark.parentNode
+      if (!parent) {
+        return
+      }
+      while (mark.firstChild) {
+        parent.insertBefore(mark.firstChild, mark)
+      }
+      parent.removeChild(mark)
+    })
+
+    if (!searchQuery.trim()) {
+      return
+    }
+
+    let activeElement: HTMLElement | null = null
+    const rows = root.querySelectorAll<HTMLElement>('[data-search-message-index]')
+    rows.forEach((row) => {
+      const messageIndex = Number(row.dataset.searchMessageIndex)
+      if (!Number.isInteger(messageIndex)) {
+        return
+      }
+      const message = messages[messageIndex]
+      if (!message || (message.role !== 'user' && message.role !== 'assistant')) {
+        return
+      }
+      const textNodes: Array<{ node: Text; start: number; end: number }> = []
+      let textOffset = 0
+      row.querySelectorAll<HTMLElement>('.md-body:not(.activity-thinking__body):not(.stream-thinking)').forEach((body) => {
+        const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT)
+        let node = walker.nextNode()
+        while (node) {
+          if (node.nodeValue) {
+            const textNode = node as Text
+            const nodeValue = textNode.nodeValue ?? ''
+            const start = textOffset
+            textOffset += nodeValue.length
+            textNodes.push({ node: textNode, start, end: textOffset })
+          }
+          node = walker.nextNode()
+        }
+      })
+
+      if (textNodes.length === 0) {
+        return
+      }
+      const visibleText = textNodes.map((segment) => segment.node.nodeValue ?? '').join('')
+      const matcher = createSearchRegExp(searchQuery, searchOptions)
+      if (!matcher) {
+        return
+      }
+      const rowMatches: Array<{ start: number; end: number; messageOccurrence: number }> = []
+      let messageOccurrence = 0
+      let match = matcher.exec(visibleText)
+      while (match !== null) {
+        rowMatches.push({
+          start: match.index,
+          end: match.index + match[0].length,
+          messageOccurrence
+        })
+        messageOccurrence += 1
+        if (match[0].length === 0) {
+          matcher.lastIndex += 1
+        }
+        match = matcher.exec(visibleText)
+      }
+
+      for (const segment of textNodes) {
+        const value = segment.node.nodeValue ?? ''
+        const ranges = rowMatches
+          .filter((match) => match.start < segment.end && match.end > segment.start)
+          .sort((left, right) => left.start - right.start)
+        if (ranges.length === 0) {
+          continue
+        }
+
+        const fragment = document.createDocumentFragment()
+        let cursor = 0
+        for (const range of ranges) {
+          const start = Math.max(0, range.start - segment.start)
+          const end = Math.min(value.length, range.end - segment.start)
+          if (end <= start || start < cursor) {
+            continue
+          }
+          if (start > cursor) {
+            fragment.append(value.slice(cursor, start))
+          }
+          const mark = document.createElement('mark')
+          const isActive = activeSearchMatch?.messageIndex === messageIndex
+            && activeSearchMatch.messageOccurrence === range.messageOccurrence
+          mark.className = `search-hit${isActive ? ' is-active' : ''}`
+          mark.dataset.searchOccurrence = String(range.messageOccurrence)
+          mark.textContent = value.slice(start, end)
+          fragment.append(mark)
+          if (isActive) {
+            activeElement = mark
+          }
+          cursor = end
+        }
+        if (cursor < value.length) {
+          fragment.append(value.slice(cursor))
+        }
+        segment.node.parentNode?.replaceChild(fragment, segment.node)
+      }
+    })
+
+    if (activeElement) {
+      window.requestAnimationFrame(() => activeElement?.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' }))
+    }
+  }, [activeSearchMatch, messages, searchOptions, searchQuery, searchRevealRevision])
+
   return (
     <div
       className="transcript"
@@ -328,6 +486,15 @@ export function Transcript({
         const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-file-path]') : null
         const filePath = target?.dataset.filePath
         if (!filePath || !onOpenFileReference) {
+          const elementTarget = event.target instanceof Element ? event.target : null
+          const isSearchHit = elementTarget?.closest('mark.search-hit') !== null
+          const isInteractiveTranscriptContent = elementTarget?.closest(
+            'mark.search-hit, .image-part, pre, code, [data-file-path], button, a, input, textarea, select'
+          ) !== null
+          const isRenderedText = isPointInsideRenderedText(elementTarget, event.clientX, event.clientY)
+          if (clearSearchOnBlankClick && !isSearchHit && !isInteractiveTranscriptContent && !isRenderedText) {
+            onClearSearch?.()
+          }
           return
         }
         event.preventDefault()
@@ -693,7 +860,11 @@ function MessageRow({
   const copied = copiedMessageKey === messageKey
 
   return (
-    <div className={`msg-row msg-row--${message.role}`}>
+    <div
+      className={`msg-row msg-row--${message.role}`}
+      data-search-message-index={messageIndex}
+      {...(messageId ? { 'data-search-message-id': messageId } : {})}
+    >
       <div className={`msg-stack msg-stack--${message.role}`}>
         <article className={`msg msg--${message.role}${isStreamingBubble ? ' is-streaming' : ''}`}>
           <MessageContent
@@ -831,7 +1002,7 @@ type ToolGroupEntry = {
   sessionId?: string
 }
 
-type ActivityEntry = {
+export type ActivityEntry = {
   key: string
   part: TranscriptPart
 }
@@ -1017,7 +1188,7 @@ function ActivityBlock({
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const summary = getActivitySummary(entries, t)
-  const isLive = isCurrent && summary.isLive
+  const isLive = isCurrent
 
   return (
     <div className={`activity-block${isLive ? ' activity-block--active' : ''}`}>
@@ -1031,7 +1202,7 @@ function ActivityBlock({
         aria-expanded={open}
       >
         <span className="activity-block__chevron" aria-hidden="true">{open ? 'v' : '>'}</span>
-        <span className="activity-block__current">{summary.current}</span>
+        <ActivityShimmerText text={summary.current} active={isLive} />
       </button>
       {open ? (
         <div className="activity-block__body">
@@ -1046,6 +1217,82 @@ function ActivityBlock({
         </div>
       ) : null}
     </div>
+  )
+}
+
+function isPointInsideRenderedText(target: Element | null, x: number, y: number): boolean {
+  const content = target?.closest<HTMLElement>('.md-body, .activity-entry, .activity-thinking, .turn-work__summary')
+  if (!content) {
+    return false
+  }
+
+  const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT)
+  const range = document.createRange()
+  let node = walker.nextNode()
+  while (node) {
+    if (node.nodeValue?.trim()) {
+      range.selectNodeContents(node)
+      for (const rect of range.getClientRects()) {
+        if (x >= rect.left - 1 && x <= rect.right + 1 && y >= rect.top - 1 && y <= rect.bottom + 1) {
+          return true
+        }
+      }
+    }
+    node = walker.nextNode()
+  }
+  return false
+}
+
+function ActivityShimmerText({ text, active }: { text: string; active: boolean }) {
+  const shimmerRef = useRef<HTMLSpanElement | null>(null)
+
+  useEffect(() => {
+    const element = shimmerRef.current
+    if (!active || !element || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      return
+    }
+
+    let activeTimer: number | undefined
+    const runShimmer = () => {
+      if (activeTimer !== undefined) {
+        window.clearTimeout(activeTimer)
+      }
+      element.classList.remove('is-shimmering')
+      void element.offsetWidth
+      element.classList.add('is-shimmering')
+      activeTimer = window.setTimeout(() => {
+        element.classList.remove('is-shimmering')
+        activeTimer = undefined
+      }, ACTIVITY_SHIMMER_DURATION_MS)
+    }
+
+    let interval: number | undefined
+    const initialTimer = window.setTimeout(() => {
+      runShimmer()
+      interval = window.setInterval(runShimmer, ACTIVITY_SHIMMER_INTERVAL_MS)
+    }, ACTIVITY_SHIMMER_INITIAL_DELAY_MS)
+
+    return () => {
+      window.clearTimeout(initialTimer)
+      if (interval !== undefined) {
+        window.clearInterval(interval)
+      }
+      if (activeTimer !== undefined) {
+        window.clearTimeout(activeTimer)
+      }
+      element.classList.remove('is-shimmering')
+    }
+  }, [active])
+
+  return (
+    <span ref={shimmerRef} className="activity-block__current">
+      {text}
+      {active ? (
+        <span className="activity-block__shimmer-sweep" aria-hidden="true">
+          <span className="activity-block__shimmer-highlight">{text}</span>
+        </span>
+      ) : null}
+    </span>
   )
 }
 
@@ -1109,62 +1356,48 @@ const ActivityEntryBlock = memo(function ActivityEntryBlock({
   && previous.onOpenSubtask === next.onOpenSubtask
 ))
 
-function getActivitySummary(entries: ActivityEntry[], t: Translate) {
-  const thinkingEntries = entries.filter((entry) => entry.part.type === 'reasoning' && entry.part.text.trim().length > 0)
-  const toolEntries = getActivityToolEntries(entries)
-  const taskEntries = toolEntries.filter((item) => isTaskEntry(item))
-  const activeTool = toolEntries.find((item) => isToolEntryActive(item))
-  const activeTask = taskEntries.find((item) => {
-    const kind = getTaskStatusKind(item)
-    return kind === 'running' || kind === 'pending'
+export function getActivitySummary(entries: ActivityEntry[], t: Translate) {
+  const latestActivity = [...entries].reverse().find((entry) => {
+    if (entry.part.type === 'reasoning') {
+      return entry.part.text.trim().length > 0
+    }
+    return entry.part.type === 'tool' && getActivitySummaryToolEntries(entry).length > 0
   })
-  const latestTool = [...toolEntries].reverse().find((item) => !isTaskEntry(item)) ?? toolEntries[toolEntries.length - 1]
-  const latestThinking = thinkingEntries[thinkingEntries.length - 1]
 
-  const current = activeTask
-    ? `${t('Subtask')}: ${summarizeActivityText(activeTask.title || activeTask.summary)} (${t(formatTaskStatus(activeTask))})`
-    : activeTool
-      ? `${t('Tool')}: ${summarizeActivityText(activeTool.title || activeTool.summary)}`
-      : latestTool
-      ? `${t('Tool')}: ${summarizeActivityText(latestTool.title || latestTool.summary)}`
-      : latestThinking?.part.type === 'reasoning'
-        ? `${t('Thinking')} ${summarizeActivityText(latestThinking.part.text)}`
-        : t('Working')
+  if (!latestActivity) {
+    return { current: t('Working'), isLive: false }
+  }
+
+  if (latestActivity?.part.type === 'reasoning') {
+    return {
+      current: `${t('Thinking')} ${summarizeActivityText(latestActivity.part.text)}`,
+      isLive: true
+    }
+  }
+
+  const currentTools = getActivitySummaryToolEntries(latestActivity)
+  const currentTool = currentTools[currentTools.length - 1]
+  if (!currentTool) {
+    return { current: t('Working'), isLive: false }
+  }
 
   return {
-    current,
-    isLive: Boolean(activeTask || activeTool || (thinkingEntries.length > 0 && toolEntries.length === 0))
+    current: isTaskEntry(currentTool)
+      ? `${t('Subtask')}: ${summarizeActivityText(currentTool.title || currentTool.summary)} (${t(formatTaskStatus(currentTool))})`
+      : `${t('Tool')}: ${summarizeActivityText(currentTool.title || currentTool.summary)}`,
+    isLive: true
   }
 }
 
-function isToolEntryActive(item: ToolGroupEntry) {
-  const status = normalizeToolStatus(item.status ?? '')
-  if (['running', 'in_progress', 'active', 'processing', 'started', 'pending', 'queued', 'waiting', 'created'].includes(status)) {
-    return true
+function getActivitySummaryToolEntries(entry: ActivityEntry) {
+  const part = entry.part
+  if (part.type !== 'tool') {
+    return []
   }
-  if (['completed', 'complete', 'done', 'success', 'succeeded', 'error', 'failed', 'failure'].includes(status)) {
-    return false
+  if (part.toolName === '__tool_group__') {
+    return extractToolGroup(part.raw).filter((item) => !isTodoWriteSummary(item.summary))
   }
-  return !item.output
-}
-
-function getActivityToolEntries(entries: ActivityEntry[]) {
-  const items: ToolGroupEntry[] = []
-  for (const entry of entries) {
-    const part = entry.part
-    if (part.type !== 'tool') {
-      continue
-    }
-
-    if (part.toolName === '__tool_group__') {
-      items.push(...extractToolGroup(part.raw).filter((item) => !isTodoWriteSummary(item.summary)))
-      continue
-    }
-
-    items.push(createToolGroupEntry(part))
-  }
-
-  return mergeToolGroupEntries(items)
+  return [createToolGroupEntry(part)]
 }
 
 function summarizeActivityText(value: string, maxLength = 78) {

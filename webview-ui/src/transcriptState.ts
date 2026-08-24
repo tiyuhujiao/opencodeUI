@@ -11,6 +11,20 @@ import {
 export { applyRunEventToTranscript, preserveContextUsage }
 
 const RUN_ERROR_PREFIX = '运行错误：'
+const ANSI_ESCAPE_PATTERN = new RegExp('\\x1b\\[[0-?]*[ -/]*[@-~]', 'g')
+
+export function isTransientServeError(error: string | null | undefined): boolean {
+  if (!error) {
+    return false
+  }
+
+  const normalized = error
+    .replace(ANSI_ESCAPE_PATTERN, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return /(?:opencode\s+serve|serve\s+(?:启动|退出|超时|失败)|database\s+is\s+locked|econnrefused|eaddrinuse|健康检查失败|health\s+check)/i.test(normalized)
+}
 
 export function clearSettledRunStatus(status: string | null): string | null {
   return status === 'Completed' || status === 'Stopped' || status === 'Failed' ? null : status

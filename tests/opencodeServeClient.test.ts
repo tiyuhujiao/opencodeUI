@@ -3,11 +3,12 @@ import { OpencodeServeClient } from '../src/bridge/opencodeServeClient';
 
 describe('OpencodeServeClient', () => {
   it('encodes cwd and preserves JSON request options', async () => {
+    const ensureRuntime = vi.fn(async (_cwd?: string) => ({ baseUrl: 'http://127.0.0.1:5111' }));
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ files: 2 }), { status: 200 })
     );
     const client = new OpencodeServeClient({
-      ensureRuntime: async () => ({ baseUrl: 'http://127.0.0.1:5111' }),
+      ensureRuntime,
       getDefaultCwd: () => 'E:\\百分数与分数',
       fetch: fetchMock
     });
@@ -21,6 +22,7 @@ describe('OpencodeServeClient', () => {
       })
     ).resolves.toEqual({ files: 2 });
 
+    expect(ensureRuntime).toHaveBeenCalledWith('E:\\百分数与分数');
     expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:5111/session/s1/diff', {
       method: 'POST',
       headers: {
@@ -54,17 +56,19 @@ describe('OpencodeServeClient', () => {
   });
 
   it('can omit cwd for global requests', async () => {
+    const ensureRuntime = vi.fn(async (_cwd?: string) => ({ baseUrl: 'http://127.0.0.1:4096' }));
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ healthy: true }), { status: 200 })
     );
     const client = new OpencodeServeClient({
-      ensureRuntime: async () => ({ baseUrl: 'http://127.0.0.1:4096' }),
+      ensureRuntime,
       getDefaultCwd: () => 'E:\\workspace',
       fetch: fetchMock
     });
 
     await client.requestJson('/global/health', { includeCwd: false });
 
+    expect(ensureRuntime).toHaveBeenCalledWith(undefined);
     expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:4096/global/health', {
       headers: { 'Content-Type': 'application/json' }
     });

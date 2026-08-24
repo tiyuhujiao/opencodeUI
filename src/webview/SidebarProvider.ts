@@ -46,6 +46,7 @@ import {
 	parseModelsList,
 	parseModelsVerbose,
 	parseSessionListJson,
+	filterSessionsByDirectory,
 	mergeSessionsById,
 	sortSessionsByUpdatedDesc,
 	type SessionListItem,
@@ -62,6 +63,7 @@ import {
 	type WorkspaceResourceSummary,
 	type ModelSummary,
 	type OpencodeCompatibility,
+	type SessionSearchHit,
 	type ProviderSettingsDraft,
 	type ProviderAuthAuthorization,
 	type ProviderSettingsScope,
@@ -72,6 +74,11 @@ import {
 	type ActiveRunSnapshot,
 	type TerminalRunSnapshot,
 } from "../shared/protocol";
+import {
+	createSearchSnippetParts,
+	findTranscriptMatches,
+	getSearchableMessageText,
+} from "../shared/search";
 import { applyRunEventToTranscript } from "../shared/runTranscript";
 import {
 	BLOCKER_POLL_INTERVAL_MS,
@@ -124,6 +131,8 @@ import {
 
 const SESSION_EXPORT_CACHE_TTL_MS = 8_000;
 const EMPTY_SESSION_EXPORT_CACHE_TTL_MS = 750;
+const SESSION_SEARCH_CONCURRENCY = 6;
+const SESSION_LIST_CACHE_TTL_MS = 15_000;
 const MODELS_CACHE_TTL_MS = 15 * 60_000;
 const PROVIDER_SETTINGS_CATALOG_TTL_MS = 5 * 60_000;
 const OPENCODE_COMPATIBILITY_CACHE_TTL_MS = 15 * 60_000;
@@ -178,6 +187,16 @@ export class SidebarProvider
 		string,
 		Promise<CachedSessionExport>
 	>();
+	private readonly sessionSearchMessageCache = new Map<
+		string,
+		CachedSessionSearchMessages
+	>();
+	private sessionListCache?: {
+		cwd?: string;
+		loadedAt: number;
+		sessions: SessionListItem[];
+	};
+	private activeSessionSearchController?: AbortController;
 	private readonly modelsCache = new Map<string, CachedModelsPayload>();
 	private readonly modelsInFlight = new Map<
 		string,
@@ -210,7 +229,7 @@ export class SidebarProvider
 		inlineDiff?: InlineDiffController,
 	) {
 		this.serveClient = new OpencodeServeClient({
-			ensureRuntime: () => ensureServeRunning(),
+			ensureRuntime: (cwd) => ensureServeRunning(cwd),
 			getDefaultCwd: () => this.getDefaultCwd(),
 		});
 		this.inlineDiff = inlineDiff ?? createInactiveInlineDiffController();
@@ -220,6 +239,8 @@ export class SidebarProvider
 	}
 
 	public dispose(): void {
+		this.activeSessionSearchController?.abort();
+		this.activeSessionSearchController = undefined;
 		this.cancelHiddenViewExpiry();
 		this.expiredHiddenView = undefined;
 		this.inlineDiffStateSubscription.dispose();
@@ -420,7 +441,11 @@ export class SidebarProvider
 	}
 
 	private clearHiddenViewCaches(): void {
+		this.activeSessionSearchController?.abort();
+		this.activeSessionSearchController = undefined;
 		this.sessionExportCache.clear();
+		this.sessionSearchMessageCache.clear();
+		this.sessionListCache = undefined;
 		this.modelsCache.clear();
 		this.providerSettingsCatalogCache = undefined;
 		this.opencodeCompatibilityCache = undefined;
@@ -490,6 +515,13 @@ export class SidebarProvider
 				}
 				case "sessions.list":
 					void this.handleSessionsListRequest(webview, message.requestId);
+					return;
+				case "sessions.search":
+					void this.handleSessionsSearchRequest(
+						webview,
+						message.requestId,
+						message.payload.query,
+					);
 					return;
 				case "session.export":
 					void this.handleSessionExportRequest(
@@ -945,7 +977,7 @@ export class SidebarProvider
 		requestId: string,
 	): Promise<void> {
 		try {
-			const parsed = await this.getSessionListForCurrentScopes();
+			const parsed = await this.getSessionListForCurrentScopes(true);
 			const sessions = sortSessionsByUpdatedDesc(parsed).map((session) => ({
 				id: session.id,
 				title: session.title,
@@ -963,8 +995,163 @@ export class SidebarProvider
 		}
 	}
 
-	private async getSessionListForCurrentScopes(): Promise<SessionListItem[]> {
+	private async handleSessionsSearchRequest(
+		webview: vscode.Webview,
+		requestId: string,
+		query: string,
+	): Promise<void> {
+		this.activeSessionSearchController?.abort();
+		const controller = new AbortController();
+		this.activeSessionSearchController = controller;
+		const { signal } = controller;
+		try {
+			const normalizedQuery = query.trim();
+			if (!normalizedQuery) {
+				this.respond(webview, {
+					type: "sessions.search.response",
+					requestId,
+					ok: true,
+					payload: { query, hits: [] },
+				});
+				return;
+			}
+
+			const sessions = await this.getSessionListForCurrentScopes();
+			const sortedSessions = sortSessionsByUpdatedDesc(sessions);
+			const listedSessionIds = new Set(sortedSessions.map((session) => session.id));
+			for (const sessionId of this.sessionSearchMessageCache.keys()) {
+				if (!listedSessionIds.has(sessionId)) {
+					this.sessionSearchMessageCache.delete(sessionId);
+				}
+			}
+			const hits = await this.loadSessionSearchHits(
+				sortedSessions,
+				normalizedQuery,
+				signal,
+			);
+			if (signal.aborted) {
+				return;
+			}
+
+			this.respond(webview, {
+				type: "sessions.search.response",
+				requestId,
+				ok: true,
+				payload: { query, hits },
+			});
+		} catch (error) {
+			if (signal.aborted) {
+				return;
+			}
+			this.respondError(webview, requestId, error, "搜索历史会话失败。");
+		} finally {
+			if (this.activeSessionSearchController === controller) {
+				this.activeSessionSearchController = undefined;
+			}
+		}
+	}
+
+	private async loadSessionSearchHits(
+		sessions: readonly SessionListItem[],
+		query: string,
+		signal: AbortSignal,
+	): Promise<SessionSearchHit[]> {
+		const results: Array<SessionSearchHit[] | undefined> = new Array(sessions.length);
+		let nextIndex = 0;
+		const worker = async (): Promise<void> => {
+			while (!signal.aborted) {
+				const index = nextIndex++;
+				const session = sessions[index];
+				if (!session) {
+					return;
+				}
+				results[index] = await this.searchSessionMessages(session, query, signal);
+			}
+		};
+
+		await Promise.all(
+			Array.from(
+				{ length: Math.min(SESSION_SEARCH_CONCURRENCY, sessions.length) },
+				() => worker(),
+			),
+		);
+		return signal.aborted
+			? []
+			: results.flatMap((result) => result ?? []).slice(0, 5000);
+	}
+
+	private async searchSessionMessages(
+		session: SessionListItem,
+		query: string,
+		signal: AbortSignal,
+	): Promise<SessionSearchHit[]> {
+		if (signal.aborted) {
+			return [];
+		}
+
+		try {
+			const cachedMessages = await this.getSessionSearchMessages(session, signal);
+			let messages = cachedMessages.transcript;
+			let matches = findTranscriptMatches(messages, query, {}, 5000);
+			if (matches.length === 0) {
+				return [];
+			}
+
+			// Reverted sessions need their visibility boundary applied, but fetching
+			// session info only for probable hits avoids one request per session.
+			try {
+				const sessionInfo = await this.getSessionInfoForRead(session.id, signal);
+				if (sessionInfo.revert?.messageID) {
+					messages = exportToTranscript({
+						info: undefined,
+						messages: applyRevertToExportMessages(
+							cachedMessages.records,
+							sessionInfo.revert,
+						),
+					});
+					matches = findTranscriptMatches(messages, query, {}, 5000);
+				}
+			} catch (error) {
+				if (signal.aborted) {
+					throw error;
+				}
+				logWarn(`Using unreverted session search messages ${session.id}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+
+			return matches.flatMap((match) => {
+				const message = messages[match.messageIndex];
+				if (!message) {
+					return [];
+				}
+				const text = getSearchableMessageText(message);
+				const snippet = createSearchSnippetParts(text, match.start, match.end);
+				return [{
+					sessionId: session.id,
+					title: session.title,
+					updated: session.updated,
+					messageIndex: match.messageIndex,
+					...(match.messageId ? { messageId: match.messageId } : {}),
+					role: match.role,
+					occurrence: match.messageOccurrence,
+					snippet: snippet.text,
+					snippetMatch: { start: snippet.matchStart, end: snippet.matchEnd },
+				}];
+			});
+		} catch (error) {
+			if (signal.aborted) {
+				throw error;
+			}
+			logWarn(`Skipping session search messages ${session.id}: ${error instanceof Error ? error.message : String(error)}`);
+			return [];
+		}
+	}
+
+	private async getSessionListForCurrentScopes(forceRefresh = false): Promise<SessionListItem[]> {
 		const cwd = this.getDefaultCwd();
+		const cached = this.sessionListCache;
+		if (!forceRefresh && cached && cached.cwd === cwd && Date.now() - cached.loadedAt < SESSION_LIST_CACHE_TTL_MS) {
+			return cached.sessions;
+		}
 		const scopedListTasks: Array<Promise<SessionListItem[]>> = [];
 		let firstError: unknown;
 
@@ -1000,7 +1187,10 @@ export class SidebarProvider
 				: new Error("获取 sessions 失败。");
 		}
 
-		return mergeSessionsById(scopedLists);
+		const merged = mergeSessionsById(scopedLists);
+		const sessions = cwd ? filterSessionsByDirectory(merged, cwd) : merged;
+		this.sessionListCache = { cwd, loadedAt: Date.now(), sessions };
+		return sessions;
 	}
 
 	private async handleSessionExportRequest(
@@ -1818,7 +2008,7 @@ export class SidebarProvider
 				throw new Error(`配置文件已保存，但 credential 更新失败：${detail}`);
 			}
 			try {
-				await restartServeForConfigChange();
+				await restartServeForConfigChange(this.getDefaultCwd());
 			} catch (error) {
 				const detail = error instanceof Error ? error.message : String(error);
 				throw new Error(`配置文件已保存，但 OpenCode 重新载入配置失败：${detail}`);
@@ -1850,7 +2040,7 @@ export class SidebarProvider
 				providerId,
 				this.getProviderSettingsPathContext(),
 			);
-			await restartServeForConfigChange();
+			await restartServeForConfigChange(this.getDefaultCwd());
 			this.invalidateProviderCaches();
 			const snapshot = await this.buildProviderSettingsSnapshot(scope, true);
 			this.respond(webview, {
@@ -2763,7 +2953,7 @@ export class SidebarProvider
 		};
 
 		try {
-			const runtime = await ensureServeRunning();
+			const runtime = await ensureServeRunning(this.getDefaultCwd());
 			const sessionId = await this.ensureSessionForPrompt(payload);
 			if (this.currentRun?.requestId !== requestId) {
 				return;
@@ -4028,12 +4218,60 @@ export class SidebarProvider
 		});
 	}
 
+	private async getSessionSearchMessages(
+		session: SessionListItem,
+		signal: AbortSignal,
+	): Promise<CachedSessionSearchMessages> {
+		const cached = this.sessionSearchMessageCache.get(session.id);
+		if (cached?.updated === session.updated) {
+			return cached;
+		}
+		if (cached) {
+			this.sessionSearchMessageCache.delete(session.id);
+		}
+
+		const rawMessages = await this.getSessionMessagesForRead(session.id, signal);
+		const records = parseSessionMessageRecords(rawMessages);
+		const value: CachedSessionSearchMessages = {
+			updated: session.updated,
+			records,
+			transcript: exportToTranscript({ info: undefined, messages: records }),
+		};
+		if (!signal.aborted) {
+			this.sessionSearchMessageCache.set(session.id, value);
+		}
+		return value;
+	}
+
+	private async getSessionMessagesForRead(
+		sessionId: string,
+		signal: AbortSignal,
+	): Promise<unknown> {
+		try {
+			return await this.requestServeJson<unknown>(
+				`/session/${encodeURIComponent(sessionId)}/message`,
+				{ signal },
+			);
+		} catch (error) {
+			if (!isSessionNotFoundError(error)) {
+				throw error;
+			}
+		}
+
+		return this.requestServeJson<unknown>(
+			`/session/${encodeURIComponent(sessionId)}/message`,
+			{ includeCwd: false, signal },
+		);
+	}
+
 	private async getSessionInfoForRead(
 		sessionId: string,
+		signal?: AbortSignal,
 	): Promise<SessionInfoResponse> {
 		try {
 			return await this.requestServeJson<SessionInfoResponse>(
 				`/session/${encodeURIComponent(sessionId)}`,
+				{ signal },
 			);
 		} catch (error) {
 			if (!isSessionNotFoundError(error)) {
@@ -4044,7 +4282,7 @@ export class SidebarProvider
 		try {
 			return await this.requestServeJson<SessionInfoResponse>(
 				`/session/${encodeURIComponent(sessionId)}`,
-				{ includeCwd: false },
+				{ includeCwd: false, signal },
 			);
 		} catch (error) {
 			if (!isSessionNotFoundError(error)) {
@@ -4098,6 +4336,7 @@ export class SidebarProvider
 		}
 		this.sessionExportCache.delete(sessionId);
 		this.sessionExportInFlight.delete(sessionId);
+		this.sessionSearchMessageCache.delete(sessionId);
 	}
 
 	private async getModelsPayload(
@@ -4365,6 +4604,12 @@ type CachedSessionExport = {
 	transcriptsByRevertKey: Map<string, ReturnType<typeof exportToTranscript>>;
 };
 
+type CachedSessionSearchMessages = {
+	updated: string;
+	records: ExportMessageRecord[];
+	transcript: TranscriptMessage[];
+};
+
 type CachedModelsPayload = {
 	loadedAt: number;
 	models: CachedModelEntry[];
@@ -4497,6 +4742,19 @@ function applyRevertToExportMessages(
 	}
 
 	return next;
+}
+
+function parseSessionMessageRecords(value: unknown): ExportMessageRecord[] {
+	if (!Array.isArray(value)) {
+		throw new Error("OpenCode session messages must be an array.");
+	}
+
+	return value.map((message, index) => {
+		if (!isRecord(message) || !Array.isArray(message.parts)) {
+			throw new Error(`OpenCode session messages[${String(index)}] must include a parts array.`);
+		}
+		return { info: message.info, parts: message.parts };
+	});
 }
 
 function buildTimelineItems(payload: {

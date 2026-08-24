@@ -38,28 +38,39 @@ exports.disposeServeManager = disposeServeManager;
 exports.ensureServeRunning = ensureServeRunning;
 exports.restartServeForConfigChange = restartServeForConfigChange;
 exports.requestServeJson = requestServeJson;
+exports.resolveServeStartupDirectory = resolveServeStartupDirectory;
+exports.isServeDirectoryCompatible = isServeDirectoryCompatible;
 exports.probeHealth = probeHealth;
 const node_child_process_1 = require("node:child_process");
 const http = __importStar(require("node:http"));
 const net = __importStar(require("node:net"));
 const node_os_1 = require("node:os");
+const node_path_1 = require("node:path");
 const opencodeEnv_1 = require("./opencodeEnv");
 const opencodeServeClient_1 = require("./opencodeServeClient");
 const HOSTNAME = '127.0.0.1';
 const HEALTH_PATH = '/global/health';
+const ANSI_ESCAPE_PATTERN = new RegExp('\\x1b\\[[0-?]*[ -/]*[@-~]', 'g');
+const PATH_PATH = '/path';
 const PREFERRED_PORT = 4096;
 const HEALTH_CHECK_TIMEOUT_MS = 1000;
+const PATH_CHECK_TIMEOUT_MS = 1000;
 const STARTUP_TIMEOUT_MS = 12000;
 const POLL_INTERVAL_MS = 250;
 let ensurePromise;
+let ensurePromiseWorkspaceRoot;
 let restartPromise;
+let restartPromiseWorkspaceRoot;
 let currentPort;
+let currentRuntimeDirectory;
 let managedPort;
+let managedStartDirectory;
 let managedChild;
 let disposePromise;
 let portStorage;
+let lastWorkspaceCwd;
 const serveClient = new opencodeServeClient_1.OpencodeServeClient({
-    ensureRuntime: () => ensureServeRunning()
+    ensureRuntime: (cwd) => ensureServeRunning(cwd)
 });
 function configureServePortStorage(storage) {
     portStorage = storage;
@@ -72,8 +83,10 @@ function disposeServeManager() {
     const port = managedPort;
     managedChild = undefined;
     managedPort = undefined;
+    managedStartDirectory = undefined;
     if (currentPort === port) {
         currentPort = undefined;
+        currentRuntimeDirectory = undefined;
     }
     const pending = child ? stopManagedChild(child) : Promise.resolve();
     const promise = pending.finally(() => {
@@ -84,40 +97,71 @@ function disposeServeManager() {
     disposePromise = promise;
     return promise;
 }
-async function ensureServeRunning() {
+async function ensureServeRunning(cwd) {
+    rememberWorkspaceCwd(cwd);
     if (disposePromise) {
         await disposePromise;
     }
     if (restartPromise) {
-        return restartPromise;
+        if (canSharePendingRuntime(cwd, restartPromiseWorkspaceRoot)) {
+            return restartPromise;
+        }
+        await restartPromise;
+        return ensureServeRunning(cwd);
     }
     if (ensurePromise) {
-        return ensurePromise;
+        if (canSharePendingRuntime(cwd, ensurePromiseWorkspaceRoot)) {
+            return ensurePromise;
+        }
+        await ensurePromise;
+        return ensureServeRunning(cwd);
     }
-    ensurePromise = ensureServeRunningInternal().finally(() => {
-        ensurePromise = undefined;
+    const workspaceRoot = getWindowsDirectoryRootKey(cwd);
+    const promise = ensureServeRunningInternal(cwd).finally(() => {
+        if (ensurePromise === promise) {
+            ensurePromise = undefined;
+            ensurePromiseWorkspaceRoot = undefined;
+        }
     });
+    ensurePromise = promise;
+    ensurePromiseWorkspaceRoot = workspaceRoot;
     return ensurePromise;
 }
-async function restartServeForConfigChange() {
+async function restartServeForConfigChange(cwd) {
+    rememberWorkspaceCwd(cwd);
     if (disposePromise) {
         await disposePromise;
     }
     if (restartPromise) {
         return restartPromise;
     }
-    restartPromise = restartServeForConfigChangeInternal().finally(() => {
-        restartPromise = undefined;
+    const effectiveCwd = cwd ?? lastWorkspaceCwd;
+    const workspaceRoot = getWindowsDirectoryRootKey(effectiveCwd);
+    const promise = restartServeForConfigChangeInternal(effectiveCwd).finally(() => {
+        if (restartPromise === promise) {
+            restartPromise = undefined;
+            restartPromiseWorkspaceRoot = undefined;
+        }
     });
+    restartPromise = promise;
+    restartPromiseWorkspaceRoot = workspaceRoot;
     return restartPromise;
 }
 async function requestServeJson(pathname, cwd) {
     return serveClient.requestJson(pathname, { cwd });
 }
-async function ensureServeRunningInternal() {
+async function ensureServeRunningInternal(cwd) {
     if (currentPort && (await probeHealth(currentPort))) {
-        await persistLastPort(currentPort);
-        return buildRuntime(currentPort, isManagedPort(currentPort));
+        const compatibility = await inspectRuntimeCompatibility(currentPort, cwd, currentRuntimeDirectory ?? getManagedStartDirectory(currentPort));
+        if (compatibility.compatible) {
+            currentRuntimeDirectory = compatibility.directory;
+            await persistLastPort(currentPort);
+            return buildRuntime(currentPort, isManagedPort(currentPort));
+        }
+    }
+    else if (currentPort) {
+        currentPort = undefined;
+        currentRuntimeDirectory = undefined;
     }
     const lastPort = readLastPort();
     const candidatePorts = [];
@@ -129,41 +173,130 @@ async function ensureServeRunningInternal() {
     }
     for (const candidatePort of candidatePorts) {
         if (await probeHealth(candidatePort)) {
-            currentPort = candidatePort;
-            await persistLastPort(candidatePort);
-            return buildRuntime(candidatePort, false);
+            const compatibility = await inspectRuntimeCompatibility(candidatePort, cwd, getManagedStartDirectory(candidatePort));
+            if (compatibility.compatible) {
+                currentPort = candidatePort;
+                currentRuntimeDirectory = compatibility.directory;
+                await persistLastPort(candidatePort);
+                return buildRuntime(candidatePort, isManagedPort(candidatePort));
+            }
         }
     }
     const preferredUsable = await isPortUsable(PREFERRED_PORT);
     let targetPort = preferredUsable ? PREFERRED_PORT : await findFreePort();
+    const startDirectory = resolveServeStartupDirectory(cwd);
+    const previousChild = managedChild;
+    let child;
     try {
-        activateManagedRuntime(await startServe(targetPort), targetPort);
+        child = await startServe(targetPort, startDirectory);
     }
     catch (error) {
         if (targetPort !== PREFERRED_PORT) {
             throw error;
         }
         targetPort = await findFreePort();
-        activateManagedRuntime(await startServe(targetPort), targetPort);
+        child = await startServe(targetPort, startDirectory);
     }
+    activateManagedRuntime(child, targetPort, startDirectory);
     currentPort = targetPort;
-    await persistLastPort(targetPort);
-    return buildRuntime(targetPort, true);
-}
-async function restartServeForConfigChangeInternal() {
-    if (ensurePromise) {
-        await ensurePromise;
-    }
-    const targetPort = await findFreePort();
-    const previousChild = managedChild;
-    const child = await startServe(targetPort);
-    activateManagedRuntime(child, targetPort);
-    currentPort = targetPort;
+    currentRuntimeDirectory = startDirectory;
     await persistLastPort(targetPort);
     if (previousChild && previousChild !== child) {
         await stopManagedChild(previousChild);
     }
     return buildRuntime(targetPort, true);
+}
+async function restartServeForConfigChangeInternal(cwd) {
+    if (ensurePromise) {
+        await ensurePromise;
+    }
+    const targetPort = await findFreePort();
+    const previousChild = managedChild;
+    const startDirectory = resolveServeStartupDirectory(cwd);
+    const child = await startServe(targetPort, startDirectory);
+    activateManagedRuntime(child, targetPort, startDirectory);
+    currentPort = targetPort;
+    currentRuntimeDirectory = startDirectory;
+    await persistLastPort(targetPort);
+    if (previousChild && previousChild !== child) {
+        await stopManagedChild(previousChild);
+    }
+    return buildRuntime(targetPort, true);
+}
+function rememberWorkspaceCwd(cwd) {
+    if (cwd?.trim()) {
+        lastWorkspaceCwd = cwd;
+    }
+}
+function canSharePendingRuntime(cwd, pendingWorkspaceRoot) {
+    const requestedWorkspaceRoot = getWindowsDirectoryRootKey(cwd);
+    return !requestedWorkspaceRoot || requestedWorkspaceRoot === pendingWorkspaceRoot;
+}
+function resolveServeStartupDirectory(cwd, platform = process.platform) {
+    if (platform === 'win32') {
+        return getWindowsDirectoryRoot(cwd, platform) ?? (0, node_os_1.homedir)();
+    }
+    return (0, node_os_1.homedir)();
+}
+function isServeDirectoryCompatible(runtimeDirectory, cwd, platform = process.platform) {
+    if (platform !== 'win32') {
+        return true;
+    }
+    const workspaceRoot = getWindowsDirectoryRootKey(cwd, platform);
+    if (!workspaceRoot) {
+        return true;
+    }
+    return getWindowsDirectoryRootKey(runtimeDirectory, platform) === workspaceRoot;
+}
+function getWindowsDirectoryRoot(directory, platform = process.platform) {
+    if (platform !== 'win32' || !directory?.trim()) {
+        return undefined;
+    }
+    const normalized = node_path_1.win32.normalize(directory.trim());
+    if (!node_path_1.win32.isAbsolute(normalized)) {
+        return undefined;
+    }
+    return node_path_1.win32.parse(normalized).root || undefined;
+}
+function getWindowsDirectoryRootKey(directory, platform = process.platform) {
+    return getWindowsDirectoryRoot(directory, platform)?.toLocaleLowerCase('en-US');
+}
+function getManagedStartDirectory(port) {
+    return managedPort === port ? managedStartDirectory : undefined;
+}
+async function inspectRuntimeCompatibility(port, cwd, knownDirectory) {
+    if (!getWindowsDirectoryRootKey(cwd)) {
+        return { compatible: true, directory: knownDirectory };
+    }
+    const directory = knownDirectory ?? await probeServeDirectory(port);
+    return {
+        compatible: isServeDirectoryCompatible(directory, cwd),
+        directory,
+    };
+}
+async function probeServeDirectory(port) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PATH_CHECK_TIMEOUT_MS);
+    try {
+        const response = await globalThis.fetch(`http://${HOSTNAME}:${String(port)}${PATH_PATH}`, { signal: controller.signal });
+        if (!response.ok) {
+            return undefined;
+        }
+        const payload = await response.json();
+        if (!isRecord(payload) || typeof payload.directory !== 'string') {
+            return undefined;
+        }
+        return payload.directory;
+    }
+    catch {
+        return undefined;
+    }
+    finally {
+        clearTimeout(timer);
+    }
+}
+function isRecord(value) {
+    return typeof value === 'object' && value !== null;
 }
 function readLastPort() {
     try {
@@ -196,14 +329,14 @@ function buildRuntime(port, startedByManager) {
         startedByManager
     };
 }
-async function startServe(port) {
+async function startServe(port, cwd) {
     const env = (0, opencodeEnv_1.withOpencodeBinInPath)();
     const command = (0, opencodeEnv_1.resolveOpencodeBinary)(env);
     const child = (0, node_child_process_1.spawn)(command, ['serve', '--hostname', HOSTNAME, '--port', String(port)], {
         shell: (0, opencodeEnv_1.shouldUseShellForOpencode)(command),
         stdio: ['ignore', 'pipe', 'pipe'],
         env,
-        cwd: (0, node_os_1.homedir)(),
+        cwd,
         windowsHide: (0, opencodeEnv_1.shouldHideOpencodeWindow)()
     });
     const stderrBuffer = [];
@@ -226,17 +359,20 @@ async function startServe(port) {
         throw error;
     }
 }
-function activateManagedRuntime(child, port) {
+function activateManagedRuntime(child, port, startDirectory) {
     managedChild = child;
     managedPort = port;
+    managedStartDirectory = startDirectory;
     child.once("exit", () => {
         if (managedChild !== child) {
             return;
         }
         managedChild = undefined;
         managedPort = undefined;
+        managedStartDirectory = undefined;
         if (currentPort === port) {
             currentPort = undefined;
+            currentRuntimeDirectory = undefined;
         }
     });
 }
@@ -294,7 +430,7 @@ async function waitForHealthAfterSpawn(child, port, stderrBuffer) {
             return;
         }
         if (child.exitCode !== null) {
-            const stderrText = stderrBuffer.join('\n');
+            const stderrText = stripAnsi(stderrBuffer.join('\n'));
             throw new Error(stderrText
                 ? `opencode serve 启动后退出（code=${String(child.exitCode)}）：${stderrText}`
                 : `opencode serve 启动后退出（code=${String(child.exitCode)}）。`);
@@ -302,6 +438,9 @@ async function waitForHealthAfterSpawn(child, port, stderrBuffer) {
         await delay(POLL_INTERVAL_MS);
     }
     throw new Error(`opencode serve 启动超时（>${STARTUP_TIMEOUT_MS}ms，端口 ${port}）。`);
+}
+function stripAnsi(value) {
+    return value.replace(ANSI_ESCAPE_PATTERN, '').replace(/\s+/g, ' ').trim();
 }
 async function probeHealth(port) {
     return new Promise((resolve) => {

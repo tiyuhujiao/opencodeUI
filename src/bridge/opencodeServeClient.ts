@@ -18,7 +18,7 @@ type FetchImplementation = (
 ) => Promise<Response>;
 
 export interface OpencodeServeClientOptions {
-  ensureRuntime(): Promise<OpencodeServeEndpoint>;
+  ensureRuntime(cwd?: string): Promise<OpencodeServeEndpoint>;
   getDefaultCwd?(): string | undefined;
   fetch?: FetchImplementation;
 }
@@ -50,7 +50,10 @@ export class OpencodeServeClient {
     signal: AbortSignal
   ): Promise<ReadableStream<Uint8Array>> {
     const response = await this.fetch(`${endpoint.baseUrl}/event`, {
-      headers: this.buildHeaders({ Accept: 'text/event-stream' }),
+      headers: this.buildHeaders(
+        { Accept: 'text/event-stream' },
+        this.options.getDefaultCwd?.()
+      ),
       signal
     });
     if (!response.ok || !response.body) {
@@ -64,9 +67,10 @@ export class OpencodeServeClient {
     options: OpencodeServeRequestOptions | undefined,
     headers: Record<string, string>
   ): Promise<Response> {
-    const runtime = await this.options.ensureRuntime();
+    const cwd = this.resolveCwd(options);
+    const runtime = await this.options.ensureRuntime(cwd);
     const init: RequestInit = {
-      headers: this.buildHeaders(headers, options)
+      headers: this.buildHeaders(headers, cwd)
     };
     if (options && 'method' in options) {
       init.method = options.method;
@@ -92,16 +96,20 @@ export class OpencodeServeClient {
 
   private buildHeaders(
     extra: Record<string, string>,
-    options?: OpencodeServeRequestOptions
+    cwd: string | undefined
   ): Record<string, string> {
     const headers = { ...extra };
-    const cwd = options?.includeCwd === false
-      ? undefined
-      : options?.cwd ?? this.options.getDefaultCwd?.();
     if (cwd) {
       headers['x-opencode-directory'] = encodeOpencodeDirectory(cwd);
     }
     return headers;
+  }
+
+  private resolveCwd(options?: OpencodeServeRequestOptions): string | undefined {
+    if (options?.includeCwd === false) {
+      return undefined;
+    }
+    return options?.cwd ?? this.options.getDefaultCwd?.();
   }
 
   private fetch(input: string, init: RequestInit): Promise<Response> {

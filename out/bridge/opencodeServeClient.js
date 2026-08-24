@@ -19,7 +19,7 @@ class OpencodeServeClient {
     }
     async openEventStream(endpoint, signal) {
         const response = await this.fetch(`${endpoint.baseUrl}/event`, {
-            headers: this.buildHeaders({ Accept: 'text/event-stream' }),
+            headers: this.buildHeaders({ Accept: 'text/event-stream' }, this.options.getDefaultCwd?.()),
             signal
         });
         if (!response.ok || !response.body) {
@@ -28,9 +28,10 @@ class OpencodeServeClient {
         return response.body;
     }
     async request(pathname, options, headers) {
-        const runtime = await this.options.ensureRuntime();
+        const cwd = this.resolveCwd(options);
+        const runtime = await this.options.ensureRuntime(cwd);
         const init = {
-            headers: this.buildHeaders(headers, options)
+            headers: this.buildHeaders(headers, cwd)
         };
         if (options && 'method' in options) {
             init.method = options.method;
@@ -50,15 +51,18 @@ class OpencodeServeClient {
         }
         return response;
     }
-    buildHeaders(extra, options) {
+    buildHeaders(extra, cwd) {
         const headers = { ...extra };
-        const cwd = options?.includeCwd === false
-            ? undefined
-            : options?.cwd ?? this.options.getDefaultCwd?.();
         if (cwd) {
             headers['x-opencode-directory'] = (0, opencodeDirectory_1.encodeOpencodeDirectory)(cwd);
         }
         return headers;
+    }
+    resolveCwd(options) {
+        if (options?.includeCwd === false) {
+            return undefined;
+        }
+        return options?.cwd ?? this.options.getDefaultCwd?.();
     }
     fetch(input, init) {
         return (this.options.fetch ?? globalThis.fetch)(input, init);

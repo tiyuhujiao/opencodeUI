@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeSessionsById, sortSessionsByUpdatedDesc, type SessionListItem } from '../src/bridge/parsers';
+import { filterSessionsByDirectory, mergeSessionsById, sortSessionsByUpdatedDesc, type SessionListItem } from '../src/bridge/parsers';
 
 describe('sortSessionsByUpdatedDesc', () => {
   it('按 updated 时间倒序排序（新在前）', () => {
@@ -101,6 +101,41 @@ describe('sortSessionsByUpdatedDesc', () => {
       's-shared:Shared New',
       's-workspace:Workspace',
       's-global:Global'
+    ]);
+  });
+});
+
+describe('filterSessionsByDirectory', () => {
+  it('Windows 下统一盘符大小写、斜杠与尾部分隔符后精确匹配', () => {
+    const sessions = [
+      {
+        id: 'slash',
+        directory: 'E:/devin-byok'
+      },
+      {
+        id: 'case-and-trailing',
+        directory: 'e:\\devin-byok\\'
+      },
+      {
+        id: 'other-global-project',
+        directory: 'E:\\another-project'
+      }
+    ];
+
+    expect(filterSessionsByDirectory(sessions, 'E:\\devin-byok', 'win32').map((session) => session.id)).toEqual([
+      'slash',
+      'case-and-trailing'
+    ]);
+  });
+
+  it('POSIX 路径保持大小写敏感', () => {
+    const sessions = [
+      { id: 'same', directory: '/workspace/project/' },
+      { id: 'different-case', directory: '/workspace/Project' }
+    ];
+
+    expect(filterSessionsByDirectory(sessions, '/workspace/project', 'linux').map((session) => session.id)).toEqual([
+      'same'
     ]);
   });
 });

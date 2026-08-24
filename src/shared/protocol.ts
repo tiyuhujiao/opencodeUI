@@ -1,6 +1,7 @@
 export const WEBVIEW_REQUEST_WHITELIST = [
   'webview.ready',
   'sessions.list',
+  'sessions.search',
   'session.export',
   'session.export.markdown',
   'subtask.transcript',
@@ -58,6 +59,14 @@ export type WebviewReadyRequest = {
 export type SessionsListRequest = {
   type: 'sessions.list';
   requestId: string;
+};
+
+export type SessionsSearchRequest = {
+  type: 'sessions.search';
+  requestId: string;
+  payload: {
+    query: string;
+  };
 };
 
 export type SessionExportRequest = {
@@ -368,6 +377,7 @@ export type RunStopRequest = {
 export type WebviewRequestMessage =
   | WebviewReadyRequest
   | SessionsListRequest
+  | SessionsSearchRequest
   | SessionExportRequest
   | SessionMarkdownExportRequest
   | SubtaskTranscriptRequest
@@ -480,6 +490,31 @@ export type SessionsListResponseMessage = {
   ok: true;
   payload: {
     sessions: SessionSummary[];
+  };
+};
+
+export type SessionSearchHit = {
+  sessionId: string;
+  title: string;
+  updated: string;
+  messageIndex: number;
+  messageId?: string;
+  role: 'user' | 'assistant';
+  occurrence: number;
+  snippet: string;
+  snippetMatch?: {
+    start: number;
+    end: number;
+  };
+};
+
+export type SessionsSearchResponseMessage = {
+  type: 'sessions.search.response';
+  requestId: string;
+  ok: true;
+  payload: {
+    query: string;
+    hits: SessionSearchHit[];
   };
 };
 
@@ -1340,6 +1375,7 @@ export type SelfcheckResponseMessage = {
 export type ExtensionResponseMessage =
   | WebviewReadyAckMessage
   | SessionsListResponseMessage
+  | SessionsSearchResponseMessage
   | SessionExportResponseMessage
   | SessionMarkdownExportResponseMessage
   | SubtaskTranscriptResponseMessage
@@ -1393,6 +1429,7 @@ const WEBVIEW_REQUEST_WHITELIST_SET = new Set<string>(WEBVIEW_REQUEST_WHITELIST)
 const EXTENSION_RESPONSE_TYPE_SET = new Set<string>([
   'webview.ready.ack',
   'sessions.list.response',
+  'sessions.search.response',
   'session.export.response',
   'session.export.markdown.response',
   'subtask.transcript.response',
@@ -1788,6 +1825,28 @@ export function isExtensionResponseMessage(message: unknown): message is Extensi
       && isRunQueueState(message.payload.queue);
   }
 
+  if (message.type === 'sessions.search.response') {
+    return message.ok === true
+      && isObject(message.payload)
+      && isBoundedString(message.payload.query, 256)
+      && Array.isArray(message.payload.hits)
+      && message.payload.hits.length <= 5000
+      && message.payload.hits.every((hit) => isObject(hit)
+        && isNonEmptyString(hit.sessionId)
+        && isBoundedString(hit.title, 4096)
+        && isBoundedString(hit.updated, 256)
+        && isNonNegativeInteger(hit.messageIndex)
+        && (hit.messageId === undefined || isNonEmptyString(hit.messageId))
+        && (hit.role === 'user' || hit.role === 'assistant')
+        && isNonNegativeInteger(hit.occurrence)
+        && isBoundedString(hit.snippet, 4096)
+        && (hit.snippetMatch === undefined || (isObject(hit.snippetMatch)
+          && isNonNegativeInteger(hit.snippetMatch.start)
+          && isNonNegativeInteger(hit.snippetMatch.end)
+          && hit.snippetMatch.end > hit.snippetMatch.start
+          && hit.snippetMatch.end <= hit.snippet.length)));
+  }
+
   if (message.type === 'run.queue.state') {
     return message.ok === true && isRunQueueState(message.payload);
   }
@@ -1935,6 +1994,12 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
     }
 
     if (typeof message.payload.sessionId !== 'string' || message.payload.sessionId.trim().length === 0) {
+      return false;
+    }
+  }
+
+  if (message.type === 'sessions.search') {
+    if (!isObject(message.payload) || !isBoundedString(message.payload.query, 256)) {
       return false;
     }
   }

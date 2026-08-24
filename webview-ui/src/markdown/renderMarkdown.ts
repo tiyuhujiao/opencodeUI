@@ -101,6 +101,23 @@ markdown.renderer.rules.code_inline = (tokens, idx, options, env, self) => {
   return `<button type="button" class="file-reference file-reference--code" data-file-path="${escapeHtml(fileReference.path)}"${fileReference.line ? ` data-file-line="${String(fileReference.line)}"` : ''}${fileReference.column ? ` data-file-column="${String(fileReference.column)}"` : ''}><code>${escapeHtml(content)}</code></button>`
 }
 
+const defaultTableOpen = markdown.renderer.rules.table_open
+const defaultTableClose = markdown.renderer.rules.table_close
+
+markdown.renderer.rules.table_open = (tokens, idx, options, env, self) => {
+  const table = defaultTableOpen
+    ? defaultTableOpen(tokens, idx, options, env, self)
+    : self.renderToken(tokens, idx, options)
+  return `<div class="md-table-scroll" role="region" aria-label="Markdown table" tabindex="0">${table}`
+}
+
+markdown.renderer.rules.table_close = (tokens, idx, options, env, self) => {
+  const table = defaultTableClose
+    ? defaultTableClose(tokens, idx, options, env, self)
+    : self.renderToken(tokens, idx, options)
+  return `${table}</div>`
+}
+
 const plainFileReferencePattern = /(?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?[A-Za-z0-9_@.+-]+(?:[\\/][A-Za-z0-9_@.+-]+)*\.[A-Za-z0-9]+(?::\d+(?::\d+)?|#L\d+(?:C\d+)?)?/gi
 const defaultText = markdown.renderer.rules.text
 markdown.renderer.rules.text = (tokens, idx, options, env, self) => {

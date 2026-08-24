@@ -3,8 +3,10 @@ import {
   ArrowLeft,
   ArrowUp,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   History,
   Languages,
   ListOrdered,
@@ -13,6 +15,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Search,
   Settings2,
   ShieldCheck,
   Square,
@@ -40,6 +43,7 @@ import {
   compactTranscript,
   hasAnyAssistantText,
   isExportAtLeastAsComplete,
+  isTransientServeError,
   mergeLocalImageParts,
   mergeLocalRunErrors,
   preserveProtectedSessionSummary,
@@ -67,11 +71,13 @@ import {
   type QuestionInfo,
   type RunStreamEvent,
   type SessionSummary,
+  type SessionSearchHit,
   type SessionTimelineItem,
   type TranscriptMessage,
   type TerminalRunSnapshot,
   type WorkspaceResourceSummary
 } from '../../src/shared/protocol'
+import { findTranscriptMatches, type TranscriptSearchMatch, type TranscriptSearchOptions } from '../../src/shared/search'
 import { summarizeEditedFiles, type EditedFileSummary } from './editedFiles'
 import {
   countCompletedTodos,
@@ -220,6 +226,14 @@ type ExportRequestMeta = {
 type ActiveSubtask = {
   sessionId: string
   title: string
+}
+
+type SearchTarget = {
+  sessionId: string
+  query: string
+  messageIndex: number
+  messageId?: string
+  messageOccurrence: number
 }
 
 function formatHostLabel(hostKind: HostKind, remoteName?: string): string {
@@ -959,6 +973,8 @@ export default function App() {
   }, [])
 
   const selfcheckTimersRef = useRef<Partial<Record<keyof SelfcheckSnapshot, number>>>({})
+  const latestSelfcheckRequestIdRef = useRef<string | null>(null)
+  const transientServeRecoveryTimerRef = useRef<number | undefined>(undefined)
 
   const startSelfcheckTimer = useCallback(
     (key: keyof SelfcheckSnapshot, requestId: string) => {
@@ -1038,7 +1054,22 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false)
   const [runQueue, setRunQueue] = useState<QueuedPromptSummary[]>([])
   const [runStatus, setRunStatus] = useState<string | null>(null)
+  const healthyStatusRef = useRef('Connecting...')
   const clearSettledRunIndicator = useCallback(() => setRunStatus(clearSettledRunStatus), [])
+  const clearTransientServeErrors = useCallback(() => {
+    const clear = (value: string | null): string | null => isTransientServeError(value) ? null : value
+    setStatus((current) => isTransientServeError(current) && current.startsWith('Connection failed:')
+      ? healthyStatusRef.current
+      : current)
+    setSessionsError(clear)
+    setTranscriptError(clear)
+    setSubtaskTranscriptError(clear)
+    setModelsError(clear)
+    setAgentsError(clear)
+    setProvidersError(clear)
+    setMcpError(clear)
+    setRunStatus(clear)
+  }, [])
   const [editedFiles, setEditedFiles] = useState<EditedFileSummary[]>([])
   const [reviewFiles, setReviewFiles] = useState<InlineDiffFileSummary[]>([])
   const [reviewActiveRun, setReviewActiveRun] = useState(false)
@@ -1073,10 +1104,21 @@ export default function App() {
         }
       : null
   }, [models, selectedModelSummary, transcript])
+  const displayedTranscript = useMemo(() => compactTranscript(transcript), [transcript])
 
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
   const [providerSettingsOpen, setProviderSettingsOpen] = useState(false)
   const [sessionDialogOpen, setSessionDialogOpen] = useState(false)
+  const [sessionFindOpen, setSessionFindOpen] = useState(false)
+  const [sessionFindQuery, setSessionFindQuery] = useState('')
+  const [sessionFindOptions, setSessionFindOptions] = useState<TranscriptSearchOptions>({})
+  const [sessionFindIndex, setSessionFindIndex] = useState(0)
+  const [historySearchQuery, setHistorySearchQuery] = useState('')
+  const [historySearchHits, setHistorySearchHits] = useState<SessionSearchHit[]>([])
+  const [historySearchLoading, setHistorySearchLoading] = useState(false)
+  const [historyHighlightActive, setHistoryHighlightActive] = useState(false)
+  const [historyHighlightReady, setHistoryHighlightReady] = useState(false)
+  const [pendingSearchTarget, setPendingSearchTarget] = useState<SearchTarget | null>(null)
   const [timelineDialogOpen, setTimelineDialogOpen] = useState(false)
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
   const [exportDialogBusy, setExportDialogBusy] = useState(false)
@@ -1099,6 +1141,8 @@ export default function App() {
 
   const readyRequestIdRef = useRef<string>('')
   const sessionsRequestIdsRef = useRef<Map<string, SessionListRequestMeta>>(new Map())
+  const sessionSearchRequestIdsRef = useRef<Set<string>>(new Set())
+  const latestSessionSearchRequestIdRef = useRef<string | null>(null)
   const exportRequestIdsRef = useRef<Map<string, ExportRequestMeta>>(new Map())
   const markdownExportRequestIdsRef = useRef<Set<string>>(new Set())
   const subtaskTranscriptRequestIdsRef = useRef<Map<string, string>>(new Map())
@@ -1161,6 +1205,8 @@ export default function App() {
   const transcriptRef = useRef<TranscriptMessage[]>([])
   const activeSubtaskRef = useRef<ActiveSubtask | null>(null)
   const selectedSessionIdRef = useRef<string | null>(selectedSessionId)
+  const pendingSearchTargetRef = useRef<SearchTarget | null>(null)
+  const sessionFindInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode
@@ -1272,6 +1318,7 @@ export default function App() {
       }
 
       const requestId = createRequestId()
+      latestSelfcheckRequestIdRef.current = requestId
       pushDebug({
         at: new Date().toISOString(),
         kind: 'tx',
@@ -1321,6 +1368,145 @@ export default function App() {
       })
     }
   }, [pushDebug, startSelfcheckTimer])
+
+  const requestHistorySearch = useCallback((query: string) => {
+    const vscode = getVsCodeApi()
+    const normalized = query.trim()
+    if (!vscode) {
+      setHistorySearchHits([])
+      setHistorySearchLoading(false)
+      return
+    }
+
+    for (const requestId of sessionSearchRequestIdsRef.current) {
+      sessionSearchRequestIdsRef.current.delete(requestId)
+    }
+    const requestId = createRequestId()
+    latestSessionSearchRequestIdRef.current = requestId
+    sessionSearchRequestIdsRef.current.add(requestId)
+    setHistorySearchLoading(Boolean(normalized))
+    pushDebug({
+      at: new Date().toISOString(),
+      kind: 'tx',
+      type: 'sessions.search',
+      requestId,
+      detail: normalized
+    })
+    vscode.postMessage({
+      type: 'sessions.search',
+      requestId,
+      payload: { query: normalized }
+    })
+  }, [pushDebug])
+
+  const currentSearchMatches = useMemo(() => (
+    sessionFindOpen && sessionFindQuery.trim()
+      ? findTranscriptMatches(displayedTranscript, sessionFindQuery, sessionFindOptions)
+      : []
+  ), [displayedTranscript, sessionFindOpen, sessionFindOptions, sessionFindQuery])
+
+  const activeCurrentSearchMatch = currentSearchMatches[sessionFindIndex] ?? null
+
+  const activeHistorySearchMatch: TranscriptSearchMatch | null = useMemo(() => {
+    if (!historyHighlightActive || !historyHighlightReady || !pendingSearchTarget || pendingSearchTarget.sessionId !== selectedSessionId) {
+      return null
+    }
+    const messageIndex = pendingSearchTarget.messageId
+      ? displayedTranscript.findIndex((message) => message.id === pendingSearchTarget.messageId)
+      : pendingSearchTarget.messageIndex
+    if (messageIndex < 0) {
+      return null
+    }
+    return findTranscriptMatches(displayedTranscript, pendingSearchTarget.query).find((match) => (
+      match.messageIndex === messageIndex
+      && match.messageOccurrence === pendingSearchTarget.messageOccurrence
+      && (!pendingSearchTarget.messageId || match.messageId === pendingSearchTarget.messageId)
+    )) ?? null
+  }, [displayedTranscript, historyHighlightActive, historyHighlightReady, pendingSearchTarget, selectedSessionId])
+  const historySearchActiveForSelected = historyHighlightActive
+    && historyHighlightReady
+    && pendingSearchTarget?.sessionId === selectedSessionId
+
+  const clearHistorySearchHighlight = useCallback(() => {
+    setHistoryHighlightActive(false)
+    setHistoryHighlightReady(false)
+    setPendingSearchTarget(null)
+    pendingSearchTargetRef.current = null
+  }, [])
+
+  useEffect(() => {
+    if (!historySearchActiveForSelected || sessionFindOpen) {
+      return
+    }
+
+    const onOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null
+      if (target?.closest('.transcript, .find-widget, .session-search, .overlay')) {
+        return
+      }
+      clearHistorySearchHighlight()
+    }
+
+    document.addEventListener('pointerdown', onOutsidePointerDown, true)
+    return () => document.removeEventListener('pointerdown', onOutsidePointerDown, true)
+  }, [clearHistorySearchHighlight, historySearchActiveForSelected, sessionFindOpen])
+
+  useEffect(() => {
+    if (pendingSearchTarget && selectedSessionId && pendingSearchTarget.sessionId !== selectedSessionId) {
+      setHistoryHighlightActive(false)
+      setHistoryHighlightReady(false)
+      setPendingSearchTarget(null)
+      pendingSearchTargetRef.current = null
+    }
+  }, [pendingSearchTarget, selectedSessionId])
+
+  const openSessionFind = useCallback(() => {
+    setSessionFindOpen(true)
+    window.requestAnimationFrame(() => sessionFindInputRef.current?.focus())
+  }, [])
+
+  const closeSessionFind = useCallback(() => {
+    setSessionFindOpen(false)
+    setSessionFindQuery('')
+    setSessionFindIndex(0)
+  }, [])
+
+  const moveSessionFind = useCallback((direction: -1 | 1) => {
+    if (currentSearchMatches.length === 0) {
+      return
+    }
+    setSessionFindIndex((current) => (current + direction + currentSearchMatches.length) % currentSearchMatches.length)
+  }, [currentSearchMatches.length])
+
+  useEffect(() => {
+    setSessionFindIndex((current) => currentSearchMatches.length === 0 ? 0 : Math.min(current, currentSearchMatches.length - 1))
+  }, [currentSearchMatches.length])
+
+  useEffect(() => {
+    if (!sessionDialogOpen) {
+      return
+    }
+    const timer = window.setTimeout(() => requestHistorySearch(historySearchQuery), 220)
+    return () => window.clearTimeout(timer)
+  }, [historySearchQuery, requestHistorySearch, sessionDialogOpen])
+
+  const scheduleTransientServeRecovery = useCallback(() => {
+    if (transientServeRecoveryTimerRef.current !== undefined) {
+      return
+    }
+
+    transientServeRecoveryTimerRef.current = window.setTimeout(() => {
+      transientServeRecoveryTimerRef.current = undefined
+      requestSelfcheck()
+    }, 250)
+  }, [requestSelfcheck])
+
+  useEffect(() => () => {
+    if (transientServeRecoveryTimerRef.current !== undefined) {
+      window.clearTimeout(transientServeRecoveryTimerRef.current)
+      transientServeRecoveryTimerRef.current = undefined
+    }
+  }, [])
 
   const requestSessionExport = useCallback((sessionId: string, options?: { background?: boolean }) => {
     const vscode = getVsCodeApi()
@@ -1642,6 +1828,26 @@ export default function App() {
     setSubtaskTranscriptError(null)
     setSelectedSessionId(sessionId)
   }, [clearSettledRunIndicator])
+
+  const openHistorySearchHit = useCallback((hit: SessionSearchHit) => {
+    if (isRunningRef.current) {
+      setRunStatus('Cannot switch session while running')
+      return
+    }
+    const target: SearchTarget = {
+      sessionId: hit.sessionId,
+      query: historySearchQuery,
+      messageIndex: hit.messageIndex,
+      ...(hit.messageId ? { messageId: hit.messageId } : {}),
+      messageOccurrence: hit.occurrence
+    }
+    pendingSearchTargetRef.current = target
+    setPendingSearchTarget(target)
+    setHistoryHighlightActive(true)
+    setHistoryHighlightReady(hit.sessionId === selectedSessionIdRef.current)
+    setSessionDialogOpen(false)
+    selectSession(hit.sessionId)
+  }, [historySearchQuery, selectSession])
 
   const requestSessionDelete = useCallback(
     (sessionId: string) => {
@@ -2956,7 +3162,9 @@ export default function App() {
         })
         const location = formatHostLabel(message.payload.hostKind, message.payload.remoteName)
         const versionLabel = message.payload.opencode?.version ? ` · opencode ${message.payload.opencode.version}` : ''
-        setStatus(message.payload.isSupportedHost ? `Connected: ${location}${versionLabel}` : `Unsupported host: ${location}`)
+        const nextStatus = message.payload.isSupportedHost ? `Connected: ${location}${versionLabel}` : `Unsupported host: ${location}`
+        healthyStatusRef.current = nextStatus
+        setStatus(nextStatus)
         setWorkspaceFolderPath(message.payload.workspaceFolderPath)
         pendingInitialSelectedModelRef.current = message.payload.lastSelectedModel ?? null
         pendingInitialSelectedAgentRef.current = message.payload.lastSelectedAgent ?? null
@@ -3053,6 +3261,17 @@ export default function App() {
         return
       }
 
+      if (message.type === 'sessions.search.response' && message.ok) {
+        if (!sessionSearchRequestIdsRef.current.has(message.requestId)
+          || latestSessionSearchRequestIdRef.current !== message.requestId) {
+          return
+        }
+        sessionSearchRequestIdsRef.current.delete(message.requestId)
+        setHistorySearchHits(message.payload.hits)
+        setHistorySearchLoading(false)
+        return
+      }
+
       if (message.type === 'session.export.response' && message.ok) {
         const exportMeta = exportRequestIdsRef.current.get(message.requestId)
         if (!exportMeta) {
@@ -3113,6 +3332,10 @@ export default function App() {
         }
         setTranscriptError(null)
         setLoadingTranscript(hasBlockingExportRequests(exportRequestIdsRef.current))
+        if (pendingSearchTargetRef.current?.sessionId === targetSessionId
+          && selectedSessionIdRef.current === targetSessionId) {
+          setHistoryHighlightReady(true)
+        }
         return
       }
 
@@ -3471,6 +3694,9 @@ export default function App() {
 
       if (message.type === 'selfcheck.response' && message.ok) {
         const rid = message.requestId
+        if (latestSelfcheckRequestIdRef.current !== rid) {
+          return
+        }
         pushDebug({
           at: new Date().toISOString(),
           kind: 'rx',
@@ -3479,6 +3705,14 @@ export default function App() {
           ok: true,
           detail: `opencode=${message.payload.opencode?.version ?? message.payload.opencodeBinary}`
         })
+        if (message.payload.health.ok) {
+          const location = formatHostLabel(message.payload.hostKind, message.payload.remoteName)
+          const versionLabel = message.payload.opencode?.version ? ` · opencode ${message.payload.opencode.version}` : ''
+          healthyStatusRef.current = message.payload.isSupportedHost
+            ? `Connected: ${location}${versionLabel}`
+            : `Unsupported host: ${location}`
+          clearTransientServeErrors()
+        }
         setSelfcheck((current) => {
           const currentRid = current.health.lastRequestId
           if (currentRid && currentRid !== rid) {
@@ -3755,6 +3989,9 @@ export default function App() {
           ok: false,
           detail: message.error
         })
+        if (isTransientServeError(message.error)) {
+          scheduleTransientServeRecovery()
+        }
         if (message.requestId === readyRequestIdRef.current) {
           setStatus(`Connection failed: ${message.error}`)
           return
@@ -3774,6 +4011,15 @@ export default function App() {
             setSessionsError(message.error)
           }
           setLoadingSessions(hasBlockingSessionListRequests(sessionsRequestIdsRef.current))
+          return
+        }
+
+        if (sessionSearchRequestIdsRef.current.has(message.requestId)) {
+          sessionSearchRequestIdsRef.current.delete(message.requestId)
+          if (latestSessionSearchRequestIdRef.current === message.requestId) {
+            setHistorySearchLoading(false)
+            setHistorySearchHits([])
+          }
           return
         }
 
@@ -4042,6 +4288,7 @@ export default function App() {
     }
   }, [
     applyLiveRunEvent,
+    clearTransientServeErrors,
     completeRun,
     pushDebug,
     requestAgents,
@@ -4049,6 +4296,7 @@ export default function App() {
     requestModels,
     requestProviders,
     requestSelfcheck,
+    scheduleTransientServeRecovery,
     requestSessions,
     requestSessionExport,
     timelineDialogOpen,
@@ -4274,6 +4522,16 @@ export default function App() {
             <RunActivityIndicator status={runStatus} />
             <button
               type="button"
+              className={`topbar__icon-button${sessionFindOpen ? ' is-active' : ''}`}
+              onClick={() => sessionFindOpen ? closeSessionFind() : openSessionFind()}
+              aria-label={sessionFindOpen ? t('Close search') : t('Search current conversation')}
+              title={sessionFindOpen ? t('Close search') : t('Search current conversation')}
+              disabled={!selectedSessionId && transcript.length === 0}
+            >
+              <Search size={16} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
               className="topbar__icon-button"
               onClick={() => setProviderSettingsOpen(true)}
               disabled={isRunning}
@@ -4328,6 +4586,52 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {sessionFindOpen ? (
+        <search
+          className="find-widget"
+          aria-label={t('Search current conversation')}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowUp') {
+              event.preventDefault()
+              moveSessionFind(-1)
+            } else if (event.key === 'ArrowDown') {
+              event.preventDefault()
+              moveSessionFind(1)
+            } else if (event.key === 'Escape') {
+              event.preventDefault()
+              closeSessionFind()
+            } else if (event.key === 'Enter' && event.target === sessionFindInputRef.current) {
+              event.preventDefault()
+              moveSessionFind(event.shiftKey ? -1 : 1)
+            }
+          }}
+        >
+          <input
+            ref={sessionFindInputRef}
+            className="find-widget__input"
+            value={sessionFindQuery}
+            onChange={(event) => setSessionFindQuery(event.target.value)}
+            placeholder={t('Find')}
+            aria-label={t('Find')}
+          />
+          <span className="find-widget__count" aria-live="polite">
+            {sessionFindQuery.trim() ? (currentSearchMatches.length > 0 ? `${String(sessionFindIndex + 1)}/${String(currentSearchMatches.length)}` : t('No results')) : ''}
+          </span>
+          <button type="button" className={`find-widget__toggle${sessionFindOptions.caseSensitive ? ' is-on' : ''}`} onClick={() => setSessionFindOptions((current) => ({ ...current, caseSensitive: !current.caseSensitive }))} aria-label={t('Match case')} title={t('Match case')}>Aa</button>
+          <button type="button" className={`find-widget__toggle${sessionFindOptions.wholeWord ? ' is-on' : ''}`} onClick={() => setSessionFindOptions((current) => ({ ...current, wholeWord: !current.wholeWord }))} aria-label={t('Match whole word')} title={t('Match whole word')}>ab</button>
+          <button type="button" className={`find-widget__toggle${sessionFindOptions.regex ? ' is-on' : ''}`} onClick={() => setSessionFindOptions((current) => ({ ...current, regex: !current.regex }))} aria-label={t('Use regular expression')} title={t('Use regular expression')}>.*</button>
+          <button type="button" className="find-widget__button" onClick={() => moveSessionFind(-1)} disabled={currentSearchMatches.length === 0} aria-label={t('Previous match')} title={t('Previous match')}>
+            <ChevronUp size={16} aria-hidden="true" />
+          </button>
+          <button type="button" className="find-widget__button" onClick={() => moveSessionFind(1)} disabled={currentSearchMatches.length === 0} aria-label={t('Next match')} title={t('Next match')}>
+            <ChevronDown size={16} aria-hidden="true" />
+          </button>
+          <button type="button" className="find-widget__button find-widget__close" onClick={closeSessionFind} aria-label={t('Close search')} title={t('Close search')}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </search>
+      ) : null}
 
       {sessionsError ? <p className="error-line">{t(sessionsError)}</p> : null}
       <RunStatusDetails
@@ -4398,7 +4702,7 @@ export default function App() {
           {transcriptError ? <p className="error-panel">{t(transcriptError)}</p> : null}
           {!transcriptError && transcript.length > 0 ? (
             <Transcript
-              messages={compactTranscript(transcript)}
+                messages={displayedTranscript}
               isRunning={isRunning}
               onOpenSubtask={openSubtask}
               onOpenFileReference={openFileReference}
@@ -4414,6 +4718,11 @@ export default function App() {
               }}
               revertingMessageId={revertingMessageId}
               forkingMessageId={forkingMessageId}
+              searchQuery={sessionFindOpen ? sessionFindQuery : (historySearchActiveForSelected ? pendingSearchTarget?.query ?? '' : '')}
+              searchOptions={sessionFindOpen ? sessionFindOptions : undefined}
+              activeSearchMatch={sessionFindOpen ? activeCurrentSearchMatch : activeHistorySearchMatch}
+              onClearSearch={clearHistorySearchHighlight}
+              clearSearchOnBlankClick={historySearchActiveForSelected && !sessionFindOpen}
             />
           ) : null}
         </div>
@@ -4891,8 +5200,19 @@ export default function App() {
           open={sessionDialogOpen}
           sessions={sessions}
           selectedSessionId={selectedSessionId}
-          onSelectSessionId={(sessionId) => selectSession(sessionId)}
+          onSelectSessionId={(sessionId) => {
+            setHistoryHighlightActive(false)
+            setHistoryHighlightReady(false)
+            setPendingSearchTarget(null)
+            pendingSearchTargetRef.current = null
+            selectSession(sessionId)
+          }}
           onDeleteSessionId={handleDeleteSession}
+          searchQuery={historySearchQuery}
+          onSearchQueryChange={setHistorySearchQuery}
+          searchHits={historySearchHits}
+          searchLoading={historySearchLoading}
+          onOpenSearchHit={openHistorySearchHit}
           onClose={() => setSessionDialogOpen(false)}
         />
     </main>

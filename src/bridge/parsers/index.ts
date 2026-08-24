@@ -5,7 +5,7 @@ export {
   type SessionListJsonParseErrorCode
 } from './sessionListJson';
 
-export { mergeSessionsById, sortSessionsByUpdatedDesc } from './sessionSort';
+export { filterSessionsByDirectory, mergeSessionsById, sortSessionsByUpdatedDesc } from './sessionSort';
 
 export {
   parseExportJson,

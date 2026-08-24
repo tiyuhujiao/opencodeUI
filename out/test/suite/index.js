@@ -90,7 +90,7 @@ async function verifyServeWorkspaceDirectory() {
     assert.match(cwd, /\u4e2d\u6587/u, '扩展宿主必须在仓库外的中文路径中验证');
     const pathResponse = await (0, serveManager_1.requestServeJson)('/path', cwd);
     assert.equal(normalizeDirectory(pathResponse.directory), normalizeDirectory(cwd), '/path 应解析为当前 VS Code 工作区');
-    const runtime = await (0, serveManager_1.ensureServeRunning)();
+    const runtime = await (0, serveManager_1.ensureServeRunning)(cwd);
     const headers = {
         'Content-Type': 'application/json',
         'x-opencode-directory': (0, opencodeDirectory_1.encodeOpencodeDirectory)(cwd)

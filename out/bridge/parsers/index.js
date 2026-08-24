@@ -1,10 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.extractConfiguredProviderLabels = exports.buildProviderSummaries = exports.AuthListParseError = exports.parseAuthList = exports.coerceFirstJsonValue = exports.coerceFirstJsonObject = exports.parseRunEvent = exports.createNdjsonParser = exports.AgentListParseError = exports.parseAgentList = exports.extractModelDefinitionMetadata = exports.extractConfiguredModelMetadata = exports.ModelsVerboseParseError = exports.parseModelsVerbose = exports.ModelsListParseError = exports.parseModelsList = exports.liveMessagesToTranscript = exports.exportToTranscript = exports.ExportJsonParseError = exports.parseExportJson = exports.sortSessionsByUpdatedDesc = exports.mergeSessionsById = exports.SessionListJsonParseError = exports.parseSessionListJson = void 0;
+exports.extractConfiguredProviderLabels = exports.buildProviderSummaries = exports.AuthListParseError = exports.parseAuthList = exports.coerceFirstJsonValue = exports.coerceFirstJsonObject = exports.parseRunEvent = exports.createNdjsonParser = exports.AgentListParseError = exports.parseAgentList = exports.extractModelDefinitionMetadata = exports.extractConfiguredModelMetadata = exports.ModelsVerboseParseError = exports.parseModelsVerbose = exports.ModelsListParseError = exports.parseModelsList = exports.liveMessagesToTranscript = exports.exportToTranscript = exports.ExportJsonParseError = exports.parseExportJson = exports.sortSessionsByUpdatedDesc = exports.mergeSessionsById = exports.filterSessionsByDirectory = exports.SessionListJsonParseError = exports.parseSessionListJson = void 0;
 var sessionListJson_1 = require("./sessionListJson");
 Object.defineProperty(exports, "parseSessionListJson", { enumerable: true, get: function () { return sessionListJson_1.parseSessionListJson; } });
 Object.defineProperty(exports, "SessionListJsonParseError", { enumerable: true, get: function () { return sessionListJson_1.SessionListJsonParseError; } });
 var sessionSort_1 = require("./sessionSort");
+Object.defineProperty(exports, "filterSessionsByDirectory", { enumerable: true, get: function () { return sessionSort_1.filterSessionsByDirectory; } });
 Object.defineProperty(exports, "mergeSessionsById", { enumerable: true, get: function () { return sessionSort_1.mergeSessionsById; } });
 Object.defineProperty(exports, "sortSessionsByUpdatedDesc", { enumerable: true, get: function () { return sessionSort_1.sortSessionsByUpdatedDesc; } });
 var exportJson_1 = require("./exportJson");

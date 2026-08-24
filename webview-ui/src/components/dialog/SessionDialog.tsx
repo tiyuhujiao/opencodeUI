@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Trash2 } from 'lucide-react'
-import type { SessionSummary } from '../../../../src/shared/protocol'
+import { LoaderCircle, Search } from 'lucide-react'
+import type { SessionSearchHit, SessionSummary } from '../../../../src/shared/protocol'
+import { createSearchRegExp } from '../../../../src/shared/search'
 import { useI18n } from '../../i18n'
 
 type SessionDialogProps = {
@@ -9,6 +11,11 @@ type SessionDialogProps = {
   selectedSessionId: string | null
   onSelectSessionId: (id: string) => void
   onDeleteSessionId?: (id: string) => void
+  searchQuery: string
+  onSearchQueryChange: (query: string) => void
+  searchHits: SessionSearchHit[]
+  searchLoading: boolean
+  onOpenSearchHit: (hit: SessionSearchHit) => void
   onClose: () => void
 }
 
@@ -24,7 +31,54 @@ function formatSessionUpdated(updated: string, unknownLabel: string) {
   return readable || unknownLabel
 }
 
-export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessionId, onDeleteSessionId, onClose }: SessionDialogProps) {
+function renderSearchSnippet(hit: SessionSearchHit, query: string) {
+  const matcher = createSearchRegExp(query)
+  if (matcher) {
+    const parts: Array<string | JSX.Element> = []
+    let cursor = 0
+    let match = matcher.exec(hit.snippet)
+    while (match) {
+      if (match.index > cursor) {
+        parts.push(hit.snippet.slice(cursor, match.index))
+      }
+      parts.push(<mark className="search-hit" key={`${String(match.index)}:${match[0]}`}>{match[0]}</mark>)
+      cursor = match.index + match[0].length
+      match = matcher.exec(hit.snippet)
+    }
+    if (parts.length > 0) {
+      if (cursor < hit.snippet.length) {
+        parts.push(hit.snippet.slice(cursor))
+      }
+      return parts
+    }
+  }
+
+  const range = hit.snippetMatch
+  if (!range || range.start < 0 || range.end <= range.start || range.end > hit.snippet.length) {
+    return hit.snippet
+  }
+  return (
+    <>
+      {hit.snippet.slice(0, range.start)}
+      <mark className="search-hit">{hit.snippet.slice(range.start, range.end)}</mark>
+      {hit.snippet.slice(range.end)}
+    </>
+  )
+}
+
+export function SessionDialog({
+  open,
+  sessions,
+  selectedSessionId,
+  onSelectSessionId,
+  onDeleteSessionId,
+  searchQuery,
+  onSearchQueryChange,
+  searchHits,
+  searchLoading,
+  onOpenSearchHit,
+  onClose
+}: SessionDialogProps) {
   const { t } = useI18n()
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [deleteCandidate, setDeleteCandidate] = useState<SessionSummary | null>(null)
@@ -32,6 +86,11 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
   const cancelDeleteButtonRef = useRef<HTMLButtonElement | null>(null)
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
+  const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase()
+  const filteredSessions = useMemo(() => normalizedSearchQuery
+    ? sessions.filter((session) => `${session.title} ${session.id}`.toLocaleLowerCase().includes(normalizedSearchQuery))
+    : sessions, [normalizedSearchQuery, sessions])
 
   useEffect(() => {
     if (!open) {
@@ -39,9 +98,9 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
       setDeleteCandidate(null)
       return
     }
-    const index = selectedSessionId ? sessions.findIndex((s) => s.id === selectedSessionId) : -1
+    const index = selectedSessionId ? filteredSessions.findIndex((s) => s.id === selectedSessionId) : -1
     setSelectedIndex(index >= 0 ? index : 0)
-  }, [open, selectedSessionId, sessions])
+  }, [filteredSessions, open, selectedSessionId])
 
   useEffect(() => {
     if (!open) {
@@ -58,6 +117,14 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
         return
       }
 
+      const target = event.target
+      const isTextInput = target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || (target instanceof HTMLElement && target.isContentEditable)
+      if (isTextInput && event.key !== 'Escape') {
+        return
+      }
+
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopImmediatePropagation()
@@ -69,7 +136,7 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
       // Keep the keyboard shortcut, but route it through the same confirmation as pointer actions.
       if (onDeleteSessionId && event.key.toLowerCase() === 'd' && event.ctrlKey) {
         event.preventDefault()
-        const session = sessions[selectedIndex]
+        const session = filteredSessions[selectedIndex]
         if (!session) {
           return
         }
@@ -79,20 +146,20 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
         return
       }
 
-      if (sessions.length > 0 && (event.key === 'ArrowUp' || event.key === 'k')) {
+      if (filteredSessions.length > 0 && (event.key === 'ArrowUp' || event.key === 'k')) {
         event.preventDefault()
-        setSelectedIndex((current) => (current <= 0 ? sessions.length - 1 : current - 1))
+        setSelectedIndex((current) => (current <= 0 ? filteredSessions.length - 1 : current - 1))
         return
       }
 
-      if (sessions.length > 0 && (event.key === 'ArrowDown' || event.key === 'j')) {
+      if (filteredSessions.length > 0 && (event.key === 'ArrowDown' || event.key === 'j')) {
         event.preventDefault()
-        setSelectedIndex((current) => (current >= sessions.length - 1 ? 0 : current + 1))
+        setSelectedIndex((current) => (current >= filteredSessions.length - 1 ? 0 : current + 1))
         return
       }
 
       if (event.key === 'Enter') {
-        const session = sessions[selectedIndex]
+        const session = filteredSessions[selectedIndex]
         if (!session) {
           return
         }
@@ -104,7 +171,15 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
 
     window.addEventListener('keydown', onKeyDown, { capture: true })
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
-  }, [deleteCandidate, onClose, onDeleteSessionId, onSelectSessionId, open, selectedIndex, sessions])
+  }, [deleteCandidate, filteredSessions, onClose, onDeleteSessionId, onSelectSessionId, open, selectedIndex])
+
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+    const frame = window.requestAnimationFrame(() => searchInputRef.current?.focus())
+    return () => window.cancelAnimationFrame(frame)
+  }, [open])
 
   useEffect(() => {
     if (deleteCandidate) {
@@ -137,10 +212,39 @@ export function SessionDialog({ open, sessions, selectedSessionId, onSelectSessi
           <div className="dialog__title">{t('Switch Session')}</div>
         </header>
 
-        {sessions.length === 0 ? <div className="dialog__empty">{t('No sessions')}</div> : null}
+        <div className="session-search">
+          <Search size={14} aria-hidden="true" />
+          <input
+            ref={searchInputRef}
+            className="session-search__input"
+            value={searchQuery}
+            onChange={(event) => onSearchQueryChange(event.target.value)}
+            placeholder={t('Search sessions and messages')}
+            aria-label={t('Search sessions and messages')}
+          />
+          {searchLoading ? <LoaderCircle className="session-search__loading" size={14} aria-hidden="true" /> : null}
+        </div>
+
+        {searchQuery.trim() && searchHits.length > 0 ? (
+          <div className="session-search__results" role="listbox" aria-label={t('Message matches')}>
+            {searchHits.slice(0, 80).map((hit, index) => (
+              <button
+                type="button"
+                className="session-search__result"
+                key={`${hit.sessionId}:${String(hit.messageIndex)}:${String(hit.occurrence)}:${String(index)}`}
+                onClick={() => onOpenSearchHit(hit)}
+              >
+                <span className="session-search__result-title">{hit.title}</span>
+                <span className="session-search__result-snippet">{renderSearchSnippet(hit, searchQuery)}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        {filteredSessions.length === 0 && searchHits.length === 0 ? <div className="dialog__empty">{t('No sessions')}</div> : null}
 
         <div className="dialog__list" ref={listRef} role="listbox" aria-label="sessions">
-          {sessions.map((session, index) => {
+          {filteredSessions.map((session, index) => {
             const selected = index === selectedIndex
             return (
               <div

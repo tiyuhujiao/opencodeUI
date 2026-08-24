@@ -12,5 +12,18 @@ describe('authoritative diagnostics health', () => {
     expect(app).toContain('window.setInterval(refresh, 30_000)');
     expect(app).toContain('const states = Object.values(selfcheck).map((entry) => entry.state)');
     expect(app).toContain('opencode: {selfcheck.opencode.state}');
+    expect(app).toContain('latestSelfcheckRequestIdRef.current = requestId');
+    expect(app).toContain('if (latestSelfcheckRequestIdRef.current !== rid) {');
+    expect(app).toContain('if (message.payload.health.ok) {');
+    expect(app).toContain('clearTransientServeErrors()');
+    expect(app).toContain('const scheduleTransientServeRecovery = useCallback(() => {');
+    expect(app).toContain('if (isTransientServeError(message.error)) {');
+    expect(app).toContain('scheduleTransientServeRecovery()');
+
+    const readyHandler = app.slice(
+      app.indexOf("if (message.type === 'webview.ready.ack'"),
+      app.indexOf("if (message.type === 'inlineDiff.state'")
+    );
+    expect(readyHandler).not.toContain('clearTransientServeErrors()');
   });
 });

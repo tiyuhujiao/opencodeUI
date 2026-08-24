@@ -45,7 +45,7 @@ export function activate(context: vscode.ExtensionContext): void {
   if (hostKind === 'unsupported') {
     void vscode.window.showWarningMessage('OpenCode UI 当前支持 Windows、macOS、Linux、Remote-WSL 与 Remote-SSH 环境。');
   } else {
-    void ensureServeRunning().catch((error: unknown) => {
+    void ensureServeRunning(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       logError(`ensureServeRunning failed: ${message}`);
       console.error('[opencode-ui] ensureServeRunning failed:', message);

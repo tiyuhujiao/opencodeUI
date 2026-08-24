@@ -30,7 +30,7 @@ describe('transcript activity block', () => {
     const source = readFileSync(join(root, 'webview-ui/src/components/Transcript.tsx'), 'utf8');
 
     expect(source).toContain('function MessageContent({');
-    expect(source).toContain('const rendered = buildTranscriptDisplayBlocks(messages)');
+    expect(source).toContain('const rendered = useMemo(() => buildTranscriptDisplayBlocks(messages), [messages])');
     expect(source).toContain('<TranscriptRunBlock');
     expect(source).toContain('const [expandedRuns, setExpandedRuns]');
     expect(source).toContain('function buildTranscriptRunTimeline(');
@@ -61,9 +61,10 @@ describe('transcript activity block', () => {
     expect(source).toContain('const MarkdownTextBlock = memo(function MarkdownTextBlock({');
     expect(source).toContain("className={`md-body${isFinalAnswer ? ' md-body--final-answer' : ''}`}");
     expect(source).toContain('function markFinalAnswerItem(items: MessageRenderItem[]): MessageRenderItem[]');
-    expect(source).toContain("${t('Subtask')}: ${summarizeActivityText(activeTask.title || activeTask.summary)}");
-    expect(source).toContain("${t('Tool')}: ${summarizeActivityText(latestTool.title || latestTool.summary)}");
-    expect(source).toContain("${t('Thinking')} ${summarizeActivityText(latestThinking.part.text)}");
+    expect(source).toContain('const latestActivity = [...entries].reverse().find((entry) => {');
+    expect(source).toContain('const currentTools = getActivitySummaryToolEntries(latestActivity)');
+    expect(source).toContain('const currentTool = currentTools[currentTools.length - 1]');
+    expect(source).toContain("${t('Thinking')} ${summarizeActivityText(latestActivity.part.text)}");
     expect(source).not.toContain('PrefinalWorkBlock');
     expect(source).not.toContain('usePrefinalWorkDuration');
     expect(source).not.toContain('activity-block__meta');
@@ -83,13 +84,18 @@ describe('transcript activity block', () => {
     expect(source).toContain('const [expanded, setExpanded] = useState(defaultExpanded || (autoOpenActive && hasActiveSubtasks))');
   });
 
-  it('keeps thinking collapsible and styles active activity with a slower wider sheen', () => {
+  it('keeps thinking collapsible and gives the active summary a Codex-style cadenced text shimmer', () => {
     const source = readFileSync(join(root, 'webview-ui/src/components/Transcript.tsx'), 'utf8');
     const styles = readFileSync(join(root, 'webview-ui/src/styles.css'), 'utf8');
 
     expect(source).toContain('<details className="activity-thinking" open onToggle={onUserToggle}>');
     expect(source).toContain('<summary className="activity-thinking__summary">{t(\'Thinking\')}</summary>');
-    expect(source).toContain('const isLive = isCurrent && summary.isLive');
+    expect(source).toContain('const isLive = isCurrent');
+    expect(source).toContain('<ActivityShimmerText text={summary.current} active={isLive} />');
+    expect(source).toContain('const ACTIVITY_SHIMMER_INITIAL_DELAY_MS = 600');
+    expect(source).toContain('const ACTIVITY_SHIMMER_INTERVAL_MS = 4_000');
+    expect(source).toContain('const ACTIVITY_SHIMMER_DURATION_MS = 1_000');
+    expect(source).toContain("element.classList.add('is-shimmering')");
     expect(source).toContain('activity-block--active');
     expect(styles).toContain('.activity-block');
     expect(styles).toContain('.assistant-turn');
@@ -103,16 +109,20 @@ describe('transcript activity block', () => {
     expect(styles).toContain('.turn-work__summary');
     expect(styles).toContain('.turn-work__divider');
     expect(styles).toContain('.turn-work__chevron.is-expanded');
-    expect(styles).toContain('.activity-block__summary::after');
-    expect(styles).toContain('.activity-block--active .activity-block__summary::after');
+    expect(styles).toContain('.activity-block__shimmer-sweep');
+    expect(styles).toContain('.activity-block__shimmer-highlight');
+    expect(styles).toContain('mask-image: linear-gradient(90deg, transparent 0%, #000 20% 30%, transparent 50% 100%);');
     expect(styles).toContain('.msg--assistant.is-streaming');
     expect(styles).toContain('.activity-block__summary:focus-visible');
     expect(styles).toContain('outline: 0;');
     expect(styles).toContain('box-shadow: none;');
-    expect(styles).toContain('animation: activity-sheen 2.2s ease-in-out infinite;');
-    expect(styles).toContain('@keyframes activity-sheen');
-    expect(styles).toContain('transform: translateX(-145%);');
-    expect(styles).toContain('transform: translateX(145%);');
+    expect(styles).toContain('animation-timing-function: steps(48, end);');
+    expect(styles).toContain('@keyframes activity-shimmer-sweep');
+    expect(styles).toContain('@keyframes activity-shimmer-highlight');
+    expect(styles).toContain('transform: translateX(-50%);');
+    expect(styles).toContain('transform: translateX(125%);');
+    expect(styles).toContain('transform: translateX(50%);');
+    expect(styles).toContain('transform: translateX(-125%);');
     expect(styles).toContain('.activity-thinking__summary');
     expect(styles).toContain('.activity-thinking__body');
     expect(styles).toContain('.md-body--final-answer');
@@ -135,6 +145,8 @@ describe('transcript activity block', () => {
     expect(toolPreviewStyles).not.toContain('scrollbar-width:')
     expect(styles).toContain('@media (prefers-reduced-motion: reduce)');
     expect(styles).toContain('@media (max-width: 420px)');
+    expect(styles).not.toContain('.activity-block__summary::after');
+    expect(styles).not.toContain('@keyframes activity-sheen');
     expect(styles).not.toContain('.log-block');
     expect(styles).not.toContain('.activity-block__meta');
     expect(styles).not.toContain('.prefinal-work');

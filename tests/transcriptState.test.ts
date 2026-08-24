@@ -5,6 +5,7 @@ import {
   clearSettledRunStatus,
   compactTranscript,
   isFinalAssistantResponse,
+  isTransientServeError,
   mergeLocalImageParts,
   mergeLocalRunErrors,
   preserveContextUsage,
@@ -12,6 +13,18 @@ import {
 } from '../webview-ui/src/transcriptState';
 
 describe('webview transcript state helpers', () => {
+  it('recognizes recoverable serve failures after removing ANSI control sequences', () => {
+    expect(isTransientServeError(
+      'opencode serve 启动后退出（code=1）：\u001b[91m\u001b[1mError:\u001b[0m Unexpected error database is locked'
+    )).toBe(true);
+    expect(isTransientServeError('connect ECONNREFUSED 127.0.0.1:4096')).toBe(true);
+  });
+
+  it('does not classify ordinary product errors as transient serve failures', () => {
+    expect(isTransientServeError('Model not found: cpa111/gpt-5.6-sol')).toBe(false);
+    expect(isTransientServeError('当前会话正在运行，无法删除。')).toBe(false);
+  });
+
   it('不会合并拥有不同 OpenCode ID 的连续同角色消息', () => {
     const compacted = compactTranscript([
       { id: 'msg_user_1', created: 100, role: 'user', parts: [{ type: 'text', text: 'first' }] },

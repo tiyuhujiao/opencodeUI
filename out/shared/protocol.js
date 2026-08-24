@@ -8,6 +8,7 @@ exports.isWebviewRequestMessage = isWebviewRequestMessage;
 exports.WEBVIEW_REQUEST_WHITELIST = [
     'webview.ready',
     'sessions.list',
+    'sessions.search',
     'session.export',
     'session.export.markdown',
     'subtask.transcript',
@@ -55,6 +56,7 @@ const WEBVIEW_REQUEST_WHITELIST_SET = new Set(exports.WEBVIEW_REQUEST_WHITELIST)
 const EXTENSION_RESPONSE_TYPE_SET = new Set([
     'webview.ready.ack',
     'sessions.list.response',
+    'sessions.search.response',
     'session.export.response',
     'session.export.markdown.response',
     'subtask.transcript.response',
@@ -393,6 +395,27 @@ function isExtensionResponseMessage(message) {
             && isObject(message.payload)
             && isRunQueueState(message.payload.queue);
     }
+    if (message.type === 'sessions.search.response') {
+        return message.ok === true
+            && isObject(message.payload)
+            && isBoundedString(message.payload.query, 256)
+            && Array.isArray(message.payload.hits)
+            && message.payload.hits.length <= 5000
+            && message.payload.hits.every((hit) => isObject(hit)
+                && isNonEmptyString(hit.sessionId)
+                && isBoundedString(hit.title, 4096)
+                && isBoundedString(hit.updated, 256)
+                && isNonNegativeInteger(hit.messageIndex)
+                && (hit.messageId === undefined || isNonEmptyString(hit.messageId))
+                && (hit.role === 'user' || hit.role === 'assistant')
+                && isNonNegativeInteger(hit.occurrence)
+                && isBoundedString(hit.snippet, 4096)
+                && (hit.snippetMatch === undefined || (isObject(hit.snippetMatch)
+                    && isNonNegativeInteger(hit.snippetMatch.start)
+                    && isNonNegativeInteger(hit.snippetMatch.end)
+                    && hit.snippetMatch.end > hit.snippetMatch.start
+                    && hit.snippetMatch.end <= hit.snippet.length)));
+    }
     if (message.type === 'run.queue.state') {
         return message.ok === true && isRunQueueState(message.payload);
     }
@@ -512,6 +535,11 @@ function isWebviewRequestMessage(message) {
             return false;
         }
         if (typeof message.payload.sessionId !== 'string' || message.payload.sessionId.trim().length === 0) {
+            return false;
+        }
+    }
+    if (message.type === 'sessions.search') {
+        if (!isObject(message.payload) || !isBoundedString(message.payload.query, 256)) {
             return false;
         }
     }

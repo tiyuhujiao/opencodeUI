@@ -65,7 +65,7 @@ async function verifyServeWorkspaceDirectory(): Promise<void> {
   const pathResponse = await requestServeJson<{ directory?: string }>('/path', cwd);
   assert.equal(normalizeDirectory(pathResponse.directory), normalizeDirectory(cwd), '/path 应解析为当前 VS Code 工作区');
 
-  const runtime = await ensureServeRunning();
+  const runtime = await ensureServeRunning(cwd);
   const headers = {
     'Content-Type': 'application/json',
     'x-opencode-directory': encodeOpencodeDirectory(cwd)

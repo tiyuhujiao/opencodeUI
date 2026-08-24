@@ -7,7 +7,7 @@ describe('provider runtime reload integration', () => {
     const source = readFileSync(join(process.cwd(), 'src/webview/SidebarProvider.ts'), 'utf8')
 
     expect(source).toContain('restartServeForConfigChange')
-    expect(source).toMatch(/syncProviderCredential\(draft\)[\s\S]*restartServeForConfigChange\(\)/)
-    expect(source).toMatch(/deleteProviderConfigDraft\([\s\S]*restartServeForConfigChange\(\)/)
+    expect(source).toMatch(/syncProviderCredential\(draft\)[\s\S]*restartServeForConfigChange\(this\.getDefaultCwd\(\)\)/)
+    expect(source).toMatch(/deleteProviderConfigDraft\([\s\S]*restartServeForConfigChange\(this\.getDefaultCwd\(\)\)/)
   })
 })

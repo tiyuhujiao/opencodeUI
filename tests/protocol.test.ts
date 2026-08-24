@@ -150,6 +150,56 @@ describe('webview request protocol guards', () => {
     })).toBe(true);
   });
 
+  it('校验当前项目历史会话正文搜索请求和响应', () => {
+    expect(isWebviewRequestMessage({
+      type: 'sessions.search',
+      requestId: 'sessions-search-1',
+      payload: { query: 'refresh token' }
+    })).toBe(true);
+    expect(isWebviewRequestMessage({
+      type: 'sessions.search',
+      requestId: 'sessions-search-invalid',
+      payload: { query: '' }
+    })).toBe(true);
+
+    expect(isExtensionResponseMessage({
+      type: 'sessions.search.response',
+      requestId: 'sessions-search-1',
+      ok: true,
+      payload: {
+        query: 'refresh token',
+        hits: [{
+          sessionId: 'ses_1',
+          title: 'Auth',
+          updated: '2026-08-24T12:00:00.000Z',
+          messageIndex: 2,
+          messageId: 'msg_2',
+          role: 'assistant',
+          occurrence: 1,
+          snippet: 'the refresh token is rotated',
+          snippetMatch: { start: 4, end: 17 }
+        }]
+      }
+    })).toBe(true);
+    expect(isExtensionResponseMessage({
+      type: 'sessions.search.response',
+      requestId: 'sessions-search-invalid-response',
+      ok: true,
+      payload: {
+        query: 'refresh token',
+        hits: [{
+          sessionId: '',
+          title: 'Auth',
+          updated: '2026-08-24T12:00:00.000Z',
+          messageIndex: 2,
+          role: 'assistant',
+          occurrence: 1,
+          snippet: 'bad'
+        }]
+      }
+    })).toBe(false);
+  });
+
   it('允许打开、保存、拒绝与忽略 inline diff review', () => {
     expect(isWebviewRequestMessage({
       type: 'inlineDiff.open',

@@ -5,6 +5,7 @@ const { execFileSync } = require("node:child_process");
 
 const root = path.resolve(__dirname, "..");
 const configPath = path.join(__dirname, "release.json");
+const releaseNotesDir = path.join(__dirname, "release-notes");
 const outputDir = path.join(__dirname, "vsix");
 const packagePath = path.join(root, "package.json");
 const ignoreFilePath = path.join(root, "scripts", "vsce-files.txt");
@@ -23,6 +24,23 @@ function assertVersion(value, label) {
 	}
 }
 
+function assertBilingualReleaseNotes(markdown, filePath) {
+	const separators = [...markdown.matchAll(/^[ \t]*---[ \t]*$/gmu)];
+	const separator = separators.at(-1);
+	if (!separator || separator.index === undefined) {
+		throw new Error(`${filePath} must place English release notes after a \"---\" separator.`);
+	}
+
+	const chineseBody = markdown.slice(0, separator.index);
+	const englishBody = markdown.slice(separator.index + separator[0].length);
+	if (!/[\p{Script=Han}]/u.test(chineseBody)) {
+		throw new Error(`${filePath} must contain Chinese release notes.`);
+	}
+	if ((englishBody.match(/\b[A-Za-z]{3,}\b/g) || []).length < 3) {
+		throw new Error(`${filePath} must contain English release notes.`);
+	}
+}
+
 function copyIfExists(from, to) {
 	if (fs.existsSync(from)) {
 		fs.cpSync(from, to, { recursive: true });
@@ -34,9 +52,16 @@ const sourcePackage = readJson(packagePath);
 const publicVersion =
 	process.env.OPENCODEUI_PUBLIC_VERSION || config.publicVersion;
 const localVersion = sourcePackage.version;
+const releaseNotesPath = path.join(releaseNotesDir, `${publicVersion}.md`);
 
 assertVersion(publicVersion, "Marketplace public version");
 assertVersion(localVersion, "package.json version");
+
+if (!fs.existsSync(releaseNotesPath)) {
+	throw new Error(`Missing bilingual release notes: ${releaseNotesPath}`);
+}
+const releaseNotes = fs.readFileSync(releaseNotesPath, "utf8");
+assertBilingualReleaseNotes(releaseNotes, releaseNotesPath);
 
 for (const required of ["out", "media"]) {
 	if (!fs.existsSync(path.join(root, required))) {
@@ -108,6 +133,7 @@ try {
 		publicVersion,
 		localVersion,
 		asset: path.relative(root, outputPath).replace(/\\/g, "/"),
+		releaseNotes: path.relative(root, releaseNotesPath).replace(/\\/g, "/"),
 	};
 	fs.writeFileSync(
 		path.join(outputDir, `${outputBaseName}.json`),

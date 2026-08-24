@@ -17,6 +17,10 @@ describe('release hardening', () => {
       join(root, 'github-upload/package-github-release.js'),
       'utf8',
     );
+    const releaseConfig = JSON.parse(
+      readFileSync(join(root, 'github-upload/release.json'), 'utf8'),
+    ) as { publicVersion: string };
+    const releaseNoteVersions = ['1.0.3', '1.0.4', '1.0.5', releaseConfig.publicVersion];
 
     expect(packageJson.scripts.check).toContain('npm run lint');
     expect(packageJson.scripts.check).toContain('npm run build');
@@ -42,6 +46,19 @@ describe('release hardening', () => {
     );
     expect(githubPackager).toContain('"--ignoreFile"');
     expect(githubPackager).toContain('ignoreFilePath');
+    expect(githubPackager).toContain('assertBilingualReleaseNotes');
+    expect(githubPackager).toContain('`Missing bilingual release notes: ${releaseNotesPath}`');
+    for (const version of releaseNoteVersions) {
+      const releaseNotes = readFileSync(
+        join(root, 'github-upload/release-notes', `${version}.md`),
+        'utf8',
+      );
+      expect(releaseNotes).toMatch(/^[ \t]*---[ \t]*$/mu);
+      const separatorIndex = releaseNotes.search(/^[ \t]*---[ \t]*$/mu);
+      expect(separatorIndex).toBeGreaterThanOrEqual(0);
+      expect(releaseNotes.slice(0, separatorIndex)).toMatch(/[\p{Script=Han}]/u);
+      expect(releaseNotes.slice(separatorIndex)).toMatch(/(?:\b[A-Za-z]{3,}\b.*){3}/su);
+    }
     expect(vsceIgnore).toContain('.gitignore');
     expect(vsceIgnore).toContain('.vscodeignore');
     expect(vsceIgnore).toContain('SECURITY.md');

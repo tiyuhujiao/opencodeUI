@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { delimiter, join, win32 } from 'node:path';
 import { homedir } from 'node:os';
 
+const windowsIt = process.platform === 'win32' ? it : it.skip;
+
 vi.mock('node:http', () => ({
   request: vi.fn()
 }));
@@ -28,8 +30,13 @@ class FakeChildProcess {
   public pid: number | undefined;
   public exitCode: number | null = null;
   public readonly kill = vi.fn(() => true);
+  public stderrTextOnSubscribe: string | undefined;
   public readonly stderr = {
-    on: vi.fn()
+    on: vi.fn((event: string, listener: (chunk: Buffer) => void) => {
+      if (event === 'data' && this.stderrTextOnSubscribe) {
+        listener(Buffer.from(this.stderrTextOnSubscribe, 'utf8'));
+      }
+    })
   };
 
   private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>();
@@ -196,10 +203,12 @@ describe('ensureServeRunning 端口策略', () => {
     configureHealthResponses(requestMock, {
       5111: { type: 'status', statusCode: 200 }
     });
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ files: 2 })
-    }));
+    const fetchMock = vi.fn(async (input: string | URL | Request) =>
+      new Response(
+        JSON.stringify(String(input).endsWith('/path') ? { directory: 'E:\\' } : { files: 2 }),
+        { status: 200 }
+      )
+    );
     vi.stubGlobal('fetch', fetchMock);
 
     const cwd = 'E:\\百分数与分数';
@@ -233,6 +242,112 @@ describe('ensureServeRunning 端口策略', () => {
     expect(calledPorts).toEqual([5111]);
     expect(setLastPort).toHaveBeenCalledWith(5111);
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('Windows 路径根目录比较兼容斜杠与盘符大小写', async () => {
+    const { serveManager } = await setup(undefined);
+
+    expect(serveManager.resolveServeStartupDirectory('E:/devin-byok', 'win32')).toBe('E:\\');
+    expect(serveManager.isServeDirectoryCompatible('e:\\tools', 'E:/devin-byok', 'win32')).toBe(true);
+    expect(serveManager.isServeDirectoryCompatible('C:\\Users\\Administrator', 'E:\\devin-byok', 'win32')).toBe(false);
+    expect(serveManager.isServeDirectoryCompatible(undefined, 'E:\\devin-byok', 'win32')).toBe(false);
+    expect(serveManager.isServeDirectoryCompatible('/home/user', '/workspace', 'linux')).toBe(true);
+  });
+
+  windowsIt('复用同盘符的外部 runtime', async () => {
+    const { serveManager, requestMock, spawnMock } = await setup(5111);
+    configureHealthResponses(requestMock, {
+      5111: { type: 'status', statusCode: 200 }
+    });
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ directory: 'E:\\other-workspace' }), { status: 200 })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(serveManager.ensureServeRunning('E:\\devin-byok')).resolves.toMatchObject({
+      port: 5111,
+      startedByManager: false
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:5111/path', expect.objectContaining({
+      signal: expect.any(AbortSignal)
+    }));
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  windowsIt('跨盘外部 runtime 不复用，并从 workspace 盘符根目录启动', async () => {
+    vi.useFakeTimers();
+    const { serveManager, requestMock, createServerMock, spawnMock } = await setup(4096);
+    const calledPorts = configureHealthResponses(requestMock, {
+      4096: { type: 'status', statusCode: 200 },
+      5522: { type: 'status', statusCode: 200 }
+    });
+    configureNetServers(createServerMock, [
+      { type: 'error' },
+      { type: 'listening', addressPort: 5522 }
+    ]);
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ directory: 'C:\\Users\\Administrator' }), { status: 200 })
+    ));
+    const child = new FakeChildProcess();
+    spawnMock.mockReturnValue(child as never);
+
+    const runtimePromise = serveManager.ensureServeRunning('E:\\devin-byok');
+    await vi.advanceTimersByTimeAsync(350);
+    await expect(runtimePromise).resolves.toMatchObject({
+      port: 5522,
+      startedByManager: true
+    });
+
+    expect(calledPorts).toEqual([4096, 5522]);
+    expect(spawnMock).toHaveBeenCalledWith(
+      expect.any(String),
+      ['serve', '--hostname', '127.0.0.1', '--port', '5522'],
+      expect.objectContaining({ cwd: 'E:\\' })
+    );
+  });
+
+  windowsIt('切换到另一盘符时回收旧的 managed runtime', async () => {
+    vi.useFakeTimers();
+    const { serveManager, requestMock, createServerMock, spawnMock, execFileMock } = await setup(undefined);
+    configureHealthResponses(requestMock, {
+      4096: { type: 'error' },
+      5522: { type: 'status', statusCode: 200 },
+      6633: { type: 'status', statusCode: 200 }
+    });
+    configureNetServers(createServerMock, [
+      { type: 'error' },
+      { type: 'listening', addressPort: 5522 },
+      { type: 'error' },
+      { type: 'listening', addressPort: 6633 }
+    ]);
+    const firstChild = new FakeChildProcess();
+    firstChild.pid = 4201;
+    const secondChild = new FakeChildProcess();
+    secondChild.pid = 4202;
+    spawnMock
+      .mockReturnValueOnce(firstChild as never)
+      .mockReturnValueOnce(secondChild as never);
+    execFileMock.mockImplementation(((_file, _args, _options, callback) => {
+      callback(null, '', '');
+      return firstChild as never;
+    }) as never);
+
+    const firstRuntime = serveManager.ensureServeRunning('E:\\devin-byok');
+    await vi.advanceTimersByTimeAsync(350);
+    await expect(firstRuntime).resolves.toMatchObject({ port: 5522 });
+
+    const secondRuntime = serveManager.ensureServeRunning('F:\\another-workspace');
+    await vi.advanceTimersByTimeAsync(350);
+    await expect(secondRuntime).resolves.toMatchObject({ port: 6633 });
+
+    expect(spawnMock.mock.calls.map((call) => (call[2] as { cwd?: string }).cwd)).toEqual(['E:\\', 'F:\\']);
+    expect(execFileMock).toHaveBeenCalledWith(
+      'taskkill.exe',
+      ['/pid', '4201', '/T', '/F'],
+      { windowsHide: true, timeout: 5_000 },
+      expect.any(Function)
+    );
   });
 
   it('lastPort 不健康时回退到 4096（若其健康）', async () => {
@@ -393,13 +508,17 @@ describe('ensureServeRunning 端口策略', () => {
 
     const child = new FakeChildProcess();
     child.exitCode = 7;
+    child.stderrTextOnSubscribe = '\u001b[91m\u001b[1mError:\u001b[0m Unexpected error database is locked';
     spawnMock.mockReturnValue(child as never);
 
     const runtimePromise = serveManager.ensureServeRunning();
-    const rejected = expect(runtimePromise).rejects.toThrow(/启动后退出/);
+    const rejected = runtimePromise.catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(350);
 
-    await rejected;
+    const error = await rejected;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('Error: Unexpected error database is locked');
+    expect((error as Error).message).not.toContain('\u001b');
     expect(setLastPort).not.toHaveBeenCalled();
   });
 
