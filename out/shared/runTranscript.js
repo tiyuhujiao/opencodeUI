@@ -33,33 +33,39 @@ function applyRunEventToTranscript(messages, event, assistantIndex) {
             return messages;
         }
         if (event.part.type === "text") {
+            const { replace, ...incoming } = event.part;
             const existingIndex = findStreamPartAppendIndex(nextTarget.parts, event.part);
             const previous = nextTarget.parts[existingIndex];
             if (existingIndex >= 0 && previous?.type === "text") {
                 nextTarget.parts[existingIndex] = {
                     ...previous,
-                    ...event.part,
-                    text: `${previous.text}${event.part.text}`,
+                    ...incoming,
+                    text: replace === true
+                        ? event.part.text
+                        : `${previous.text}${event.part.text}`,
                 };
             }
             else {
-                nextTarget.parts.push(event.part);
+                nextTarget.parts.push(incoming);
             }
             return next;
         }
         if (event.part.type === "reasoning") {
+            const { replace, ...incoming } = event.part;
             const existingIndex = findStreamPartAppendIndex(nextTarget.parts, event.part);
             const previous = nextTarget.parts[existingIndex];
             if (existingIndex >= 0 && previous?.type === "reasoning") {
                 nextTarget.parts[existingIndex] = {
                     ...previous,
-                    ...event.part,
-                    text: `${previous.text}${event.part.text}`,
+                    ...incoming,
+                    text: replace === true
+                        ? event.part.text
+                        : `${previous.text}${event.part.text}`,
                     raw: event.part.raw ?? previous.raw,
                 };
             }
             else {
-                nextTarget.parts.push(event.part);
+                nextTarget.parts.push(incoming);
             }
             return next;
         }

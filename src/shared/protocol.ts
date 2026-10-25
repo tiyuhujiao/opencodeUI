@@ -524,12 +524,16 @@ export type TranscriptPartText = {
   type: 'text';
   text: string;
   streamKey?: string;
+  /** Replace the accumulated stream text instead of appending to it. */
+  replace?: boolean;
 };
 
 export type TranscriptPartReasoning = {
   type: 'reasoning';
   text: string;
   streamKey?: string;
+  /** Replace the accumulated stream text instead of appending to it. */
+  replace?: boolean;
   raw?: unknown;
 };
 

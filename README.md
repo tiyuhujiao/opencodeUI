@@ -8,7 +8,7 @@ English | [简体中文](./README.zh-CN.md)
 
 OpenCode is powerful, but using it should not mean constantly moving between the editor, terminal, and configuration files. We built `opencode-ui` to give OpenCode a clear visual home inside VS Code, so conversations, tools, model choices, and code changes stay close to the work they belong to.
 
-Version `1.0.1` builds on the thoroughly redesigned extension with first-class macOS support for both Apple Silicon and Intel Macs. It automatically discovers OpenCode installations from the official installer, Homebrew, MacPorts, and common JavaScript package managers, while keeping the same visual workflow across supported hosts.
+Version `1.0.22` supports both the OpenCode v1 server API and the OpenCode v2 API. The extension detects the API at runtime, so the same sidebar workflow continues to work when you upgrade from OpenCode v1 to v2. Compatibility has been verified against OpenCode `2.1.4`.
 
 ## Preview
 
@@ -25,11 +25,15 @@ Version `1.0.1` builds on the thoroughly redesigned extension with first-class m
 
 The extension runs in VS Code, Cursor, and compatible VS Code hosts. Install the OpenCode CLI in the same local or remote environment where the extension runs.
 
-## What's New In 1.0.1
-
-### macOS Support
+## macOS Support
 
 Use the same sidebar workflow on macOS without extra extension settings. Install OpenCode with its official installer, Homebrew, npm, Bun, pnpm, Yarn, Mise, or MacPorts; `opencode-ui` will resolve the usual CLI locations even when VS Code was opened from Finder and received a shorter shell `PATH`.
+
+## OpenCode V1 And V2 Compatibility
+
+The extension automatically probes the running OpenCode server and adapts sessions, streaming events, tools, permissions, question forms, providers, models, agents, commands, skills, MCP servers, exports, diffs, reverts, and forks for the detected API. Managed v2 servers receive a generated password automatically and use OpenCode's Basic authentication contract.
+
+When attaching to a v2 server that was started outside the extension, expose the same password to the extension process through `OPENCODE_PASSWORD` or the legacy `OPENCODE_SERVER_PASSWORD` name.
 
 ## Core Highlights
 
@@ -61,13 +65,13 @@ Switch the interface between English and Simplified Chinese at any time. Setting
 
 ## Before You Start
 
-Install the [OpenCode CLI](https://opencode.ai/) in the same local or remote environment where VS Code runs the extension:
+Install either OpenCode v1 or v2 in the same local or remote environment where VS Code runs the extension:
 
 ```bash
 opencode --version
 ```
 
-That is the only required runtime dependency. `opencode-ui` will find the CLI and start `opencode serve` when needed.
+That is the only required runtime dependency. `opencode-ui` will find the CLI, start `opencode serve`, detect the API version, and configure server authentication when needed. The v2 API and security model are documented at [OpenCode v2 docs](https://opencode.ai/v2/docs/).
 
 ## Install
 

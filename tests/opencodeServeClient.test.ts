@@ -129,4 +129,56 @@ describe('OpencodeServeClient', () => {
       )
     ).rejects.toThrow('订阅事件流失败（502）。');
   });
+
+  it('uses the V2 API, Basic auth, and V2 event endpoint without changing V1 calls', async () => {
+    const ensureRuntime = vi.fn(async () => ({
+      baseUrl: 'http://127.0.0.1:4096',
+      apiVersion: 'v2' as const,
+      password: 'secret'
+    }));
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      return url.endsWith('/api/info')
+        ? new Response(JSON.stringify({ version: '2.1.2' }), { status: 200 })
+        : new Response('data: {"type":"server.connected"}\n\n', { status: 200 });
+    });
+    const client = new OpencodeServeClient({
+      ensureRuntime,
+      getDefaultCwd: () => '/workspace',
+      fetch: fetchMock
+    });
+
+    await expect(client.requestJson('/global/health')).resolves.toEqual({
+      healthy: true,
+      version: '2.1.2'
+    });
+    await expect(
+      client.openEventStream(
+        {
+          baseUrl: 'http://127.0.0.1:4096',
+          apiVersion: 'v2',
+          password: 'secret'
+        },
+        new AbortController().signal
+      )
+    ).resolves.toBeInstanceOf(ReadableStream);
+
+    const auth = `Basic ${Buffer.from('opencode:secret').toString('base64')}`;
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      'http://127.0.0.1:4096/api/info',
+      'http://127.0.0.1:4096/api/event'
+    ]);
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      headers: {
+        authorization: auth,
+        'x-opencode-directory': encodeURIComponent('/workspace')
+      }
+    });
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      headers: {
+        authorization: auth,
+        Accept: 'text/event-stream'
+      }
+    });
+  });
 });

@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MAX_PROMPT_QUEUE_ITEMS = void 0;
 exports.createQueuedPrompt = createQueuedPrompt;
+exports.adoptQueuedCommandMessage = adoptQueuedCommandMessage;
 exports.createOpencodeMessageId = createOpencodeMessageId;
 exports.toRunQueueState = toRunQueueState;
 exports.updateQueuedPromptMessage = updateQueuedPromptMessage;
@@ -21,6 +22,20 @@ function createQueuedPrompt(id, createdAt, payload) {
         delivery: "queued",
         messageId: createOpencodeMessageId(createdAt),
     };
+}
+/**
+ * Adopt the server-minted message id for a slash command. OpenCode V2 ignores
+ * the client `messageID` on /command, so the queued entry waits for the first
+ * inbox event of that session and takes its id before parentID matching runs.
+ */
+function adoptQueuedCommandMessage(queue, messageId) {
+    const entry = queue.find((item) => item.idPending === true && item.payload.command);
+    if (!entry) {
+        return undefined;
+    }
+    entry.messageId = messageId;
+    entry.idPending = false;
+    return entry;
 }
 function createOpencodeMessageId(timestamp = Date.now()) {
     if (timestamp !== lastMessageIdTimestamp) {

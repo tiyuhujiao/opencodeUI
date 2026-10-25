@@ -94,10 +94,13 @@ describe('refresh performance guards', () => {
     const provider = createProvider() as unknown as {
       getDefaultCwd: () => string | undefined;
       getSessionListForCurrentScopes: () => Promise<unknown[]>;
+      isV2Runtime: () => Promise<boolean>;
     };
     provider.getDefaultCwd = () => '/workspace';
+    provider.isV2Runtime = async () => false;
 
     const result = provider.getSessionListForCurrentScopes();
+    await Promise.resolve();
 
     expect(mocks.sessionListJson).toHaveBeenCalledTimes(2);
     expect(mocks.sessionListJson).toHaveBeenNthCalledWith(1, { cwd: '/workspace' });
@@ -198,10 +201,13 @@ describe('refresh performance guards', () => {
 
     const provider = createProvider() as unknown as {
       getAllModelsPayload: (forceRefresh?: boolean) => Promise<Array<{ name: string; providerID: string; variants?: string[]; supportsThinking?: boolean }>>;
+      isV2Runtime: () => Promise<boolean>;
     };
+    provider.isV2Runtime = async () => false;
 
     const first = provider.getAllModelsPayload(true);
     const second = provider.getAllModelsPayload(true);
+    await Promise.resolve();
 
     expect(mocks.modelsVerbose).toHaveBeenCalledTimes(1);
     expect(mocks.modelsList).not.toHaveBeenCalled();
@@ -247,7 +253,9 @@ anthropic/claude-sonnet-4.5
 
     const provider = createProvider() as unknown as {
       getAllModelsPayload: (forceRefresh?: boolean) => Promise<Array<{ name: string; providerID: string }>>;
+      isV2Runtime: () => Promise<boolean>;
     };
+    provider.isV2Runtime = async () => false;
 
     await expect(provider.getAllModelsPayload(true)).resolves.toEqual([
       { name: 'openai/gpt-4.1', providerID: 'openai' },

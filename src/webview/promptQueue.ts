@@ -21,6 +21,12 @@ export type QueuedPromptEntry = {
 	payload: RunPromptPayload;
 	delivery: QueuedPromptDelivery;
 	messageId: string;
+	/**
+	 * A slash command carries no client message id on OpenCode V2, so the
+	 * server mints the user message id. Until the matching inbox event adopts
+	 * it, `messageId` only holds the locally generated placeholder.
+	 */
+	idPending?: boolean;
 };
 
 export function createQueuedPrompt(
@@ -35,6 +41,26 @@ export function createQueuedPrompt(
 		delivery: "queued",
 		messageId: createOpencodeMessageId(createdAt),
 	};
+}
+
+/**
+ * Adopt the server-minted message id for a slash command. OpenCode V2 ignores
+ * the client `messageID` on /command, so the queued entry waits for the first
+ * inbox event of that session and takes its id before parentID matching runs.
+ */
+export function adoptQueuedCommandMessage(
+	queue: readonly QueuedPromptEntry[],
+	messageId: string,
+): QueuedPromptEntry | undefined {
+	const entry = queue.find(
+		(item) => item.idPending === true && item.payload.command,
+	);
+	if (!entry) {
+		return undefined;
+	}
+	entry.messageId = messageId;
+	entry.idPending = false;
+	return entry;
 }
 
 export function createOpencodeMessageId(timestamp = Date.now()): string {

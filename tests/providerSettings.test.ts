@@ -15,6 +15,7 @@ import {
   saveProviderConfigDraft,
   shouldDeleteStoredProviderCredential
 } from '../src/providerSettings'
+import { createEmptyProviderDraft } from '../webview-ui/src/providerSettings'
 
 const tempDirectories: string[] = []
 
@@ -165,6 +166,234 @@ describe('provider settings config service', () => {
     })
   })
 
+  it('round-trips native V2 provider and model settings without exposing secrets', () => {
+    const config = {
+      providers: {
+        acme: {
+          canonical: 'openai',
+          name: 'Acme',
+          package: 'aisdk:@ai-sdk/openai-compatible',
+          env: ['ACME_API_KEY'],
+          settings: {
+            apiKey: 'v2-do-not-send-to-webview',
+            baseURL: 'https://acme.test/v1',
+            timeout: 30_000,
+            vendorSetting: true
+          },
+          headers: {
+            Authorization: 'Bearer v2-secret',
+            'X-Region': 'east'
+          },
+          compatibility: {
+            supportsPromptCacheKey: true,
+            requireFinishReason: false
+          },
+          body: { trace: true },
+          models: {
+            'acme-fast': {
+              modelID: 'gpt-5.2',
+              name: 'Acme Fast',
+              family: 'gpt-5.2',
+              releaseDate: '2026-10-01',
+              package: 'aisdk:@ai-sdk/openai',
+              settings: { reasoningEffort: 'medium' },
+              headers: { 'X-Model-Token': 'model-v2-secret' },
+              capabilities: {
+                tools: true,
+                input: ['text', 'image'],
+                output: ['text'],
+                temperature: false,
+                reasoning: {
+                  supported: true,
+                  effort: ['low', 'high']
+                }
+              },
+              compatibility: {
+                reasoningField: 'reasoning_content'
+              },
+              variants: [
+                { id: 'high', settings: { reasoningEffort: 'high' } },
+                { id: 'fast', body: { service_tier: 'priority' } }
+              ],
+              cost: [
+                {
+                  input: 1,
+                  output: 2,
+                  cache: { read: 0.1, write: 0.2 }
+                },
+                {
+                  tier: { type: 'context', size: 200_000 },
+                  input: 3,
+                  output: 4,
+                  cache: { read: 0.3, write: 0.4 }
+                }
+              ],
+              limit: { context: 272_000, input: 250_000, output: 128_000 },
+              customModelField: 'preserve'
+            }
+          },
+          customProviderField: 'preserve'
+        }
+      }
+    }
+
+    const [draft] = providerConfigToDrafts(config, { configVersion: 'v2' })
+    expect(draft).toMatchObject({
+      configId: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: 'https://acme.test/v1',
+      setCacheKey: true,
+      credential: {
+        mode: 'config',
+        hasConfigValue: true
+      }
+    })
+    expect(draft.models[0]).toMatchObject({
+      id: 'acme-fast',
+      apiModelId: 'gpt-5.2',
+      npm: '@ai-sdk/openai',
+      attachment: true,
+      reasoning: true,
+      temperature: false,
+      toolCall: true,
+      interleaved: { field: 'reasoning_content' },
+      modalities: { input: ['text', 'image'], output: ['text'] }
+    })
+    expect(JSON.stringify(draft)).not.toContain('v2-do-not-send-to-webview')
+    expect(JSON.stringify(draft)).not.toContain('Bearer v2-secret')
+    expect(JSON.stringify(draft)).not.toContain('model-v2-secret')
+
+    const roundTripped = providerDraftToConfig(
+      draft,
+      config.providers.acme,
+      'v2'
+    )
+    expect(roundTripped).toMatchObject({
+      canonical: 'openai',
+      package: 'aisdk:@ai-sdk/openai-compatible',
+      settings: {
+        apiKey: 'v2-do-not-send-to-webview',
+        baseURL: 'https://acme.test/v1',
+        timeout: 30_000,
+        vendorSetting: true
+      },
+      headers: {
+        Authorization: 'Bearer v2-secret',
+        'X-Region': 'east'
+      },
+      compatibility: {
+        supportsPromptCacheKey: true,
+        requireFinishReason: false
+      },
+      body: { trace: true },
+      customProviderField: 'preserve'
+    })
+    const model = (roundTripped.models as Record<string, Record<string, unknown>>)['acme-fast']
+    expect(model).toMatchObject({
+      modelID: 'gpt-5.2',
+      package: 'aisdk:@ai-sdk/openai',
+      capabilities: {
+        tools: true,
+        input: ['text', 'image'],
+        output: ['text'],
+        temperature: false,
+        reasoning: {
+          supported: true,
+          effort: ['low', 'high']
+        }
+      },
+      compatibility: {
+        reasoningField: 'reasoning_content'
+      },
+      customModelField: 'preserve'
+    })
+    expect(model.variants).toEqual([
+      { id: 'high', settings: { reasoningEffort: 'high' } },
+      { id: 'fast', body: { service_tier: 'priority' } }
+    ])
+    expect(model.cost).toEqual([
+      {
+        input: 1,
+        output: 2,
+        cache: { read: 0.1, write: 0.2 }
+      },
+      {
+        tier: { type: 'context', size: 200_000 },
+        input: 3,
+        output: 4,
+        cache: { read: 0.3, write: 0.4 }
+      }
+    ])
+
+    draft.credential.mode = 'store'
+    draft.credential.value = 'new-store-secret'
+    const storeCredentialConfig = providerDraftToConfig(
+      draft,
+      config.providers.acme,
+      'v2'
+    )
+    expect(
+      (storeCredentialConfig.settings as Record<string, unknown>).apiKey
+    ).toBeUndefined()
+  })
+
+  it('clears V2 reasoning options when reasoning is disabled', () => {
+    const existingModel = {
+      modelID: 'upstream-m',
+      name: 'M',
+      capabilities: {
+        reasoning: { supported: true, effort: ['low', 'high'] }
+      }
+    }
+    const [draft] = providerConfigToDrafts(
+      {
+        providers: {
+          acme: {
+            models: { m: existingModel }
+          }
+        }
+      },
+      { configVersion: 'v2' }
+    )
+    draft.models[0].reasoning = false
+
+    const config = providerDraftToConfig(
+      draft,
+      { models: { m: existingModel } },
+      'v2'
+    )
+    const model = (
+      config.models as Record<
+        string,
+        { capabilities: { reasoning: unknown } }
+      >
+    ).m
+    expect(model.capabilities.reasoning).toEqual({ supported: false })
+  })
+
+  it('does not use a V1-style provider id as the V2 base URL fallback', () => {
+    const empty = createEmptyProviderDraft()
+    const config = providerDraftToConfig(
+      {
+        ...empty,
+        id: 'openai',
+        custom: false,
+        name: 'OpenAI',
+        api: 'openai',
+        baseURL: '',
+        npm: '@ai-sdk/openai',
+        credential: { ...empty.credential, mode: 'none' },
+        models: []
+      },
+      {},
+      'v2'
+    )
+
+    expect(
+      (config.settings as Record<string, unknown> | undefined)?.baseURL
+    ).toBeUndefined()
+  })
+
   it('preserves omitted and explicitly empty modality directions', () => {
     const [inputOnly] = providerConfigToDrafts({
       provider: {
@@ -249,6 +478,59 @@ describe('provider settings config service', () => {
     expect(provider.name).toBe('After')
     expect((provider.options as Record<string, unknown>).baseURL).toBe('https://after.test/v1')
     expect((((provider.models as Record<string, unknown>)['model-a']) as Record<string, unknown>).description).toBe('Added description')
+  })
+
+  it('preserves native V2 providers and JSONC comments during edits', async () => {
+    const home = await createTempDirectory()
+    const configDirectory = path.join(home, '.config', 'opencode')
+    await fs.promises.mkdir(configDirectory, { recursive: true })
+    const configPath = path.join(configDirectory, 'opencode.jsonc')
+    await writeFile(configPath, `{
+  // keep V2 root comment
+  "providers": {
+    "acme": {
+      "name": "Before",
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
+        // keep settings comment
+        "baseURL": "https://before.test/v1"
+      },
+      "models": {
+        "model-a": {
+          "modelID": "upstream-a",
+          "name": "Model A"
+        }
+      }
+    }
+  }
+}
+`, 'utf8')
+    const options = { homeDir: home, env: {}, configVersion: 'v2' as const }
+    const document = await readProviderConfigDocument('global', options)
+    const [draft] = providerConfigToDrafts(document.config, {
+      configVersion: 'v2'
+    })
+    draft.name = 'After V2'
+    draft.baseURL = 'https://after.test/v1'
+    draft.models[0].name = 'Model A Updated'
+
+    const saved = await saveProviderConfigDraft(
+      'global',
+      document.revision,
+      draft,
+      options
+    )
+    expect(saved.raw).toContain('// keep V2 root comment')
+    expect(saved.raw).toContain('// keep settings comment')
+    expect(saved.raw).not.toContain('"provider":')
+
+    const parsed = parse(saved.raw) as Record<string, unknown>
+    const provider = ((parsed.providers as Record<string, unknown>).acme as Record<string, unknown>)
+    expect(provider.name).toBe('After V2')
+    expect((provider.settings as Record<string, unknown>).baseURL).toBe('https://after.test/v1')
+    expect(
+      (((provider.models as Record<string, unknown>)['model-a']) as Record<string, unknown>).name
+    ).toBe('Model A Updated')
   })
 
   it('rejects stale revisions instead of overwriting an external edit', async () => {

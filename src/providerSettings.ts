@@ -17,7 +17,10 @@ export type ProviderSettingsPathOptions = {
 	workspaceFolder?: string;
 	env?: NodeJS.ProcessEnv;
 	homeDir?: string;
+	configVersion?: ProviderConfigVersion;
 };
+
+export type ProviderConfigVersion = "v1" | "v2";
 
 export type ProviderConfigTarget = {
 	scope: ProviderSettingsScope;
@@ -37,6 +40,7 @@ export type ProviderDraftExtractionOptions = {
 	connectedProviderIds?: ReadonlySet<string>;
 	storedCredentialProviderIds?: ReadonlySet<string>;
 	knownProviderIds?: ReadonlySet<string>;
+	configVersion?: ProviderConfigVersion;
 };
 
 const MISSING_REVISION = "missing";
@@ -65,12 +69,33 @@ const PROVIDER_OPTION_RESERVED_KEYS = new Set([
 	"chunkTimeout",
 	"headers",
 ]);
+const PROVIDER_V2_RESERVED_KEYS = new Set([
+	"canonical",
+	"name",
+	"env",
+	"package",
+	"compatibility",
+	"settings",
+	"headers",
+	"body",
+	"models",
+]);
+const PROVIDER_V2_SETTINGS_RESERVED_KEYS = new Set([
+	"apiKey",
+	"baseURL",
+	"enterpriseUrl",
+	"timeout",
+	"headerTimeout",
+	"chunkTimeout",
+]);
 const MODEL_RESERVED_KEYS = new Set([
 	"id",
+	"modelID",
 	"name",
 	"description",
 	"family",
 	"release_date",
+	"releaseDate",
 	"attachment",
 	"reasoning",
 	"temperature",
@@ -82,9 +107,15 @@ const MODEL_RESERVED_KEYS = new Set([
 	"experimental",
 	"status",
 	"provider",
+	"package",
 	"options",
+	"settings",
 	"headers",
+	"body",
 	"variants",
+	"capabilities",
+	"compatibility",
+	"disabled",
 ]);
 
 let jsoncParser: JsoncParser | undefined;
@@ -195,7 +226,8 @@ export function providerConfigToDrafts(
 	options: ProviderDraftExtractionOptions = {},
 ): ProviderSettingsDraft[] {
 	const providers = asObject(config.provider);
-	if (!providers) {
+	const nativeProviders = asObject(config.providers);
+	if (!providers && !nativeProviders) {
 		return [];
 	}
 
@@ -203,9 +235,29 @@ export function providerConfigToDrafts(
 	const storedCredentials = options.storedCredentialProviderIds ?? new Set<string>();
 	const known = options.knownProviderIds ?? new Set<string>();
 	const drafts: ProviderSettingsDraft[] = [];
+	const seenProviderIds = new Set<string>();
+	if (nativeProviders) {
+		for (const [providerId, value] of Object.entries(nativeProviders)) {
+			const provider = asObject(value);
+			if (!provider) continue;
+			seenProviderIds.add(providerId);
+			drafts.push(
+				providerV2ConfigToDraft(providerId, provider, {
+					custom: known.size > 0 ? !known.has(providerId) : true,
+					credential: {
+						hasStoreValue: storedCredentials.has(providerId),
+						connected: connected.has(providerId),
+					},
+				}),
+			);
+		}
+	}
+	if (!providers) {
+		return drafts;
+	}
 	for (const [providerId, value] of Object.entries(providers)) {
 		const provider = asObject(value);
-		if (!provider) {
+		if (!provider || seenProviderIds.has(providerId)) {
 			continue;
 		}
 		const providerOptions = asObject(provider.options) ?? {};
@@ -261,6 +313,70 @@ export function providerConfigToDrafts(
 	return drafts;
 }
 
+function providerV2ConfigToDraft(
+	providerId: string,
+	provider: JsonObject,
+	options: {
+		custom: boolean;
+		credential: Pick<
+			ProviderSettingsDraft["credential"],
+			"hasStoreValue" | "connected"
+		>;
+	},
+): ProviderSettingsDraft {
+	const settings = asObject(provider.settings) ?? {};
+	const compatibility = asObject(provider.compatibility) ?? {};
+	const apiKey = settings.apiKey;
+	const envReference = typeof apiKey === "string" ? parseEnvReference(apiKey) : undefined;
+	const hasConfigCredential = apiKey !== undefined && apiKey !== null && apiKey !== "";
+	const credentialMode = envReference
+		? "env"
+		: hasConfigCredential
+			? "config"
+			: options.credential.hasStoreValue
+				? "store"
+				: "none";
+	const models = asObject(provider.models) ?? {};
+	const baseURL = stringValue(settings.baseURL);
+	return {
+		originalId: providerId,
+		id: providerId,
+		configId: stringValue(provider.canonical),
+		custom: options.custom,
+		name: stringValue(provider.name),
+		api: baseURL,
+		npm: stripV2ProviderPackage(stringValue(provider.package)),
+		env: stringArray(provider.env),
+		whitelist: [],
+		blacklist: [],
+		baseURL,
+		enterpriseUrl: stringValue(settings.enterpriseUrl),
+		setCacheKey: nullableBoolean(compatibility.supportsPromptCacheKey),
+		timeout: numberFalseOrNull(settings.timeout),
+		headerTimeout: numberFalseOrNull(settings.headerTimeout),
+		chunkTimeout: nullableNumber(settings.chunkTimeout),
+		headers: headersToDraft(provider.headers),
+		credential: {
+			mode: credentialMode,
+			initialMode: credentialMode,
+			value: "",
+			env: envReference ?? "",
+			hasConfigValue: hasConfigCredential && !envReference,
+			hasStoreValue: options.credential.hasStoreValue,
+			connected: options.credential.connected,
+		},
+		optionExtrasJson: prettyJson(
+			withoutKeys(settings, PROVIDER_V2_SETTINGS_RESERVED_KEYS),
+		),
+		providerExtrasJson: prettyJson(
+			withoutKeys(provider, PROVIDER_V2_RESERVED_KEYS),
+		),
+		models: Object.entries(models)
+			.filter((entry): entry is [string, JsonObject] => Boolean(asObject(entry[1])))
+			.map(([modelId, model]) => modelConfigToDraft(modelId, model)),
+	};
+}
+
 export function createEmptyProviderModelDraft(id = ""): ProviderSettingsModelDraft {
 	return {
 		id,
@@ -302,27 +418,54 @@ export function createEmptyProviderModelDraft(id = ""): ProviderSettingsModelDra
 export function modelConfigToDraft(modelId: string, value: unknown): ProviderSettingsModelDraft {
 	const model = asObject(value) ?? {};
 	const providerOverride = asObject(model.provider) ?? {};
+	const capabilities = asObject(model.capabilities) ?? {};
+	const compatibility = asObject(model.compatibility) ?? {};
 	const limit = asObject(model.limit) ?? {};
-	const cost = asObject(model.cost) ?? {};
+	const cost = normalizeModelCostForDraft(model.cost);
 	const contextOver200k = asObject(cost.context_over_200k) ?? {};
-	const modalities = asObject(model.modalities) ?? {};
-	const interleaved = normalizeInterleaved(model.interleaved);
+	const modalities =
+		asObject(model.modalities) ??
+		(asObject(model.capabilities)
+			? {
+					input: capabilities.input,
+					output: capabilities.output
+				}
+			: {});
+	const interleaved =
+		normalizeV2ReasoningField(compatibility.reasoningField) ??
+		normalizeInterleaved(model.interleaved);
+	const reasoning =
+		normalizeV2Reasoning(capabilities.reasoning) ??
+		nullableBoolean(model.reasoning);
+	const attachment =
+		Array.isArray(capabilities.input)
+			? capabilities.input.includes("image")
+			: nullableBoolean(model.attachment);
 
 	return {
 		...createEmptyProviderModelDraft(modelId),
-		apiModelId: stringValue(model.id),
+		apiModelId: stringValue(model.modelID) || stringValue(model.id),
 		name: stringValue(model.name),
 		description: stringValue(model.description),
 		api: stringValue(providerOverride.api),
-		npm: stringValue(providerOverride.npm),
+		npm:
+			stripV2ModelPackage(stringValue(model.package)) ||
+			stringValue(providerOverride.npm),
 		family: stringValue(model.family),
-		releaseDate: stringValue(model.release_date),
-		status: normalizeModelStatus(model.status),
+		releaseDate: stringValue(model.releaseDate) || stringValue(model.release_date),
+		status:
+			model.disabled === true
+				? "deprecated"
+				: normalizeModelStatus(model.status),
 		experimental: nullableBoolean(model.experimental),
-		attachment: nullableBoolean(model.attachment),
-		reasoning: nullableBoolean(model.reasoning),
-		temperature: nullableBoolean(model.temperature),
-		toolCall: nullableBoolean(model.tool_call),
+		attachment,
+		reasoning,
+		temperature:
+			nullableBoolean(capabilities.temperature) ??
+			nullableBoolean(model.temperature),
+		toolCall:
+			nullableBoolean(capabilities.tools) ??
+			nullableBoolean(model.tool_call),
 		interleaved,
 		limit: {
 			context: nullableNumber(limit.context),
@@ -346,8 +489,10 @@ export function modelConfigToDraft(modelId: string, value: unknown): ProviderSet
 			output: nullableModalityArray(modalities.output),
 		},
 		headers: headersToDraft(model.headers),
-		optionsJson: prettyJson(asObject(model.options) ?? {}),
-		variantsJson: prettyJson(asObject(model.variants) ?? {}),
+		optionsJson: prettyJson(
+			asObject(model.settings) ?? asObject(model.options) ?? {},
+		),
+		variantsJson: prettyJson(normalizeVariantsForDraft(model.variants)),
 		extrasJson: prettyJson(withoutKeys(model, MODEL_RESERVED_KEYS)),
 	};
 }
@@ -366,10 +511,24 @@ export async function saveProviderConfigDraft(
 		throw new Error("已有 provider 的 ID 不可直接改名。请新建 provider，再删除旧配置。");
 	}
 
-	const providers = asObject(document.config.provider) ?? {};
+	const configVersion = resolveProviderConfigVersion(
+		document.config,
+		draft.id,
+		options.configVersion,
+	);
+	const providerRoot = providerConfigRoot(configVersion);
+	const providers = asObject(document.config[providerRoot]) ?? {};
 	const existingProvider = asObject(providers[draft.id]) ?? {};
-	const desiredProvider = providerDraftToConfig(draft, existingProvider);
-	const nextRaw = patchConfigRaw(document.raw, ["provider", draft.id], existingProvider, desiredProvider);
+	const desiredProvider =
+		configVersion === "v2"
+			? providerV2DraftToConfig(draft, existingProvider)
+			: providerDraftToConfig(draft, existingProvider);
+	const nextRaw = patchConfigRaw(
+		document.raw,
+		[providerRoot, draft.id],
+		existingProvider,
+		desiredProvider,
+	);
 	await assertRevisionUnchanged(document);
 	await writeFileAtomically(document.path, nextRaw);
 	return readProviderConfigDocument(scope, options);
@@ -387,12 +546,26 @@ export async function deleteProviderConfigDraft(
 	const document = await readProviderConfigDocument(scope, options);
 	assertWritableTarget(document);
 	assertRevision(document, expectedRevision);
-	const providers = asObject(document.config.provider);
-	if (!providers || !(providerId in providers)) {
+	const sections = [
+		{ root: "providers", providers: asObject(document.config.providers) },
+		{ root: "provider", providers: asObject(document.config.provider) },
+	].filter(
+		(section): section is { root: string; providers: JsonObject } =>
+			Boolean(section.providers) && providerId in section.providers!,
+	);
+	if (sections.length === 0) {
 		return document;
 	}
 
-	const nextRaw = patchConfigRaw(document.raw, ["provider", providerId], providers[providerId], undefined);
+	let nextRaw = document.raw;
+	for (const section of sections) {
+		nextRaw = patchConfigRaw(
+			nextRaw,
+			[section.root, providerId],
+			section.providers[providerId],
+			undefined,
+		);
+	}
 	await assertRevisionUnchanged(document);
 	await writeFileAtomically(document.path, nextRaw);
 	return readProviderConfigDocument(scope, options);
@@ -426,8 +599,12 @@ export async function ensureProviderConfigFile(
 export function providerDraftToConfig(
 	draft: ProviderSettingsDraft,
 	existingProviderValue: unknown = {},
+	configVersion: ProviderConfigVersion = "v1",
 ): JsonObject {
 	validateProviderDraft(draft);
+	if (configVersion === "v2") {
+		return providerV2DraftToConfig(draft, existingProviderValue);
+	}
 	const existingProvider = asObject(existingProviderValue) ?? {};
 	const existingOptions = asObject(existingProvider.options) ?? {};
 	const provider = parseJsonObject("Provider 扩展参数", draft.providerExtrasJson, PROVIDER_RESERVED_KEYS);
@@ -482,6 +659,215 @@ export function providerDraftToConfig(
 	}
 
 	return provider;
+}
+
+function providerV2DraftToConfig(
+	draft: ProviderSettingsDraft,
+	existingProviderValue: unknown = {},
+): JsonObject {
+	const existingProvider = asObject(existingProviderValue) ?? {};
+	const existingSettings = asObject(existingProvider.settings) ?? {};
+	const existingCompatibility = asObject(existingProvider.compatibility) ?? {};
+	const provider = parseJsonObject(
+		"Provider 扩展参数",
+		draft.providerExtrasJson,
+		PROVIDER_V2_RESERVED_KEYS,
+	);
+	const settings: JsonObject = {
+		...parseJsonObject(
+			"Provider settings 扩展参数",
+			draft.optionExtrasJson,
+			PROVIDER_V2_SETTINGS_RESERVED_KEYS,
+		),
+	};
+
+	assignString(provider, "canonical", draft.configId);
+	assignString(provider, "name", draft.name);
+	assignString(provider, "package", v2ProviderPackage(draft.npm));
+	assignStringArray(provider, "env", draft.env);
+	if (asObject(existingProvider.body)) {
+		provider.body = existingProvider.body;
+	}
+
+	assignOptionalString(
+		settings,
+		"baseURL",
+		draft.baseURL.trim() || normalizeOptionalHttpUrl(draft.api),
+	);
+	assignOptionalString(settings, "enterpriseUrl", draft.enterpriseUrl);
+	assignOptionalValue(settings, "timeout", draft.timeout);
+	assignOptionalValue(settings, "headerTimeout", draft.headerTimeout);
+	assignOptionalValue(settings, "chunkTimeout", draft.chunkTimeout);
+
+	delete settings.apiKey;
+	if (draft.credential.mode === "env") {
+		settings.apiKey = `{env:${draft.credential.env.trim()}}`;
+	} else if (draft.credential.mode === "config") {
+		if (draft.credential.value.length > 0) {
+			settings.apiKey = draft.credential.value;
+		} else if (
+			draft.credential.hasConfigValue
+			&& existingSettings.apiKey !== undefined
+		) {
+			settings.apiKey = existingSettings.apiKey;
+		} else {
+			throw new Error("请输入要写入配置文件的 API key。");
+		}
+	}
+	if (Object.keys(settings).length > 0) {
+		provider.settings = settings;
+	}
+
+	const providerHeaders = headersFromDraft(
+		draft.headers,
+		existingProvider.headers,
+		"Provider",
+	);
+	if (Object.keys(providerHeaders).length > 0) {
+		provider.headers = providerHeaders;
+	}
+
+	const compatibility = { ...existingCompatibility };
+	assignOptionalValue(
+		compatibility,
+		"supportsPromptCacheKey",
+		draft.setCacheKey,
+	);
+	if (Object.keys(compatibility).length > 0) {
+		provider.compatibility = compatibility;
+	}
+
+	const existingModels = asObject(existingProvider.models) ?? {};
+	const models: JsonObject = {};
+	for (const model of draft.models) {
+		models[model.id] = modelDraftToV2Config(model, existingModels[model.id]);
+	}
+	if (Object.keys(models).length > 0) {
+		provider.models = models;
+	}
+
+	return provider;
+}
+
+function modelDraftToV2Config(
+	model: ProviderSettingsModelDraft,
+	existingValue: unknown,
+): JsonObject {
+	const existing = asObject(existingValue) ?? {};
+	const existingCapabilities = asObject(existing.capabilities) ?? {};
+	const existingCompatibility = asObject(existing.compatibility) ?? {};
+	const output = parseJsonObject(
+		`模型 ${model.id} 扩展参数`,
+		model.extrasJson,
+		MODEL_RESERVED_KEYS,
+	);
+	assignString(output, "modelID", model.apiModelId);
+	assignString(output, "family", model.family);
+	assignString(output, "name", model.name);
+	assignString(output, "releaseDate", model.releaseDate);
+	assignString(output, "package", v2ModelPackage(model.npm));
+	if (model.description.trim()) {
+		output.description = model.description.trim();
+	}
+	if (asObject(existing.body)) {
+		output.body = existing.body;
+	}
+
+	const settings = parseJsonObject(`模型 ${model.id} settings`, model.optionsJson);
+	if (Object.keys(settings).length > 0) {
+		output.settings = settings;
+	}
+
+	const headers = headersFromDraft(
+		model.headers,
+		existing.headers,
+		`模型 ${model.id}`,
+	);
+	if (Object.keys(headers).length > 0) {
+		output.headers = headers;
+	}
+
+	const capabilities: JsonObject = { ...existingCapabilities };
+	if (model.toolCall === null) {
+		delete capabilities.tools;
+	} else {
+		capabilities.tools = model.toolCall;
+	}
+	if (model.modalities.input === null) {
+		delete capabilities.input;
+	} else {
+		capabilities.input = [...model.modalities.input];
+	}
+	if (model.modalities.output === null) {
+		delete capabilities.output;
+	} else {
+		capabilities.output = [...model.modalities.output];
+	}
+	if (model.temperature === null) {
+		delete capabilities.temperature;
+	} else {
+		capabilities.temperature = model.temperature;
+	}
+	if (model.reasoning === null) {
+		delete capabilities.reasoning;
+	} else if (!model.reasoning) {
+		capabilities.reasoning = { supported: false };
+	} else {
+		capabilities.reasoning = {
+			...asObject(existingCapabilities.reasoning),
+			supported: true,
+		};
+	}
+	if (Object.keys(capabilities).length > 0) {
+		output.capabilities = capabilities;
+	}
+
+	const compatibility = { ...existingCompatibility };
+	if (model.interleaved === null) {
+		delete compatibility.reasoningField;
+	} else if (
+		typeof model.interleaved === "string"
+		|| (typeof model.interleaved === "boolean" && model.interleaved)
+		|| (typeof model.interleaved === "object"
+			&& model.interleaved !== null
+			&& Boolean(model.interleaved.field))
+	) {
+		const field =
+			typeof model.interleaved === "string"
+				? model.interleaved
+				: typeof model.interleaved === "object"
+					&& model.interleaved !== null
+					? model.interleaved.field
+					: "";
+		if (field) compatibility.reasoningField = field;
+	}
+	if (Object.keys(compatibility).length > 0) {
+		output.compatibility = compatibility;
+	}
+
+	const variants = variantsToV2Config(
+		parseJsonObject(`模型 ${model.id} variants`, model.variantsJson),
+	);
+	if (variants.length > 0) {
+		output.variants = variants;
+	}
+
+	const cost = modelCostToV2Config(model.cost);
+	if (cost.length > 0) {
+		output.cost = cost;
+	}
+	const limit = compactObject({
+		context: model.limit.context,
+		input: model.limit.input,
+		output: model.limit.output,
+	});
+	if (Object.keys(limit).length > 0) {
+		output.limit = limit;
+	}
+	if (model.status === "deprecated") {
+		output.disabled = true;
+	}
+	return output;
 }
 
 export function validateProviderDraft(draft: ProviderSettingsDraft): void {
@@ -632,6 +1018,180 @@ function modelDraftToConfig(model: ProviderSettingsModelDraft, existingValue: un
 		output.headers = headers;
 	}
 	return output;
+}
+
+function normalizeModelCostForDraft(value: unknown): JsonObject {
+	const costs = Array.isArray(value)
+		? value.flatMap((entry): JsonObject[] => {
+				const cost = asObject(entry);
+				return cost ? [cost] : [];
+			})
+		: [asObject(value) ?? {}];
+	const standard =
+		costs.find((cost) => !asObject(cost.tier)) ??
+		costs[0] ??
+		{};
+	const tiered =
+		costs.find((cost) => {
+			const tier = asObject(cost.tier);
+			return tier?.type === "context";
+		}) ??
+		asObject(standard.context_over_200k) ??
+		{};
+	return {
+		...standard,
+		cache_read: standard.cache_read ?? asObject(standard.cache)?.read,
+		cache_write: standard.cache_write ?? asObject(standard.cache)?.write,
+		context_over_200k: {
+			...tiered,
+			cache_read: tiered.cache_read ?? asObject(tiered.cache)?.read,
+			cache_write: tiered.cache_write ?? asObject(tiered.cache)?.write,
+		},
+	};
+}
+
+function normalizeV2Reasoning(value: unknown): boolean | null {
+	if (typeof value === "boolean") return value;
+	const reasoning = asObject(value);
+	return reasoning && typeof reasoning.supported === "boolean"
+		? reasoning.supported
+		: null;
+}
+
+function normalizeV2ReasoningField(
+	value: unknown,
+): { field: string } | null {
+	return typeof value === "string" && value.trim()
+		? { field: value.trim() }
+		: null;
+}
+
+function normalizeVariantsForDraft(value: unknown): JsonObject {
+	if (Array.isArray(value)) {
+		const variants: JsonObject = {};
+		for (const entry of value) {
+			const variant = asObject(entry);
+			const id = stringValue(variant?.id);
+			if (!variant || !id) continue;
+			const settings = asObject(variant.settings);
+			variants[id] = compactObject({
+				...(settings ? { settings } : {}),
+				...(asObject(variant.headers) ? { headers: variant.headers } : {}),
+				...(asObject(variant.body) ? { body: variant.body } : {}),
+			});
+		}
+		return variants;
+	}
+	return asObject(value) ?? {};
+}
+
+function variantsToV2Config(value: JsonObject): JsonObject[] {
+	return Object.entries(value).flatMap(([id, rawVariant]) => {
+		const variant = asObject(rawVariant);
+		if (!variant || !id.trim()) return [];
+		const settings = asObject(variant.settings);
+		const hasNativeShape =
+			settings !== undefined
+			|| Boolean(asObject(variant.headers))
+			|| Boolean(asObject(variant.body));
+		return [
+			{
+				id,
+				...(hasNativeShape
+					? {
+							...(settings ? { settings } : {}),
+							...(asObject(variant.headers) ? { headers: variant.headers } : {}),
+							...(asObject(variant.body) ? { body: variant.body } : {}),
+						}
+					: { settings: variant }),
+			},
+		];
+	});
+}
+
+function modelCostToV2Config(
+	cost: ProviderSettingsModelDraft["cost"],
+): JsonObject[] {
+	const result: JsonObject[] = [];
+	const standard = compactObject({
+		input: cost.input,
+		output: cost.output,
+		cache: compactObject({
+			read: cost.cacheRead,
+			write: cost.cacheWrite,
+		}),
+	});
+	if (typeof standard.input === "number" && typeof standard.output === "number") {
+		result.push(standard);
+	}
+	const tiered = compactObject({
+		input: cost.contextOver200k.input,
+		output: cost.contextOver200k.output,
+		cache: compactObject({
+			read: cost.contextOver200k.cacheRead,
+			write: cost.contextOver200k.cacheWrite,
+		}),
+	});
+	if (typeof tiered.input === "number" && typeof tiered.output === "number") {
+		result.push({
+			tier: { type: "context", size: 200_000 },
+			...tiered,
+		});
+	}
+	return result;
+}
+
+function v2ProviderPackage(value: string): string {
+	return packageWithAisdkPrefix(value);
+}
+
+function v2ModelPackage(value: string): string {
+	return packageWithAisdkPrefix(value);
+}
+
+function packageWithAisdkPrefix(value: string): string {
+	const trimmed = value.trim();
+	if (!trimmed || /^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
+		return trimmed;
+	}
+	return `aisdk:${trimmed}`;
+}
+
+function stripV2ProviderPackage(value: string): string {
+	return value.startsWith("aisdk:") ? value.slice("aisdk:".length) : value;
+}
+
+function stripV2ModelPackage(value: string): string {
+	return stripV2ProviderPackage(value);
+}
+
+function providerConfigRoot(version: ProviderConfigVersion): "provider" | "providers" {
+	return version === "v2" ? "providers" : "provider";
+}
+
+function resolveProviderConfigVersion(
+	config: JsonObject,
+	providerId: string,
+	requested: ProviderConfigVersion | undefined,
+): ProviderConfigVersion {
+	const v2 = asObject(config.providers);
+	if (v2 && providerId in v2) {
+		return "v2";
+	}
+	const v1 = asObject(config.provider);
+	if (v1 && providerId in v1) {
+		return "v1";
+	}
+	if (v2 && !v1) {
+		return "v2";
+	}
+	if (v1 && !v2) {
+		return "v1";
+	}
+	if (requested) {
+		return requested;
+	}
+	return v2 ? "v2" : "v1";
 }
 
 function parseConfigObject(raw: string, filePath: string): JsonObject {
@@ -1026,8 +1586,39 @@ function assignNullable(target: JsonObject, key: string, value: unknown): void {
 	}
 }
 
+function assignOptionalString(target: JsonObject, key: string, value: string): void {
+	if (value.trim()) {
+		target[key] = value;
+	} else {
+		delete target[key];
+	}
+}
+
+function assignOptionalValue(target: JsonObject, key: string, value: unknown): void {
+	if (value === null || value === undefined || value === "") {
+		delete target[key];
+		return;
+	}
+	target[key] = value;
+}
+
 function compactObject(value: JsonObject): JsonObject {
 	return Object.fromEntries(Object.entries(value).filter((entry) => entry[1] !== null && entry[1] !== undefined));
+}
+
+function normalizeOptionalHttpUrl(value: string): string {
+	const trimmed = value.trim();
+	if (!trimmed) {
+		return "";
+	}
+	try {
+		const parsed = new URL(trimmed);
+		return parsed.protocol === "http:" || parsed.protocol === "https:"
+			? trimmed
+			: "";
+	} catch {
+		return "";
+	}
 }
 
 function validateOptionalHttpUrl(value: string, label: string): void {

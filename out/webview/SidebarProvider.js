@@ -73,6 +73,7 @@ const TEMPFILE_MAX_BYTES = 10 * 1024 * 1024;
 const TEMPFILE_MAX_BASE64_CHARS = Math.ceil(TEMPFILE_MAX_BYTES / 3) * 4 + 4;
 const TEMPFILE_TTL_MS = 30 * 60000;
 const MCP_TRANSITION_POLL_DELAYS_MS = [0, 250, 500, 750, 1000, 1500, 2000, 2500, 3000];
+const STREAM_NO_EVIDENCE_GRACE_MS = 90000;
 class EmittedRunError extends Error {
     constructor(message) {
         super(message);
@@ -722,6 +723,17 @@ class SidebarProvider {
         if (!forceRefresh && cached && cached.cwd === cwd && Date.now() - cached.loadedAt < SESSION_LIST_CACHE_TTL_MS) {
             return cached.sessions;
         }
+        if (await this.isV2Runtime(cwd)) {
+            const rawSessions = await this.requestServeJson("/session");
+            const allSessions = Array.isArray(rawSessions)
+                ? rawSessions.flatMap(readSessionListItem)
+                : [];
+            const sessions = cwd
+                ? (0, parsers_1.filterSessionsByDirectory)(allSessions, cwd)
+                : allSessions;
+            this.sessionListCache = { cwd, loadedAt: Date.now(), sessions };
+            return sessions;
+        }
         const scopedListTasks = [];
         let firstError;
         if (cwd) {
@@ -846,7 +858,12 @@ class SidebarProvider {
     }
     async handleSessionDeleteRequest(webview, requestId, sessionId) {
         try {
-            await (0, opencodeCli_1.sessionDelete)(sessionId, { timeoutMs: 60000 });
+            if (await this.isV2Runtime()) {
+                await this.requestServeNoContent(`/session/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+            }
+            else {
+                await (0, opencodeCli_1.sessionDelete)(sessionId, { timeoutMs: 60000 });
+            }
             this.invalidateSessionExportCache(sessionId);
             this.respond(webview, {
                 type: "session.delete.response",
@@ -1157,7 +1174,13 @@ class SidebarProvider {
     }
     async handlePermissionReplyRequest(webview, requestId, permissionId, reply, message) {
         try {
-            await this.requestServeJson(`/permission/${encodeURIComponent(permissionId)}/reply`, {
+            const pendingSessionId = this.currentRun?.pendingPermission?.permissionId === permissionId
+                ? this.currentRun.pendingPermission.sessionId
+                : undefined;
+            const sessionQuery = pendingSessionId && await this.isV2Runtime()
+                ? `?sessionID=${encodeURIComponent(pendingSessionId)}`
+                : "";
+            await this.requestServeJson(`/permission/${encodeURIComponent(permissionId)}/reply${sessionQuery}`, {
                 method: "POST",
                 body: JSON.stringify({ reply, message }),
             });
@@ -1181,7 +1204,13 @@ class SidebarProvider {
     }
     async handleQuestionReplyRequest(webview, requestId, questionId, answers) {
         try {
-            await this.requestServeJson(`/question/${encodeURIComponent(questionId)}/reply`, {
+            const pendingSessionId = this.currentRun?.pendingQuestion?.questionId === questionId
+                ? this.currentRun.pendingQuestion.sessionId
+                : undefined;
+            const sessionQuery = pendingSessionId && await this.isV2Runtime()
+                ? `?sessionID=${encodeURIComponent(pendingSessionId)}`
+                : "";
+            await this.requestServeJson(`/question/${encodeURIComponent(questionId)}/reply${sessionQuery}`, {
                 method: "POST",
                 body: JSON.stringify({ answers }),
             });
@@ -1202,7 +1231,13 @@ class SidebarProvider {
     }
     async handleQuestionRejectRequest(webview, requestId, questionId) {
         try {
-            await this.requestServeJson(`/question/${encodeURIComponent(questionId)}/reject`, {
+            const pendingSessionId = this.currentRun?.pendingQuestion?.questionId === questionId
+                ? this.currentRun.pendingQuestion.sessionId
+                : undefined;
+            const sessionQuery = pendingSessionId && await this.isV2Runtime()
+                ? `?sessionID=${encodeURIComponent(pendingSessionId)}`
+                : "";
+            await this.requestServeJson(`/question/${encodeURIComponent(questionId)}/reject${sessionQuery}`, {
                 method: "POST",
             });
             if (this.currentRun?.pendingQuestion?.questionId === questionId) {
@@ -1237,19 +1272,14 @@ class SidebarProvider {
     async handleProvidersListRequest(webview, requestId, forceRefresh = false) {
         try {
             const cwd = this.getDefaultCwd();
+            const v2 = await this.isV2Runtime(cwd);
             const [authResult, modelsResult] = await Promise.allSettled([
-                (0, opencodeCli_1.authList)({ cwd }),
+                v2
+                    ? this.loadStoredProviderCredentials()
+                    : (0, opencodeCli_1.authList)({ cwd }).then((result) => (0, parsers_1.parseAuthList)(result.stdout)),
                 this.getAllModelsPayload(forceRefresh),
             ]);
-            let authProviders = [];
-            if (authResult.status === "fulfilled") {
-                try {
-                    authProviders = (0, parsers_1.parseAuthList)(authResult.value.stdout);
-                }
-                catch {
-                    authProviders = [];
-                }
-            }
+            const authProviders = authResult.status === "fulfilled" ? authResult.value : [];
             const configuredLabels = this.readConfiguredProviderLabels();
             const providerIds = modelsResult.status === "fulfilled"
                 ? uniqueProviderIds(modelsResult.value.map((entry) => entry.providerID))
@@ -1339,7 +1369,7 @@ class SidebarProvider {
     }
     async handleProviderSettingsSaveRequest(webview, requestId, scope, revision, draft) {
         try {
-            await (0, providerSettings_1.saveProviderConfigDraft)(scope, revision, draft, this.getProviderSettingsPathContext());
+            await (0, providerSettings_1.saveProviderConfigDraft)(scope, revision, draft, this.getProviderSettingsPathContext(await this.isV2Runtime() ? "v2" : "v1"));
             try {
                 await this.syncProviderCredential(draft);
             }
@@ -1348,7 +1378,7 @@ class SidebarProvider {
                 throw new Error(`配置文件已保存，但 credential 更新失败：${detail}`);
             }
             try {
-                await (0, serveManager_1.restartServeForConfigChange)(this.getDefaultCwd());
+                await this.reloadServeConfiguration();
             }
             catch (error) {
                 const detail = error instanceof Error ? error.message : String(error);
@@ -1369,8 +1399,8 @@ class SidebarProvider {
     }
     async handleProviderSettingsDeleteRequest(webview, requestId, scope, revision, providerId) {
         try {
-            await (0, providerSettings_1.deleteProviderConfigDraft)(scope, revision, providerId, this.getProviderSettingsPathContext());
-            await (0, serveManager_1.restartServeForConfigChange)(this.getDefaultCwd());
+            await (0, providerSettings_1.deleteProviderConfigDraft)(scope, revision, providerId, this.getProviderSettingsPathContext(await this.isV2Runtime() ? "v2" : "v1"));
+            await this.reloadServeConfiguration();
             this.invalidateProviderCaches();
             const snapshot = await this.buildProviderSettingsSnapshot(scope, true);
             this.respond(webview, {
@@ -1514,19 +1544,28 @@ class SidebarProvider {
             throw new Error("系统未能打开默认浏览器。");
         }
     }
-    getProviderSettingsPathContext() {
-        return { workspaceFolder: this.getDefaultCwd() };
+    getProviderSettingsPathContext(configVersion) {
+        return {
+            workspaceFolder: this.getDefaultCwd(),
+            ...(configVersion ? { configVersion } : {}),
+        };
     }
     async buildProviderSettingsSnapshot(scope, forceRefresh) {
+        const configVersion = await this.isV2Runtime() ? "v2" : "v1";
         const [document, catalog, storedCredentials] = await Promise.all([
-            (0, providerSettings_1.readProviderConfigDocument)(scope, this.getProviderSettingsPathContext()),
+            (0, providerSettings_1.readProviderConfigDocument)(scope, this.getProviderSettingsPathContext(configVersion)),
             this.getProviderSettingsCatalog(forceRefresh),
             this.loadStoredProviderCredentials(),
         ]);
         const providerIdentities = new Map(catalog.entries.map((entry) => [entry.id, { id: entry.id, label: entry.label }]));
-        const configuredProviders = isRecord(document.config.provider)
-            ? document.config.provider
-            : {};
+        const configuredProviders = {
+            ...(isRecord(document.config.provider)
+                ? document.config.provider
+                : {}),
+            ...(isRecord(document.config.providers)
+                ? document.config.providers
+                : {}),
+        };
         for (const [id, value] of Object.entries(configuredProviders)) {
             const provider = isRecord(value) ? value : undefined;
             providerIdentities.set(id, {
@@ -1540,6 +1579,7 @@ class SidebarProvider {
             connectedProviderIds: catalog.connectedProviderIds,
             storedCredentialProviderIds,
             knownProviderIds: catalog.builtInProviderIds,
+            configVersion,
         });
         const catalogEntries = catalog.entries.map((entry) => ({
             ...entry,
@@ -1559,6 +1599,30 @@ class SidebarProvider {
     }
     async loadStoredProviderCredentials() {
         try {
+            if (await this.isV2Runtime()) {
+                const payload = await this.requestServeJson("/auth");
+                return Array.isArray(payload)
+                    ? payload.flatMap((entry) => {
+                        if (!isRecord(entry) || typeof entry.id !== "string") {
+                            return [];
+                        }
+                        const method = entry.type === "oauth"
+                            ? "oauth"
+                            : entry.type === "api"
+                                ? "api"
+                                : undefined;
+                        return [
+                            {
+                                id: entry.id,
+                                label: typeof entry.label === "string"
+                                    ? entry.label
+                                    : entry.id,
+                                ...(method ? { type: method } : {}),
+                            },
+                        ];
+                    })
+                    : [];
+            }
             const result = await (0, opencodeCli_1.authList)({ cwd: this.getDefaultCwd(), timeoutMs: 10000 });
             return (0, parsers_1.parseAuthList)(result.stdout);
         }
@@ -1579,7 +1643,7 @@ class SidebarProvider {
         if (this.providerSettingsCatalogInFlight) {
             return this.providerSettingsCatalogInFlight;
         }
-        const task = this.loadProviderSettingsCatalog();
+        const task = this.loadProviderSettingsCatalog(forceRefresh);
         this.providerSettingsCatalogInFlight = task;
         try {
             const catalog = await task;
@@ -1592,11 +1656,14 @@ class SidebarProvider {
             }
         }
     }
-    async loadProviderSettingsCatalog() {
+    async loadProviderSettingsCatalog(forceRefresh = false) {
         try {
             const [providerPayload, authResult] = await Promise.all([
-                this.requestServeJson("/provider"),
-                this.requestServeJson("/provider/auth", { includeCwd: false }).catch((error) => {
+                this.requestServeJson("/provider", { forceRefresh }),
+                this.requestServeJson("/provider/auth", {
+                    includeCwd: false,
+                    forceRefresh,
+                }).catch((error) => {
                     const message = error instanceof Error ? error.message : String(error);
                     (0, diagnostics_1.logWarn)(`provider auth methods unavailable: ${message}`);
                     return {};
@@ -1611,9 +1678,13 @@ class SidebarProvider {
         }
     }
     async loadFallbackProviderSettingsCatalog() {
-        const [models, authResult] = await Promise.all([
+        const [models, authProviders] = await Promise.all([
             this.getAllModelsPayload(false),
-            (0, opencodeCli_1.authList)({ cwd: this.getDefaultCwd() }).catch(() => undefined),
+            (await this.isV2Runtime())
+                ? this.loadStoredProviderCredentials()
+                : (0, opencodeCli_1.authList)({ cwd: this.getDefaultCwd() })
+                    .then((result) => (0, parsers_1.parseAuthList)(result.stdout))
+                    .catch(() => []),
         ]);
         const providers = new Map();
         for (const entry of models) {
@@ -1639,7 +1710,6 @@ class SidebarProvider {
             };
             providers.set(providerId, provider);
         }
-        const authProviders = authResult ? (0, parsers_1.parseAuthList)(authResult.stdout) : [];
         const authPayload = Object.fromEntries(authProviders.map((provider) => [
             provider.id,
             [{ type: "api", label: "Configured credential" }],
@@ -1669,9 +1739,33 @@ class SidebarProvider {
     invalidateProviderCaches() {
         this.providerSettingsCatalogCache = undefined;
         this.modelsCache.clear();
+        this.serveClient.invalidateProviderCache();
     }
     async handleAgentsListRequest(webview, requestId) {
         try {
+            if (await this.isV2Runtime()) {
+                const rawAgents = await this.requestServeJson("/agent");
+                const agents = Array.isArray(rawAgents)
+                    ? rawAgents.flatMap((entry) => {
+                        if (!isRecord(entry) || typeof entry.id !== "string") {
+                            return [];
+                        }
+                        return [
+                            {
+                                name: entry.id,
+                                isPrimary: entry.isPrimary !== false,
+                            },
+                        ];
+                    })
+                    : [];
+                this.respond(webview, {
+                    type: "agents.list.response",
+                    requestId,
+                    ok: true,
+                    payload: { agents },
+                });
+                return;
+            }
             const result = await (0, opencodeCli_1.agentList)({ cwd: this.getDefaultCwd() });
             const entries = (0, parsers_1.parseAgentList)(result.stdout);
             this.respond(webview, {
@@ -1890,19 +1984,30 @@ class SidebarProvider {
     async handleSelfcheckRunRequest(webview, requestId) {
         const env = (0, opencodeEnv_1.withOpencodeBinInPath)();
         const cwd = this.getDefaultCwd();
+        const v2 = await this.isV2Runtime(cwd);
         const [health, sessions, models, agents] = await Promise.all([
             this.checkServeHealth(),
             this.safeCount(async () => {
+                if (v2) {
+                    return (await this.getSessionListForCurrentScopes(true)).length;
+                }
                 const result = await (0, opencodeCli_1.sessionListJson)({ env, cwd });
                 const parsed = (0, parsers_1.parseSessionListJson)(result.stdout);
                 return parsed.length;
             }),
             this.safeCount(async () => {
+                if (v2) {
+                    return (await this.getAllModelsPayload(true)).length;
+                }
                 const result = await (0, opencodeCli_1.modelsList)({ env, cwd });
                 const parsed = (0, parsers_1.parseModelsList)(result.stdout);
                 return parsed.length;
             }),
             this.safeCount(async () => {
+                if (v2) {
+                    const payload = await this.requestServeJson("/agent");
+                    return Array.isArray(payload) ? payload.length : 0;
+                }
                 const result = await (0, opencodeCli_1.agentList)({ env, cwd });
                 const parsed = (0, parsers_1.parseAgentList)(result.stdout);
                 return parsed.length;
@@ -2136,7 +2241,7 @@ class SidebarProvider {
                 const eventStreamReady = new Promise((resolve) => {
                     markEventStreamReady = resolve;
                 });
-                const eventTask = this.consumeServeEvents(webview, requestId, sessionId, runtime.baseUrl, eventAbort.signal, streamState, markEventStreamReady);
+                const eventTask = this.consumeServeEvents(webview, requestId, sessionId, runtime, eventAbort.signal, streamState, markEventStreamReady);
                 const blockerPoll = this.startBlockerPoll(webview, requestId, sessionId, streamState);
                 this.currentRun.blockerPoll = blockerPoll;
                 watchdog = setTimeout(() => {
@@ -2333,6 +2438,11 @@ class SidebarProvider {
             return;
         }
         try {
+            // OpenCode V2 ignores the client messageID on /command, so the
+            // server mints the user message id; claim it from the inbox event.
+            if (queued.payload.command) {
+                queued.idPending = true;
+            }
             await this.sendPromptTurn(sessionId, { ...queued.payload, sessionId }, run.controller.signal, queued.messageId);
             const current = this.currentRun;
             if (current?.requestId === requestId &&
@@ -2351,6 +2461,7 @@ class SidebarProvider {
                 return;
             }
             queued.delivery = "queued";
+            queued.idPending = false;
             current.revision += 1;
             this.postRunQueueState(webview);
             const message = error instanceof Error ? error.message : String(error);
@@ -2358,12 +2469,38 @@ class SidebarProvider {
             console.warn("[opencode-ui] deliver queued prompt failed:", message);
         }
     }
-    observeQueuedUserMessage(webview, requestId, messageId) {
+    observeQueuedUserMessage(webview, requestId, message) {
         const run = this.currentRun;
         if (!run || run.requestId !== requestId) {
             return;
         }
-        const queued = run.queue.find((item) => item.delivery !== "queued" && item.messageId === messageId);
+        const messageID = typeof message === "string" ? message : message.id;
+        const messageText = typeof message === "string" ? undefined : message.text;
+        let queued = run.queue.find((item) => item.delivery !== "queued" && item.messageId === messageID);
+        if (!queued && messageText) {
+            const normalized = messageText.trim();
+            queued = run.queue.find((item) => {
+                if (item.delivery === "queued") {
+                    return false;
+                }
+                const candidates = item.payload.command
+                    ? [
+                        `/${item.payload.command.name} ${item.payload.command.arguments}`.trim(),
+                        `/${item.payload.command.name}`,
+                        item.payload.command.arguments,
+                    ]
+                    : [item.payload.message];
+                return candidates.some((candidate) => candidate.trim() === normalized);
+            });
+            if (queued) {
+                queued.messageId = messageID;
+            }
+        }
+        if (!queued && messageText !== undefined) {
+            // V2 mints the id for slash commands, so the first enqueued user item
+            // after submitting one belongs to that command.
+            queued = (0, promptQueue_1.adoptQueuedCommandMessage)(run.queue, messageID);
+        }
         if (!queued) {
             return;
         }
@@ -2770,11 +2907,11 @@ class SidebarProvider {
         });
         return created.id;
     }
-    async consumeServeEvents(webview, requestId, sessionId, baseUrl, signal, streamState, onReady) {
+    async consumeServeEvents(webview, requestId, sessionId, runtime, signal, streamState, onReady) {
         const lifecycle = this.createRunLifecycleAdapter(webview, requestId);
         let reader;
         try {
-            const stream = await this.serveClient.openEventStream({ baseUrl }, signal);
+            const stream = await this.serveClient.openEventStream(runtime, signal);
             reader = stream.getReader();
             onReady?.();
             const decoder = new TextDecoder();
@@ -2783,9 +2920,19 @@ class SidebarProvider {
             let streamEnded = false;
             while (!signal.aborted && !streamEnded) {
                 const next = await Promise.race([
-                    pendingRead.then((result) => ({ type: "read", result })),
+                    pendingRead.then((result) => ({ type: "read", result }), (error) => ({ type: "readError", error })),
                     (0, runLifecycle_1.delay)(250, signal).then(() => ({ type: "poll" })),
                 ]);
+                if (next.type === "readError") {
+                    // V2 drops the stream when a slow consumer overflows, and the
+                    // execution keeps running server-side. Fall back to polling
+                    // instead of failing the whole turn.
+                    const message = next.error instanceof Error ? next.error.message : String(next.error);
+                    (0, diagnostics_1.logWarn)(`serve event stream interrupted, falling back to polling: ${message}`);
+                    console.warn("[opencode-ui] serve event stream interrupted, falling back to polling:", message);
+                    streamEnded = true;
+                    continue;
+                }
                 if (next.type === "poll") {
                     if (await this.isServeTurnIdle(sessionId, streamState)) {
                         await (0, runLifecycle_1.pollServeBlockers)(lifecycle, requestId, sessionId, streamState);
@@ -2802,7 +2949,7 @@ class SidebarProvider {
                     continue;
                 }
                 pendingRead = reader.read();
-                buffer += decoder.decode(value, { stream: true });
+                buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
                 let boundary = buffer.indexOf("\n\n");
                 while (boundary >= 0) {
                     const chunk = buffer.slice(0, boundary);
@@ -2823,7 +2970,9 @@ class SidebarProvider {
                     catch {
                         continue;
                     }
-                    const result = (0, runLifecycle_1.dispatchServeEvent)(lifecycle, requestId, sessionId, event, streamState);
+                    const result = runtime.apiVersion === "v2"
+                        ? (0, runLifecycle_1.dispatchV2ServeEvent)(lifecycle, requestId, sessionId, event, streamState)
+                        : (0, runLifecycle_1.dispatchServeEvent)(lifecycle, requestId, sessionId, event, streamState);
                     if (result.error) {
                         return new EmittedRunError(result.error);
                     }
@@ -2836,10 +2985,19 @@ class SidebarProvider {
                     }
                 }
             }
+            // The stream is gone. Poll until the session is idle; if no live
+            // event ever arrived, stop waiting after a bounded grace so a fast
+            // turn that finished before the stream opened cannot hang forever.
+            const noEvidenceDeadline = Date.now() + STREAM_NO_EVIDENCE_GRACE_MS;
             while (!signal.aborted) {
                 await (0, runLifecycle_1.pollServeBlockers)(lifecycle, requestId, sessionId, streamState);
                 if ((0, runLifecycle_1.canCompleteServeStreamTurn)(streamState) &&
                     (await this.isServeTurnIdle(sessionId, streamState))) {
+                    return "done";
+                }
+                if (Date.now() >= noEvidenceDeadline &&
+                    (await this.isServeSessionIdle(sessionId))) {
+                    (0, diagnostics_1.logWarn)("serve turn finished without live events; completing from session status");
                     return "done";
                 }
                 await (0, runLifecycle_1.delay)(250, signal).catch(() => undefined);
@@ -2851,6 +3009,15 @@ class SidebarProvider {
         }
         finally {
             await reader?.cancel().catch(() => undefined);
+        }
+    }
+    async isServeSessionIdle(sessionId) {
+        try {
+            const statuses = await this.requestServeJson("/session/status");
+            return (0, runLifecycle_1.isSessionIdleStatus)(statuses, sessionId);
+        }
+        catch {
+            return false;
         }
     }
     async isServeTurnIdle(sessionId, streamState) {
@@ -2919,7 +3086,7 @@ class SidebarProvider {
                 this.respondRunEvent(webview, requestId, event);
             },
             onUserMessage: (message) => {
-                this.observeQueuedUserMessage(webview, requestId, message.id);
+                this.observeQueuedUserMessage(webview, requestId, message);
             },
             onAssistantMessage: (message) => {
                 this.observeQueuedAssistantMessage(webview, requestId, message);
@@ -3071,6 +3238,10 @@ class SidebarProvider {
         return transcript;
     }
     async exportSessionWithFallback(sessionId) {
+        if (await this.isV2Runtime()) {
+            const payload = await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}/export`);
+            return JSON.stringify(payload);
+        }
         const cwd = this.getDefaultCwd();
         if (cwd) {
             try {
@@ -3205,15 +3376,17 @@ class SidebarProvider {
             return inFlight;
         }
         const task = (async () => {
-            const models = await this.getVerboseModelsPayload().catch(async (error) => {
-                const message = error instanceof Error ? error.message : String(error);
-                (0, diagnostics_1.logWarn)(`models --verbose failed, falling back to models: ${message}`);
-                const result = await (0, opencodeCli_1.modelsList)({ cwd: this.getDefaultCwd() });
-                return (0, parsers_1.parseModelsList)(result.stdout).map((entry) => ({
-                    name: entry.modelName,
-                    providerID: entry.providerID,
-                }));
-            });
+            const models = (await this.isV2Runtime())
+                ? readCachedModelEntries(await this.requestServeJson("/model"))
+                : await this.getVerboseModelsPayload().catch(async (error) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    (0, diagnostics_1.logWarn)(`models --verbose failed, falling back to models: ${message}`);
+                    const result = await (0, opencodeCli_1.modelsList)({ cwd: this.getDefaultCwd() });
+                    return (0, parsers_1.parseModelsList)(result.stdout).map((entry) => ({
+                        name: entry.modelName,
+                        providerID: entry.providerID,
+                    }));
+                });
             this.modelsCache.set(cacheKey, {
                 loadedAt: Date.now(),
                 models,
@@ -3254,7 +3427,20 @@ class SidebarProvider {
             body: init?.body,
             includeCwd: init?.includeCwd ?? true,
             signal: init?.signal,
+            forceRefresh: init?.forceRefresh,
         });
+    }
+    async isV2Runtime(cwd = this.getDefaultCwd()) {
+        return this.serveClient.isV2(cwd);
+    }
+    async reloadServeConfiguration() {
+        if (await this.isV2Runtime()) {
+            await this.requestServeNoContent("/config/reload", {
+                method: "POST",
+            });
+            return;
+        }
+        await (0, serveManager_1.restartServeForConfigChange)(this.getDefaultCwd());
     }
     readConfiguredProviderLabels() {
         try {
@@ -3472,6 +3658,62 @@ function parseSessionMessageRecords(value) {
         }
         return { info: message.info, parts: message.parts };
     });
+}
+function readSessionListItem(value) {
+    if (!isRecord(value)) {
+        return [];
+    }
+    if (typeof value.id !== "string" ||
+        typeof value.title !== "string" ||
+        typeof value.updated !== "string" ||
+        typeof value.created !== "string" ||
+        typeof value.projectId !== "string" ||
+        typeof value.directory !== "string") {
+        return [];
+    }
+    if (typeof value.parentID === "string" && value.parentID.length > 0) {
+        return [];
+    }
+    return [
+        {
+            id: value.id,
+            title: value.title,
+            updated: value.updated,
+            created: value.created,
+            projectId: value.projectId,
+            directory: value.directory,
+        },
+    ];
+}
+function readCachedModelEntry(value) {
+    if (!isRecord(value)) {
+        return [];
+    }
+    if (typeof value.name !== "string" ||
+        typeof value.providerID !== "string" ||
+        value.providerID.trim().length === 0) {
+        return [];
+    }
+    const variants = Array.isArray(value.variants)
+        ? value.variants.filter((item) => typeof item === "string")
+        : undefined;
+    return [
+        {
+            name: value.name,
+            providerID: value.providerID,
+            ...(variants && variants.length > 0 ? { variants } : {}),
+            ...(value.supportsThinking === true
+                ? { supportsThinking: true }
+                : {}),
+            ...(typeof value.contextWindow === "number" &&
+                Number.isFinite(value.contextWindow)
+                ? { contextWindow: value.contextWindow }
+                : {}),
+        },
+    ];
+}
+function readCachedModelEntries(value) {
+    return Array.isArray(value) ? value.flatMap(readCachedModelEntry) : [];
 }
 function buildTimelineItems(payload) {
     const items = [];

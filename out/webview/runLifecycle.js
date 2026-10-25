@@ -6,6 +6,7 @@ exports.armServeStreamTurn = armServeStreamTurn;
 exports.canCompleteServeStreamTurn = canCompleteServeStreamTurn;
 exports.isSessionIdleStatus = isSessionIdleStatus;
 exports.dispatchServeEvent = dispatchServeEvent;
+exports.dispatchV2ServeEvent = dispatchV2ServeEvent;
 exports.pollServeBlockers = pollServeBlockers;
 exports.hasPendingServeBlockers = hasPendingServeBlockers;
 exports.delay = delay;
@@ -23,6 +24,8 @@ function createServeStreamState() {
         pendingDeltaByKey: new Map(),
         pendingPermissionIds: new Set(),
         pendingQuestionIds: new Set(),
+        v2LastUserMessageId: null,
+        v2Tools: new Map(),
     };
 }
 function armServeStreamTurn(streamState, options) {
@@ -177,6 +180,260 @@ function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
     }
     return { done: false };
 }
+function dispatchV2ServeEvent(adapter, requestId, sessionId, event, streamState) {
+    if (!isRecord(event)) {
+        return { done: false };
+    }
+    const type = typeof event.type === "string" ? event.type : "";
+    const data = isRecord(event.data) ? event.data : {};
+    const eventSessionID = typeof data.sessionID === "string" ? data.sessionID : undefined;
+    const isBlockerLifecycleEvent = type === "permission.asked" ||
+        type === "permission.replied" ||
+        type === "form.created" ||
+        type === "form.replied" ||
+        type === "form.cancelled";
+    if (eventSessionID &&
+        eventSessionID !== sessionId &&
+        !isBlockerLifecycleEvent) {
+        return { done: false };
+    }
+    if (type === "session.inbox.delivered") {
+        const messageID = typeof data.inboxID === "string" ? data.inboxID : undefined;
+        if (messageID) {
+            streamState.v2LastUserMessageId = messageID;
+            adapter.onUserMessage?.({ id: messageID });
+        }
+        return { done: false };
+    }
+    if (type === "session.inbox.enqueued") {
+        const messageID = typeof data.inboxID === "string" ? data.inboxID : undefined;
+        const item = isRecord(data.item) ? data.item : undefined;
+        const payload = isRecord(item?.payload) ? item.payload : undefined;
+        const text = typeof payload?.text === "string" ? payload.text : undefined;
+        if (messageID) {
+            adapter.onUserMessage?.({
+                id: messageID,
+                ...(text ? { text } : {}),
+            });
+        }
+        return { done: false };
+    }
+    if (type === "session.execution.started") {
+        streamState.turnLive = true;
+        return { done: false };
+    }
+    if (type === "session.execution.succeeded") {
+        streamState.turnLive = true;
+        return { done: true };
+    }
+    if (type === "session.execution.interrupted") {
+        const reason = typeof data.reason === "string" ? data.reason : "unknown";
+        if (reason !== "user") {
+            const message = `Session interrupted: ${reason}`;
+            adapter.emit({ type: "error", error: message });
+            return { done: true, error: message };
+        }
+        streamState.turnLive = true;
+        return { done: true };
+    }
+    if (type === "session.execution.failed") {
+        const message = sessionErrorMessage(data.error) ?? "运行失败。";
+        adapter.emit({ type: "error", error: message });
+        return { done: true, error: message };
+    }
+    if (type === "session.status" || type === "session.idle") {
+        const status = isRecord(data.status) ? data.status : null;
+        const statusType = type === "session.idle"
+            ? "idle"
+            : typeof status?.type === "string"
+                ? status.type
+                : "busy";
+        if (statusType !== "idle") {
+            streamState.turnLive = true;
+        }
+        return {
+            done: statusType === "idle" &&
+                canCompleteServeStreamTurn(streamState),
+        };
+    }
+    if (type === "session.step.started") {
+        const messageID = typeof data.assistantMessageID === "string"
+            ? data.assistantMessageID
+            : undefined;
+        if (messageID) {
+            streamState.assistantMessageIds.add(messageID);
+            streamState.lastAssistantMessageId = messageID;
+            streamState.turnLive = true;
+            adapter.onAssistantMessage?.({
+                id: messageID,
+                ...(streamState.v2LastUserMessageId
+                    ? { parentId: streamState.v2LastUserMessageId }
+                    : {}),
+            });
+        }
+        return { done: false };
+    }
+    if (type === "session.step.ended" || type === "session.step.failed") {
+        const usage = v2ContextUsage(data);
+        if (usage) {
+            adapter.emit({ type: "context.usage", usage });
+        }
+        // A step failure may be retried. session.execution.failed is the
+        // terminal signal, so keep the run alive here.
+        return { done: false };
+    }
+    if (type === "session.text.started" ||
+        type === "session.reasoning.started") {
+        const kind = type.includes("reasoning") ? "reasoning" : "text";
+        const key = v2ContentKey(data, kind);
+        if (key) {
+            // A retried step reuses the same assistant message and ordinal, so a
+            // repeated start means the previous attempt's text must be replaced
+            // instead of appended to.
+            const restarted = streamState.partTextByKey.has(key);
+            streamState.partKindByKey.set(key, kind);
+            streamState.partTextByKey.set(key, "");
+            streamState.deltaSeenPartKeys.delete(key);
+            streamState.turnLive = true;
+            if (restarted) {
+                adapter.emit({
+                    type: "part",
+                    part: kind === "reasoning"
+                        ? { type: "reasoning", text: "", streamKey: key, replace: true, raw: event }
+                        : { type: "text", text: "", streamKey: key, replace: true },
+                });
+            }
+        }
+        return { done: false };
+    }
+    if (type === "session.text.delta" ||
+        type === "session.reasoning.delta") {
+        const kind = type.includes("reasoning") ? "reasoning" : "text";
+        const key = v2ContentKey(data, kind);
+        const delta = typeof data.delta === "string" ? data.delta : "";
+        if (!key || delta.length === 0) {
+            return { done: false };
+        }
+        streamState.partKindByKey.set(key, kind);
+        streamState.partTextByKey.set(key, `${streamState.partTextByKey.get(key) ?? ""}${delta}`);
+        streamState.deltaSeenPartKeys.add(key);
+        adapter.emit({
+            type: "part",
+            part: kind === "reasoning"
+                ? { type: "reasoning", text: delta, streamKey: key, raw: event }
+                : { type: "text", text: delta, streamKey: key },
+        });
+        return { done: false };
+    }
+    if (type === "session.text.ended" ||
+        type === "session.reasoning.ended") {
+        const kind = type.includes("reasoning") ? "reasoning" : "text";
+        const key = v2ContentKey(data, kind);
+        const text = typeof data.text === "string" ? data.text : "";
+        if (!key || text.length === 0) {
+            return { done: false };
+        }
+        const previous = streamState.partTextByKey.get(key) ?? "";
+        if (streamState.deltaSeenPartKeys.has(key)) {
+            if (text.startsWith(previous) && text.length > previous.length) {
+                const delta = text.slice(previous.length);
+                adapter.emit({
+                    type: "part",
+                    part: kind === "reasoning"
+                        ? {
+                            type: "reasoning",
+                            text: delta,
+                            streamKey: key,
+                            raw: event,
+                        }
+                        : { type: "text", text: delta, streamKey: key },
+                });
+            }
+            else if (text !== previous) {
+                // The authoritative text is not an extension of what streamed
+                // (lost deltas or a recovery rewrite), so replace it wholesale.
+                adapter.emit({
+                    type: "part",
+                    part: kind === "reasoning"
+                        ? {
+                            type: "reasoning",
+                            text,
+                            streamKey: key,
+                            replace: true,
+                            raw: event,
+                        }
+                        : { type: "text", text, streamKey: key, replace: true },
+                });
+            }
+        }
+        else {
+            adapter.emit({
+                type: "part",
+                part: kind === "reasoning"
+                    ? {
+                        type: "reasoning",
+                        text,
+                        streamKey: key,
+                        replace: true,
+                        raw: event,
+                    }
+                    : { type: "text", text, streamKey: key, replace: true },
+            });
+        }
+        streamState.partTextByKey.set(key, text);
+        return { done: false };
+    }
+    if (type.startsWith("session.tool.")) {
+        const emitted = v2ToolEvent(data, type, event, streamState);
+        if (emitted) {
+            streamState.turnLive = true;
+            adapter.emit(emitted);
+        }
+        return { done: false };
+    }
+    if (type === "permission.asked") {
+        const permission = normalizePermissionRequest({
+            ...data,
+            permission: typeof data.action === "string" ? data.action : "tool",
+            patterns: data.resources,
+        });
+        if (permission &&
+            adapter.acceptBlockerSession(requestId, sessionId, permission.sessionId)) {
+            surfacePendingPermission(adapter, permission, streamState);
+            streamState.turnLive = true;
+        }
+        return { done: false };
+    }
+    if (type === "permission.replied") {
+        if (adapter.acceptBlockerSession(requestId, sessionId, typeof data.sessionID === "string" ? data.sessionID : undefined) &&
+            typeof data.requestID === "string") {
+            streamState.pendingPermissionIds.delete(data.requestID);
+            adapter.setPendingPermission(undefined);
+        }
+        return { done: false };
+    }
+    if (type === "form.created") {
+        const question = v2FormQuestion(data.form);
+        if (question &&
+            adapter.acceptBlockerSession(requestId, sessionId, question.sessionId)) {
+            surfacePendingQuestion(adapter, question, streamState);
+            streamState.turnLive = true;
+        }
+        return { done: false };
+    }
+    if (type === "form.replied" || type === "form.cancelled") {
+        if (adapter.acceptBlockerSession(requestId, sessionId, typeof data.sessionID === "string" ? data.sessionID : undefined) &&
+            typeof data.id === "string") {
+            streamState.pendingQuestionIds.delete(data.id);
+            adapter.setPendingQuestion(undefined);
+        }
+        return { done: false };
+    }
+    if (type === "session.retry.scheduled") {
+        streamState.turnLive = true;
+    }
+    return { done: false };
+}
 function markServeTurnLive(type, properties, sessionId, streamState) {
     if (properties.sessionID !== sessionId) {
         return;
@@ -231,21 +488,26 @@ async function pollServeBlockers(adapter, requestId, sessionId, streamState) {
     if (!adapter.isCurrentRun(requestId)) {
         return 0;
     }
-    const [permissionsResult, questionsResult, sessionsResult] = await Promise.allSettled([
+    const [permissionsResult, questionsResult] = await Promise.allSettled([
         adapter.requestServeJson("/permission"),
         adapter.requestServeJson("/question"),
-        adapter.requestServeJson("/session"),
     ]);
     let surfaced = 0;
-    const sessions = sessionsResult.status === "fulfilled"
-        ? normalizeSessionTree(sessionsResult.value)
-        : [];
     const permissions = permissionsResult.status === "fulfilled"
         ? normalizePermissionRequestList(permissionsResult.value)
         : [];
     const questions = questionsResult.status === "fulfilled"
         ? normalizeQuestionRequestList(questionsResult.value)
         : [];
+    let sessions = [];
+    if (permissions.length > 0 || questions.length > 0) {
+        try {
+            sessions = normalizeSessionTree(await adapter.requestServeJson("/session"));
+        }
+        catch {
+            sessions = [];
+        }
+    }
     reconcilePendingPermissions(adapter, permissions, streamState);
     reconcilePendingQuestions(adapter, questions, streamState);
     const permission = pickCurrentRunBlocker(permissions, sessionId, sessions);
@@ -319,6 +581,223 @@ function surfacePendingQuestion(adapter, event, streamState) {
     streamState.pendingQuestionIds.add(event.questionId);
     adapter.emit(event);
     return true;
+}
+function v2ContentKey(data, kind) {
+    const messageID = typeof data.assistantMessageID === "string"
+        ? data.assistantMessageID
+        : null;
+    const ordinal = typeof data.ordinal === "number" && Number.isFinite(data.ordinal)
+        ? data.ordinal
+        : null;
+    return messageID && ordinal !== null
+        ? `${messageID}:${kind}:${String(ordinal)}`
+        : null;
+}
+function v2ContextUsage(data) {
+    const tokens = isRecord(data.tokens) ? data.tokens : undefined;
+    if (!tokens) {
+        return null;
+    }
+    const cache = isRecord(tokens.cache) ? tokens.cache : undefined;
+    const input = typeof tokens.input === "number" && Number.isFinite(tokens.input)
+        ? tokens.input
+        : 0;
+    const cacheRead = typeof cache?.read === "number" && Number.isFinite(cache.read)
+        ? cache.read
+        : 0;
+    const model = isRecord(data.model) ? data.model : undefined;
+    const providerID = typeof model?.providerID === "string" ? model.providerID : undefined;
+    const modelID = typeof model?.id === "string" ? model.id : undefined;
+    return {
+        usedTokens: input + cacheRead,
+        ...(providerID && modelID ? { model: `${providerID}/${modelID}` } : {}),
+    };
+}
+function sessionErrorMessage(value) {
+    if (typeof value === "string" && value.trim()) {
+        return value.trim();
+    }
+    if (!isRecord(value)) {
+        return null;
+    }
+    const message = typeof value.message === "string"
+        ? value.message
+        : typeof value.type === "string"
+            ? value.type
+            : undefined;
+    return message?.trim() || null;
+}
+function v2ToolEvent(data, type, event, streamState) {
+    const messageID = typeof data.assistantMessageID === "string"
+        ? data.assistantMessageID
+        : null;
+    const toolID = typeof data.id === "string" ? data.id : null;
+    if (!messageID || !toolID) {
+        return null;
+    }
+    const previous = streamState.v2Tools.get(toolID);
+    let name = typeof data.name === "string" && data.name.trim()
+        ? data.name.trim()
+        : previous?.name ?? "tool";
+    let input = previous?.input ?? {};
+    let metadata = previous?.metadata;
+    let status = previous?.status ?? "pending";
+    if (type === "session.tool.input.started" && typeof data.name === "string") {
+        name = data.name;
+    }
+    else if (type === "session.tool.input.delta") {
+        const raw = typeof data.delta === "string"
+            ? `${typeof input === "string" ? input : ""}${data.delta}`
+            : input;
+        input = raw;
+        status = "pending";
+    }
+    else if (type === "session.tool.input.ended") {
+        input = typeof data.text === "string" ? data.text : input;
+        status = "pending";
+    }
+    else if (type === "session.tool.called") {
+        input = data.input ?? input;
+        status = data.executed === false ? "pending" : "running";
+    }
+    else if (type === "session.tool.progress") {
+        metadata = isRecord(data.metadata) ? data.metadata : metadata;
+        status = "running";
+    }
+    else if (type === "session.tool.success") {
+        input = data.input ?? input;
+        metadata = isRecord(data.metadata) ? data.metadata : metadata;
+        status = "completed";
+    }
+    else if (type === "session.tool.failed") {
+        input = data.input ?? input;
+        metadata = isRecord(data.metadata) ? data.metadata : metadata;
+        status = "error";
+    }
+    streamState.v2Tools.set(toolID, {
+        messageID,
+        name,
+        input,
+        metadata,
+        status,
+    });
+    const raw = {
+        id: toolID,
+        callID: toolID,
+        type: "tool",
+        sessionID: data.sessionID,
+        messageID,
+        tool: name,
+        name,
+        executed: data.executed,
+        state: {
+            status,
+            input,
+            ...(metadata ? { metadata } : {}),
+            ...(type === "session.tool.success"
+                ? { output: v2ContentText(data.content) }
+                : {}),
+            ...(type === "session.tool.failed"
+                ? {
+                    error: sessionErrorMessage(data.error) ??
+                        "Tool execution failed.",
+                }
+                : {}),
+        },
+        time: {
+            created: typeof previous === "undefined" &&
+                typeof event.created === "number"
+                ? event.created
+                : undefined,
+        },
+    };
+    return {
+        type: "part",
+        part: {
+            type: "tool",
+            toolName: name,
+            status,
+            raw,
+        },
+    };
+}
+function v2ContentText(value) {
+    if (typeof value === "string") {
+        return value;
+    }
+    if (!Array.isArray(value)) {
+        return undefined;
+    }
+    const text = value
+        .flatMap((part) => isRecord(part) && typeof part.text === "string" ? [part.text] : [])
+        .join("\n");
+    return text || undefined;
+}
+function v2FormQuestion(value) {
+    if (!isRecord(value)) {
+        return null;
+    }
+    const fields = Array.isArray(value.fields) ? value.fields : [];
+    const questions = fields.flatMap((value) => {
+        if (!isRecord(value) ||
+            value.type === "external" ||
+            value.type === "boolean" ||
+            value.hidden === true) {
+            return [];
+        }
+        const options = Array.isArray(value.options)
+            ? value.options.flatMap((value) => {
+                if (!isRecord(value))
+                    return [];
+                const label = typeof value.label === "string"
+                    ? value.label
+                    : typeof value.value === "string"
+                        ? value.value
+                        : "";
+                if (!label)
+                    return [];
+                return [
+                    {
+                        label,
+                        description: typeof value.description === "string"
+                            ? value.description
+                            : label,
+                    },
+                ];
+            })
+            : [];
+        const header = typeof value.title === "string" && value.title.length > 0
+            ? value.title
+            : typeof value.key === "string"
+                ? value.key
+                : "";
+        const question = typeof value.description === "string" && value.description.length > 0
+            ? value.description
+            : header;
+        if (!header || !question) {
+            return [];
+        }
+        return [
+            {
+                header,
+                question,
+                options,
+                multiple: value.type === "multiselect",
+                custom: value.custom !== false,
+            },
+        ];
+    });
+    if (typeof value.id !== "string" ||
+        typeof value.sessionID !== "string" ||
+        questions.length === 0) {
+        return null;
+    }
+    return {
+        type: "question",
+        questionId: value.id,
+        sessionId: value.sessionID,
+        questions,
+    };
 }
 function normalizeQuestionInfoList(value) {
     if (!Array.isArray(value)) {

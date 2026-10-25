@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  adoptQueuedCommandMessage,
   createOpencodeMessageId,
   createQueuedPrompt,
   removeQueuedPrompt,
@@ -85,5 +86,33 @@ describe('prompt Queue', () => {
     expect(correlation).toBeGreaterThan(observer)
     expect(dequeue).toBeGreaterThan(correlation)
     expect(nextTurn).toBeGreaterThan(dequeue)
+  })
+
+  it('adopts the server-minted inbox id for a queued slash command', () => {
+    const command = createQueuedPrompt('queue-1', 100, {
+      message: '/help',
+      model: 'provider/model',
+      agent: 'build',
+      command: { name: 'help', arguments: '' }
+    })
+    const plain = createQueuedPrompt('queue-2', 200, {
+      message: 'follow up',
+      model: 'provider/model',
+      agent: 'build'
+    })
+    const queue = [command, plain]
+    const placeholder = command.messageId
+
+    command.delivery = 'submitted'
+    command.idPending = true
+
+    const adopted = adoptQueuedCommandMessage(queue, 'msg_server_side_id')
+
+    expect(adopted).toBe(command)
+    expect(command.messageId).toBe('msg_server_side_id')
+    expect(command.messageId).not.toBe(placeholder)
+    expect(command.idPending).toBe(false)
+    expect(plain.messageId).toMatch(/^msg_/)
+    expect(adoptQueuedCommandMessage(queue, 'msg_other')).toBeUndefined()
   })
 })

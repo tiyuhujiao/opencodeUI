@@ -37,6 +37,7 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 exports.resolveHostKind = resolveHostKind;
 exports.buildLastPortKey = buildLastPortKey;
+exports.buildServePasswordKey = buildServePasswordKey;
 const vscode = __importStar(require("vscode"));
 const serveManager_1 = require("./bridge/serveManager");
 const diagnostics_1 = require("./diagnostics");
@@ -66,6 +67,16 @@ function activate(context) {
         getLastPort: () => context.globalState.get(lastPortKey),
         setLastPort: async (port) => {
             await context.globalState.update(lastPortKey, port);
+        },
+        getPassword: (port) => context.secrets.get(buildServePasswordKey(lastPortKey, port)),
+        setPassword: async (port, password) => {
+            const key = buildServePasswordKey(lastPortKey, port);
+            if (password) {
+                await context.secrets.store(key, password);
+            }
+            else {
+                await context.secrets.delete(key);
+            }
         }
     });
     if (hostKind === 'unsupported') {
@@ -124,5 +135,8 @@ function resolveHostKind(remoteName, platform = process.platform) {
 function buildLastPortKey(hostKind, remoteName) {
     const scope = `${hostKind}:${remoteName ?? 'local'}`.replace(/[^A-Za-z0-9._:-]+/g, '-');
     return `${LAST_PORT_KEY_PREFIX}.${scope}`;
+}
+function buildServePasswordKey(lastPortKey, port) {
+    return `${lastPortKey}.password.${String(port)}`;
 }
 //# sourceMappingURL=extension.js.map

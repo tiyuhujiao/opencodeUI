@@ -16,28 +16,39 @@ function extractModelDefinitionMetadata(value) {
 }
 function extractConfiguredModelMetadata(value) {
     const result = new Map();
-    if (!isRecord(value) || !isRecord(value.provider)) {
+    if (!isRecord(value)) {
         return result;
     }
-    for (const [providerId, providerValue] of Object.entries(value.provider)) {
-        if (!isRecord(providerValue) || !isRecord(providerValue.models)) {
+    for (const providers of [value.provider, value.providers]) {
+        if (!isRecord(providers)) {
             continue;
         }
-        for (const [modelId, modelValue] of Object.entries(providerValue.models)) {
-            const normalizedProviderId = providerId.trim();
-            const normalizedModelId = modelId.trim();
-            if (!normalizedProviderId || !normalizedModelId) {
+        for (const [providerId, providerValue] of Object.entries(providers)) {
+            if (!isRecord(providerValue) || !isRecord(providerValue.models)) {
                 continue;
             }
-            const modelName = `${normalizedProviderId}/${normalizedModelId}`;
-            result.set(modelName, extractModelDefinitionMetadata(modelValue));
+            for (const [modelId, modelValue] of Object.entries(providerValue.models)) {
+                const normalizedProviderId = providerId.trim();
+                const normalizedModelId = modelId.trim();
+                if (!normalizedProviderId || !normalizedModelId) {
+                    continue;
+                }
+                const modelName = `${normalizedProviderId}/${normalizedModelId}`;
+                result.set(modelName, extractModelDefinitionMetadata(modelValue));
+            }
         }
     }
     return result;
 }
 function readVariants(value) {
     const names = Array.isArray(value)
-        ? value.filter((entry) => typeof entry === 'string')
+        ? value.flatMap((entry) => {
+            if (typeof entry === 'string')
+                return [entry];
+            if (isRecord(entry) && typeof entry.id === 'string')
+                return [entry.id];
+            return [];
+        })
         : isRecord(value)
             ? Object.keys(value)
             : [];

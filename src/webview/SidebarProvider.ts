@@ -21,6 +21,7 @@ import {
 } from "../bridge/serveManager";
 import {
 	OpencodeServeClient,
+	type OpencodeServeEndpoint,
 	type OpencodeServeRequestOptions,
 } from "../bridge/opencodeServeClient";
 import {
@@ -87,6 +88,7 @@ import {
 	createServeStreamState,
 	delay,
 	dispatchServeEvent,
+	dispatchV2ServeEvent,
 	isSessionIdleStatus,
 	pollServeBlockers,
 	type PendingPermissionEvent,
@@ -96,6 +98,7 @@ import {
 } from "./runLifecycle";
 import {
 	MAX_PROMPT_QUEUE_ITEMS,
+	adoptQueuedCommandMessage,
 	createQueuedPrompt,
 	removeQueuedPrompt,
 	toRunQueueState,
@@ -142,6 +145,7 @@ const TEMPFILE_MAX_BYTES = 10 * 1024 * 1024;
 const TEMPFILE_MAX_BASE64_CHARS = Math.ceil(TEMPFILE_MAX_BYTES / 3) * 4 + 4;
 const TEMPFILE_TTL_MS = 30 * 60_000;
 const MCP_TRANSITION_POLL_DELAYS_MS = [0, 250, 500, 750, 1_000, 1_500, 2_000, 2_500, 3_000] as const;
+const STREAM_NO_EVIDENCE_GRACE_MS = 90_000;
 
 class EmittedRunError extends Error {
 	public constructor(message: string) {
@@ -1152,6 +1156,17 @@ export class SidebarProvider
 		if (!forceRefresh && cached && cached.cwd === cwd && Date.now() - cached.loadedAt < SESSION_LIST_CACHE_TTL_MS) {
 			return cached.sessions;
 		}
+		if (await this.isV2Runtime(cwd)) {
+			const rawSessions = await this.requestServeJson<unknown>("/session");
+			const allSessions = Array.isArray(rawSessions)
+				? rawSessions.flatMap(readSessionListItem)
+				: [];
+			const sessions = cwd
+				? filterSessionsByDirectory(allSessions, cwd)
+				: allSessions;
+			this.sessionListCache = { cwd, loadedAt: Date.now(), sessions };
+			return sessions;
+		}
 		const scopedListTasks: Array<Promise<SessionListItem[]>> = [];
 		let firstError: unknown;
 
@@ -1338,7 +1353,14 @@ export class SidebarProvider
 		sessionId: string,
 	): Promise<void> {
 		try {
-			await sessionDelete(sessionId, { timeoutMs: 60_000 });
+			if (await this.isV2Runtime()) {
+				await this.requestServeNoContent(
+					`/session/${encodeURIComponent(sessionId)}`,
+					{ method: "DELETE" },
+				);
+			} else {
+				await sessionDelete(sessionId, { timeoutMs: 60_000 });
+			}
 			this.invalidateSessionExportCache(sessionId);
 			this.respond(webview, {
 				type: "session.delete.response",
@@ -1749,8 +1771,16 @@ export class SidebarProvider
 		message?: string,
 	): Promise<void> {
 		try {
+			const pendingSessionId =
+				this.currentRun?.pendingPermission?.permissionId === permissionId
+					? this.currentRun.pendingPermission.sessionId
+					: undefined;
+			const sessionQuery =
+				pendingSessionId && await this.isV2Runtime()
+					? `?sessionID=${encodeURIComponent(pendingSessionId)}`
+					: "";
 			await this.requestServeJson<boolean>(
-				`/permission/${encodeURIComponent(permissionId)}/reply`,
+				`/permission/${encodeURIComponent(permissionId)}/reply${sessionQuery}`,
 				{
 					method: "POST",
 					body: JSON.stringify({ reply, message }),
@@ -1781,8 +1811,16 @@ export class SidebarProvider
 		answers: string[][],
 	): Promise<void> {
 		try {
+			const pendingSessionId =
+				this.currentRun?.pendingQuestion?.questionId === questionId
+					? this.currentRun.pendingQuestion.sessionId
+					: undefined;
+			const sessionQuery =
+				pendingSessionId && await this.isV2Runtime()
+					? `?sessionID=${encodeURIComponent(pendingSessionId)}`
+					: "";
 			await this.requestServeJson<boolean>(
-				`/question/${encodeURIComponent(questionId)}/reply`,
+				`/question/${encodeURIComponent(questionId)}/reply${sessionQuery}`,
 				{
 					method: "POST",
 					body: JSON.stringify({ answers }),
@@ -1809,8 +1847,16 @@ export class SidebarProvider
 		questionId: string,
 	): Promise<void> {
 		try {
+			const pendingSessionId =
+				this.currentRun?.pendingQuestion?.questionId === questionId
+					? this.currentRun.pendingQuestion.sessionId
+					: undefined;
+			const sessionQuery =
+				pendingSessionId && await this.isV2Runtime()
+					? `?sessionID=${encodeURIComponent(pendingSessionId)}`
+					: "";
 			await this.requestServeJson<boolean>(
-				`/question/${encodeURIComponent(questionId)}/reject`,
+				`/question/${encodeURIComponent(questionId)}/reject${sessionQuery}`,
 				{
 					method: "POST",
 				},
@@ -1855,18 +1901,17 @@ export class SidebarProvider
 	): Promise<void> {
 		try {
 			const cwd = this.getDefaultCwd();
+			const v2 = await this.isV2Runtime(cwd);
 			const [authResult, modelsResult] = await Promise.allSettled([
-				authList({ cwd }),
+				v2
+					? this.loadStoredProviderCredentials()
+					: authList({ cwd }).then((result) =>
+							parseAuthList(result.stdout),
+						),
 				this.getAllModelsPayload(forceRefresh),
 			]);
-			let authProviders: ReturnType<typeof parseAuthList> = [];
-			if (authResult.status === "fulfilled") {
-				try {
-					authProviders = parseAuthList(authResult.value.stdout);
-				} catch {
-					authProviders = [];
-				}
-			}
+			const authProviders =
+				authResult.status === "fulfilled" ? authResult.value : [];
 			const configuredLabels = this.readConfiguredProviderLabels();
 			const providerIds =
 				modelsResult.status === "fulfilled"
@@ -1999,7 +2044,9 @@ export class SidebarProvider
 				scope,
 				revision,
 				draft,
-				this.getProviderSettingsPathContext(),
+				this.getProviderSettingsPathContext(
+					await this.isV2Runtime() ? "v2" : "v1",
+				),
 			);
 			try {
 				await this.syncProviderCredential(draft);
@@ -2008,7 +2055,7 @@ export class SidebarProvider
 				throw new Error(`配置文件已保存，但 credential 更新失败：${detail}`);
 			}
 			try {
-				await restartServeForConfigChange(this.getDefaultCwd());
+				await this.reloadServeConfiguration();
 			} catch (error) {
 				const detail = error instanceof Error ? error.message : String(error);
 				throw new Error(`配置文件已保存，但 OpenCode 重新载入配置失败：${detail}`);
@@ -2038,9 +2085,11 @@ export class SidebarProvider
 				scope,
 				revision,
 				providerId,
-				this.getProviderSettingsPathContext(),
+				this.getProviderSettingsPathContext(
+					await this.isV2Runtime() ? "v2" : "v1",
+				),
 			);
-			await restartServeForConfigChange(this.getDefaultCwd());
+			await this.reloadServeConfiguration();
 			this.invalidateProviderCaches();
 			const snapshot = await this.buildProviderSettingsSnapshot(scope, true);
 			this.respond(webview, {
@@ -2225,25 +2274,43 @@ export class SidebarProvider
 		}
 	}
 
-	private getProviderSettingsPathContext(): ProviderSettingsPathOptions {
-		return { workspaceFolder: this.getDefaultCwd() };
+	private getProviderSettingsPathContext(
+		configVersion?: "v1" | "v2",
+	): ProviderSettingsPathOptions {
+		return {
+			workspaceFolder: this.getDefaultCwd(),
+			...(configVersion ? { configVersion } : {}),
+		};
 	}
 
 	private async buildProviderSettingsSnapshot(
 		scope: ProviderSettingsScope,
 		forceRefresh: boolean,
 	): Promise<ProviderSettingsSnapshot> {
+		const configVersion = await this.isV2Runtime() ? "v2" : "v1";
 		const [document, catalog, storedCredentials] = await Promise.all([
-			readProviderConfigDocument(scope, this.getProviderSettingsPathContext()),
+			readProviderConfigDocument(
+				scope,
+				this.getProviderSettingsPathContext(configVersion),
+			),
 			this.getProviderSettingsCatalog(forceRefresh),
 			this.loadStoredProviderCredentials(),
 		]);
 		const providerIdentities = new Map(
 			catalog.entries.map((entry) => [entry.id, { id: entry.id, label: entry.label }]),
 		);
-		const configuredProviders = isRecord(document.config.provider)
-			? document.config.provider
-			: {};
+		const configuredProviders = {
+			...(
+				isRecord(document.config.provider)
+					? document.config.provider
+					: {}
+			),
+			...(
+				isRecord(document.config.providers)
+					? document.config.providers
+					: {}
+			),
+		};
 		for (const [id, value] of Object.entries(configuredProviders)) {
 			const provider = isRecord(value) ? value : undefined;
 			providerIdentities.set(id, {
@@ -2263,6 +2330,7 @@ export class SidebarProvider
 			connectedProviderIds: catalog.connectedProviderIds,
 			storedCredentialProviderIds,
 			knownProviderIds: catalog.builtInProviderIds,
+			configVersion,
 		});
 		const catalogEntries = catalog.entries.map((entry) => ({
 			...entry,
@@ -2283,6 +2351,32 @@ export class SidebarProvider
 
 	private async loadStoredProviderCredentials(): Promise<ReturnType<typeof parseAuthList>> {
 		try {
+			if (await this.isV2Runtime()) {
+				const payload = await this.requestServeJson<unknown>("/auth");
+				return Array.isArray(payload)
+					? payload.flatMap((entry) => {
+							if (!isRecord(entry) || typeof entry.id !== "string") {
+								return [];
+							}
+							const method =
+								entry.type === "oauth"
+									? "oauth"
+									: entry.type === "api"
+										? "api"
+										: undefined;
+							return [
+								{
+									id: entry.id,
+									label:
+										typeof entry.label === "string"
+											? entry.label
+											: entry.id,
+									...(method ? { type: method } : {}),
+								},
+							];
+						})
+					: [];
+			}
 			const result = await authList({ cwd: this.getDefaultCwd(), timeoutMs: 10_000 });
 			return parseAuthList(result.stdout);
 		} catch {
@@ -2308,7 +2402,7 @@ export class SidebarProvider
 			return this.providerSettingsCatalogInFlight;
 		}
 
-		const task = this.loadProviderSettingsCatalog();
+		const task = this.loadProviderSettingsCatalog(forceRefresh);
 		this.providerSettingsCatalogInFlight = task;
 		try {
 			const catalog = await task;
@@ -2321,11 +2415,16 @@ export class SidebarProvider
 		}
 	}
 
-	private async loadProviderSettingsCatalog(): Promise<NormalizedProviderCatalog> {
+	private async loadProviderSettingsCatalog(
+		forceRefresh = false,
+	): Promise<NormalizedProviderCatalog> {
 		try {
 			const [providerPayload, authResult] = await Promise.all([
-				this.requestServeJson<unknown>("/provider"),
-				this.requestServeJson<unknown>("/provider/auth", { includeCwd: false }).catch((error) => {
+				this.requestServeJson<unknown>("/provider", { forceRefresh }),
+				this.requestServeJson<unknown>("/provider/auth", {
+					includeCwd: false,
+					forceRefresh,
+				}).catch((error) => {
 					const message = error instanceof Error ? error.message : String(error);
 					logWarn(`provider auth methods unavailable: ${message}`);
 					return {};
@@ -2340,9 +2439,13 @@ export class SidebarProvider
 	}
 
 	private async loadFallbackProviderSettingsCatalog(): Promise<NormalizedProviderCatalog> {
-		const [models, authResult] = await Promise.all([
+		const [models, authProviders] = await Promise.all([
 			this.getAllModelsPayload(false),
-			authList({ cwd: this.getDefaultCwd() }).catch(() => undefined),
+			(await this.isV2Runtime())
+				? this.loadStoredProviderCredentials()
+				: authList({ cwd: this.getDefaultCwd() })
+						.then((result) => parseAuthList(result.stdout))
+						.catch(() => []),
 		]);
 		const providers = new Map<string, Record<string, unknown>>();
 		for (const entry of models) {
@@ -2368,7 +2471,6 @@ export class SidebarProvider
 			};
 			providers.set(providerId, provider);
 		}
-		const authProviders = authResult ? parseAuthList(authResult.stdout) : [];
 		const authPayload = Object.fromEntries(
 			authProviders.map((provider) => [
 				provider.id,
@@ -2405,6 +2507,7 @@ export class SidebarProvider
 	private invalidateProviderCaches(): void {
 		this.providerSettingsCatalogCache = undefined;
 		this.modelsCache.clear();
+		this.serveClient.invalidateProviderCache();
 	}
 
 	private async handleAgentsListRequest(
@@ -2412,6 +2515,29 @@ export class SidebarProvider
 		requestId: string,
 	): Promise<void> {
 		try {
+			if (await this.isV2Runtime()) {
+				const rawAgents = await this.requestServeJson<unknown>("/agent");
+				const agents = Array.isArray(rawAgents)
+					? rawAgents.flatMap((entry) => {
+							if (!isRecord(entry) || typeof entry.id !== "string") {
+								return [];
+							}
+							return [
+								{
+									name: entry.id,
+									isPrimary: entry.isPrimary !== false,
+								},
+							];
+						})
+					: [];
+				this.respond(webview, {
+					type: "agents.list.response",
+					requestId,
+					ok: true,
+					payload: { agents },
+				});
+				return;
+			}
 			const result = await agentList({ cwd: this.getDefaultCwd() });
 			const entries = parseAgentList(result.stdout);
 			this.respond(webview, {
@@ -2687,19 +2813,30 @@ export class SidebarProvider
 	): Promise<void> {
 		const env = withOpencodeBinInPath();
 		const cwd = this.getDefaultCwd();
+		const v2 = await this.isV2Runtime(cwd);
 		const [health, sessions, models, agents] = await Promise.all([
 			this.checkServeHealth(),
 			this.safeCount(async () => {
+				if (v2) {
+					return (await this.getSessionListForCurrentScopes(true)).length;
+				}
 				const result = await sessionListJson({ env, cwd });
 				const parsed = parseSessionListJson(result.stdout);
 				return parsed.length;
 			}),
 			this.safeCount(async () => {
+				if (v2) {
+					return (await this.getAllModelsPayload(true)).length;
+				}
 				const result = await modelsList({ env, cwd });
 				const parsed = parseModelsList(result.stdout);
 				return parsed.length;
 			}),
 			this.safeCount(async () => {
+				if (v2) {
+					const payload = await this.requestServeJson<unknown>("/agent");
+					return Array.isArray(payload) ? payload.length : 0;
+				}
 				const result = await agentList({ env, cwd });
 				const parsed = parseAgentList(result.stdout);
 				return parsed.length;
@@ -2988,7 +3125,7 @@ export class SidebarProvider
 					webview,
 					requestId,
 					sessionId,
-					runtime.baseUrl,
+					runtime,
 					eventAbort.signal,
 					streamState,
 					markEventStreamReady,
@@ -3244,6 +3381,11 @@ export class SidebarProvider
 		}
 
 		try {
+			// OpenCode V2 ignores the client messageID on /command, so the
+			// server mints the user message id; claim it from the inbox event.
+			if (queued.payload.command) {
+				queued.idPending = true;
+			}
 			await this.sendPromptTurn(
 				sessionId,
 				{ ...queued.payload, sessionId },
@@ -3270,6 +3412,7 @@ export class SidebarProvider
 				return;
 			}
 			queued.delivery = "queued";
+			queued.idPending = false;
 			current.revision += 1;
 			this.postRunQueueState(webview);
 			const message = error instanceof Error ? error.message : String(error);
@@ -3281,15 +3424,44 @@ export class SidebarProvider
 	private observeQueuedUserMessage(
 		webview: vscode.Webview,
 		requestId: string,
-		messageId: string,
+		message: string | { id: string; text?: string },
 	): void {
 		const run = this.currentRun;
 		if (!run || run.requestId !== requestId) {
 			return;
 		}
-		const queued = run.queue.find(
-			(item) => item.delivery !== "queued" && item.messageId === messageId,
+		const messageID =
+			typeof message === "string" ? message : message.id;
+		const messageText =
+			typeof message === "string" ? undefined : message.text;
+		let queued = run.queue.find(
+			(item) =>
+				item.delivery !== "queued" && item.messageId === messageID,
 		);
+		if (!queued && messageText) {
+			const normalized = messageText.trim();
+			queued = run.queue.find((item) => {
+				if (item.delivery === "queued") {
+					return false;
+				}
+				const candidates = item.payload.command
+					? [
+							`/${item.payload.command.name} ${item.payload.command.arguments}`.trim(),
+							`/${item.payload.command.name}`,
+							item.payload.command.arguments,
+						]
+					: [item.payload.message];
+				return candidates.some((candidate) => candidate.trim() === normalized);
+			});
+			if (queued) {
+				queued.messageId = messageID;
+			}
+		}
+		if (!queued && messageText !== undefined) {
+			// V2 mints the id for slash commands, so the first enqueued user item
+			// after submitting one belongs to that command.
+			queued = adoptQueuedCommandMessage(run.queue, messageID);
+		}
 		if (!queued) {
 			return;
 		}
@@ -3802,7 +3974,7 @@ export class SidebarProvider
 		webview: vscode.Webview,
 		requestId: string,
 		sessionId: string,
-		baseUrl: string,
+		runtime: OpencodeServeEndpoint,
 		signal: AbortSignal,
 		streamState: ServeStreamState,
 		onReady?: () => void,
@@ -3810,7 +3982,7 @@ export class SidebarProvider
 		const lifecycle = this.createRunLifecycleAdapter(webview, requestId);
 		let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 		try {
-			const stream = await this.serveClient.openEventStream({ baseUrl }, signal);
+			const stream = await this.serveClient.openEventStream(runtime, signal);
 			reader = stream.getReader();
 			onReady?.();
 			const decoder = new TextDecoder();
@@ -3820,9 +3992,26 @@ export class SidebarProvider
 
 			while (!signal.aborted && !streamEnded) {
 				const next = await Promise.race([
-					pendingRead.then((result) => ({ type: "read" as const, result })),
+					pendingRead.then(
+						(result) => ({ type: "read" as const, result }),
+						(error: unknown) => ({ type: "readError" as const, error }),
+					),
 					delay(250, signal).then(() => ({ type: "poll" as const })),
 				]);
+				if (next.type === "readError") {
+					// V2 drops the stream when a slow consumer overflows, and the
+					// execution keeps running server-side. Fall back to polling
+					// instead of failing the whole turn.
+					const message =
+						next.error instanceof Error ? next.error.message : String(next.error);
+					logWarn(`serve event stream interrupted, falling back to polling: ${message}`);
+					console.warn(
+						"[opencode-ui] serve event stream interrupted, falling back to polling:",
+						message,
+					);
+					streamEnded = true;
+					continue;
+				}
 				if (next.type === "poll") {
 					if (
 						await this.isServeTurnIdle(sessionId, streamState)
@@ -3849,7 +4038,7 @@ export class SidebarProvider
 					continue;
 				}
 				pendingRead = reader.read();
-				buffer += decoder.decode(value, { stream: true });
+				buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
 				let boundary = buffer.indexOf("\n\n");
 				while (boundary >= 0) {
 					const chunk = buffer.slice(0, boundary);
@@ -3869,13 +4058,22 @@ export class SidebarProvider
 					} catch {
 						continue;
 					}
-					const result = dispatchServeEvent(
-						lifecycle,
-						requestId,
-						sessionId,
-						event,
-						streamState,
-					);
+					const result =
+						runtime.apiVersion === "v2"
+							? dispatchV2ServeEvent(
+									lifecycle,
+									requestId,
+									sessionId,
+									event,
+									streamState,
+								)
+							: dispatchServeEvent(
+									lifecycle,
+									requestId,
+									sessionId,
+									event,
+									streamState,
+								);
 					if (result.error) {
 						return new EmittedRunError(result.error);
 					}
@@ -3896,12 +4094,25 @@ export class SidebarProvider
 				}
 			}
 
+			// The stream is gone. Poll until the session is idle; if no live
+			// event ever arrived, stop waiting after a bounded grace so a fast
+			// turn that finished before the stream opened cannot hang forever.
+			const noEvidenceDeadline = Date.now() + STREAM_NO_EVIDENCE_GRACE_MS;
 			while (!signal.aborted) {
 				await pollServeBlockers(lifecycle, requestId, sessionId, streamState);
 				if (
 					canCompleteServeStreamTurn(streamState) &&
 					(await this.isServeTurnIdle(sessionId, streamState))
 				) {
+					return "done";
+				}
+				if (
+					Date.now() >= noEvidenceDeadline &&
+					(await this.isServeSessionIdle(sessionId))
+				) {
+					logWarn(
+						"serve turn finished without live events; completing from session status",
+					);
 					return "done";
 				}
 				await delay(250, signal).catch(() => undefined);
@@ -3911,6 +4122,15 @@ export class SidebarProvider
 			return error instanceof Error ? error : new Error(String(error));
 		} finally {
 			await reader?.cancel().catch(() => undefined);
+		}
+	}
+
+	private async isServeSessionIdle(sessionId: string): Promise<boolean> {
+		try {
+			const statuses = await this.requestServeJson<unknown>("/session/status");
+			return isSessionIdleStatus(statuses, sessionId);
+		} catch {
+			return false;
 		}
 	}
 
@@ -3996,7 +4216,7 @@ export class SidebarProvider
 				this.respondRunEvent(webview, requestId, event);
 			},
 			onUserMessage: (message) => {
-				this.observeQueuedUserMessage(webview, requestId, message.id);
+				this.observeQueuedUserMessage(webview, requestId, message);
 			},
 			onAssistantMessage: (message) => {
 				this.observeQueuedAssistantMessage(webview, requestId, message);
@@ -4199,6 +4419,12 @@ export class SidebarProvider
 	}
 
 	private async exportSessionWithFallback(sessionId: string): Promise<string> {
+		if (await this.isV2Runtime()) {
+			const payload = await this.requestServeJson<unknown>(
+				`/session/${encodeURIComponent(sessionId)}/export`,
+			);
+			return JSON.stringify(payload);
+		}
 		const cwd = this.getDefaultCwd();
 		if (cwd) {
 			try {
@@ -4383,20 +4609,24 @@ export class SidebarProvider
 		}
 
 		const task = (async (): Promise<CachedModelEntry[]> => {
-			const models = await this.getVerboseModelsPayload().catch(
-				async (error) => {
-					const message =
-						error instanceof Error ? error.message : String(error);
-					logWarn(
-						`models --verbose failed, falling back to models: ${message}`,
+			const models = (await this.isV2Runtime())
+					? readCachedModelEntries(
+							await this.requestServeJson<unknown>("/model"),
+						)
+				: await this.getVerboseModelsPayload().catch(
+						async (error) => {
+							const message =
+								error instanceof Error ? error.message : String(error);
+							logWarn(
+								`models --verbose failed, falling back to models: ${message}`,
+							);
+							const result = await modelsList({ cwd: this.getDefaultCwd() });
+							return parseModelsList(result.stdout).map((entry) => ({
+								name: entry.modelName,
+								providerID: entry.providerID,
+							}));
+						},
 					);
-					const result = await modelsList({ cwd: this.getDefaultCwd() });
-					return parseModelsList(result.stdout).map((entry) => ({
-						name: entry.modelName,
-						providerID: entry.providerID,
-					}));
-				},
-			);
 			this.modelsCache.set(cacheKey, {
 				loadedAt: Date.now(),
 				models,
@@ -4443,7 +4673,22 @@ export class SidebarProvider
 			body: init?.body,
 			includeCwd: init?.includeCwd ?? true,
 			signal: init?.signal,
+			forceRefresh: init?.forceRefresh,
 		});
+	}
+
+	private async isV2Runtime(cwd = this.getDefaultCwd()): Promise<boolean> {
+		return this.serveClient.isV2(cwd);
+	}
+
+	private async reloadServeConfiguration(): Promise<void> {
+		if (await this.isV2Runtime()) {
+			await this.requestServeNoContent("/config/reload", {
+				method: "POST",
+			});
+			return;
+		}
+		await restartServeForConfigChange(this.getDefaultCwd());
 	}
 
 	private readConfiguredProviderLabels(): Map<string, string> {
@@ -4755,6 +5000,71 @@ function parseSessionMessageRecords(value: unknown): ExportMessageRecord[] {
 		}
 		return { info: message.info, parts: message.parts };
 	});
+}
+
+function readSessionListItem(value: unknown): SessionListItem[] {
+	if (!isRecord(value)) {
+		return [];
+	}
+	if (
+		typeof value.id !== "string" ||
+		typeof value.title !== "string" ||
+		typeof value.updated !== "string" ||
+		typeof value.created !== "string" ||
+		typeof value.projectId !== "string" ||
+		typeof value.directory !== "string"
+	) {
+		return [];
+	}
+	if (typeof value.parentID === "string" && value.parentID.length > 0) {
+		return [];
+	}
+	return [
+		{
+			id: value.id,
+			title: value.title,
+			updated: value.updated,
+			created: value.created,
+			projectId: value.projectId,
+			directory: value.directory,
+		},
+	];
+}
+
+function readCachedModelEntry(value: unknown): CachedModelEntry[] {
+	if (!isRecord(value)) {
+		return [];
+	}
+	if (
+		typeof value.name !== "string" ||
+		typeof value.providerID !== "string" ||
+		value.providerID.trim().length === 0
+	) {
+		return [];
+	}
+	const variants = Array.isArray(value.variants)
+		? value.variants.filter(
+				(item): item is string => typeof item === "string",
+			)
+		: undefined;
+	return [
+		{
+			name: value.name,
+			providerID: value.providerID,
+			...(variants && variants.length > 0 ? { variants } : {}),
+			...(value.supportsThinking === true
+				? { supportsThinking: true }
+				: {}),
+			...(typeof value.contextWindow === "number" &&
+			Number.isFinite(value.contextWindow)
+				? { contextWindow: value.contextWindow }
+				: {}),
+		},
+	];
+}
+
+function readCachedModelEntries(value: unknown): CachedModelEntry[] {
+	return Array.isArray(value) ? value.flatMap(readCachedModelEntry) : [];
 }
 
 function buildTimelineItems(payload: {

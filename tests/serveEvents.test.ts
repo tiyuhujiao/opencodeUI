@@ -524,6 +524,29 @@ describe("run lifecycle serve event dispatch", () => {
 		expect(streamState.pendingQuestionIds.has("question-orphan")).toBe(true);
 	});
 
+	it("skips the session tree when there are no pending blockers", async () => {
+		const requestServeJson = vi.fn(async (pathname: string) => {
+			if (pathname === "/permission" || pathname === "/question") {
+				return [];
+			}
+			throw new Error(`Unexpected path ${pathname}`);
+		});
+		const lifecycle = createLifecycle({
+			posted: [],
+			currentRequestId: "request-1",
+			requestServeJson,
+		});
+		const streamState = createServeStreamState();
+
+		await expect(
+			pollServeBlockers(lifecycle, "request-1", "parent-session", streamState),
+		).resolves.toBe(0);
+		expect(requestServeJson.mock.calls.map(([path]) => path)).toEqual([
+			"/permission",
+			"/question",
+		]);
+	});
+
 	it("按 assistant message id 过滤并转发文本 part", () => {
 		const posted: unknown[] = [];
 		const lifecycle = createLifecycle({ posted });

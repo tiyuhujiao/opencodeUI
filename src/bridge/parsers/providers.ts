@@ -34,17 +34,21 @@ export function buildProviderSummaries(
 
 export function extractConfiguredProviderLabels(config: unknown): Map<string, string> {
   const labels = new Map<string, string>();
-  if (!isRecord(config) || !isRecord(config.provider)) {
+  if (!isRecord(config)) {
     return labels;
   }
 
-  for (const [providerID, value] of Object.entries(config.provider)) {
-    if (!providerID.trim()) {
+  for (const providers of [config.provider, config.providers]) {
+    if (!isRecord(providers)) {
       continue;
     }
-
-    const configuredName = isRecord(value) && typeof value.name === 'string' ? value.name.trim() : '';
-    labels.set(providerID, configuredName || providerID);
+    for (const [providerID, value] of Object.entries(providers)) {
+      if (!providerID.trim()) {
+        continue;
+      }
+      const configuredName = isRecord(value) && typeof value.name === 'string' ? value.name.trim() : '';
+      labels.set(providerID, configuredName || providerID);
+    }
   }
 
   return labels;

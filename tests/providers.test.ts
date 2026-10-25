@@ -51,4 +51,16 @@ describe('buildProviderSummaries', () => {
       { id: 'CPA8317', label: 'CPA8317' }
     ]);
   });
+
+  it('读取 V2 providers 中的显示名称', () => {
+    const configured = extractConfiguredProviderLabels({
+      providers: {
+        acme: {
+          name: 'Acme V2'
+        }
+      }
+    });
+
+    expect(configured.get('acme')).toBe('Acme V2');
+  });
 });

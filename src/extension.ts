@@ -39,6 +39,16 @@ export function activate(context: vscode.ExtensionContext): void {
     getLastPort: () => context.globalState.get<number>(lastPortKey),
     setLastPort: async (port: number) => {
       await context.globalState.update(lastPortKey, port);
+    },
+    getPassword: (port: number) =>
+      context.secrets.get(buildServePasswordKey(lastPortKey, port)),
+    setPassword: async (port: number, password: string | undefined) => {
+      const key = buildServePasswordKey(lastPortKey, port);
+      if (password) {
+        await context.secrets.store(key, password);
+      } else {
+        await context.secrets.delete(key);
+      }
     }
   });
 
@@ -115,4 +125,8 @@ export function resolveHostKind(remoteName: string | undefined, platform: NodeJS
 export function buildLastPortKey(hostKind: HostKind, remoteName: string | undefined): string {
   const scope = `${hostKind}:${remoteName ?? 'local'}`.replace(/[^A-Za-z0-9._:-]+/g, '-');
   return `${LAST_PORT_KEY_PREFIX}.${scope}`;
+}
+
+export function buildServePasswordKey(lastPortKey: string, port: number): string {
+  return `${lastPortKey}.password.${String(port)}`;
 }

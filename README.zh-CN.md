@@ -8,7 +8,7 @@
 
 OpenCode 很强大，但使用它不应该意味着反复切换编辑器、终端和配置文件。我们设计 `opencode-ui`，是希望在 VS Code 中提供一个清晰、顺手的可视化界面，让对话、工具、模型选择与代码改动都留在工作发生的地方。
 
-`1.0.1` 在彻底设计与重构后的扩展基础上，正式加入对 Apple Silicon 与 Intel Mac 的完整支持。扩展可以自动发现通过官方安装脚本、Homebrew、MacPorts 和常见 JavaScript 包管理器安装的 OpenCode，并在所有受支持的宿主环境中保持一致的可视化工作流。
+`1.0.22` 同时支持 OpenCode v1 服务 API 与 OpenCode v2 API。扩展会在运行时自动识别接口版本，因此从 OpenCode v1 升级到 v2 后可以继续使用同一套侧边栏工作流。兼容性已使用 OpenCode `2.1.4` 验证。
 
 ## 界面预览
 
@@ -25,11 +25,15 @@ OpenCode 很强大，但使用它不应该意味着反复切换编辑器、终�
 
 扩展可运行于 VS Code、Cursor 及其他兼容 VS Code 的宿主。请将 OpenCode CLI 安装在扩展实际运行的同一本机或远端环境中。
 
-## 1.0.1 新增内容
-
-### macOS 支持
+## macOS 支持
 
 现在可以在 macOS 上直接使用完整的侧边栏工作流，不需要额外配置扩展。无论通过官方安装脚本、Homebrew、npm、Bun、pnpm、Yarn、Mise 或 MacPorts 安装 OpenCode，`opencode-ui` 都会查找常见的 CLI 位置；即使从 Finder 打开 VS Code、环境中的 `PATH` 较短，也能正确找到 OpenCode。
+
+## OpenCode v1 与 v2 兼容
+
+扩展会自动探测正在运行的 OpenCode 服务，并针对识别到的 API 适配会话、流式事件、工具、权限、问题表单、供应商、模型、agents、commands、skills、MCP、导出、Diff、回退与 Fork。由扩展启动的 v2 服务会自动获得生成的密码，并遵循 OpenCode 的 Basic 认证约定。
+
+如果需要连接由其他程序启动的 v2 服务，请让扩展进程获得相同的密码：设置 `OPENCODE_PASSWORD`，或使用兼容旧名称 `OPENCODE_SERVER_PASSWORD`。
 
 ## 核心功能
 
@@ -61,13 +65,13 @@ OpenCode 修改代码后，可以直接在编辑器里查看 inline diff。新�
 
 ## 使用前提
 
-请先在 VS Code 扩展实际运行的本机或远端环境中安装 [OpenCode CLI](https://opencode.ai/)：
+请先在 VS Code 扩展实际运行的本机或远端环境中安装 OpenCode v1 或 v2：
 
 ```bash
 opencode --version
 ```
 
-这是唯一必需的运行依赖。`opencode-ui` 会自动查找 CLI，并在需要时启动 `opencode serve`。
+这是唯一必需的运行依赖。`opencode-ui` 会自动查找 CLI、启动 `opencode serve`、识别 API 版本，并在需要时配置服务认证。v2 API 与安全机制可参阅 [OpenCode v2 文档](https://opencode.ai/v2/docs/)。
 
 ## 安装
 

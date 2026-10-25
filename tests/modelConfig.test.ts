@@ -35,4 +35,27 @@ describe('model config metadata', () => {
       contextWindow: 128000
     });
   });
+
+  it('读取 V2 providers 数组中的变体与上下文窗口', () => {
+    const models = extractConfiguredModelMetadata({
+      providers: {
+        openai: {
+          models: {
+            'gpt-5.2': {
+              variants: [
+                { id: 'high', settings: { reasoningEffort: 'high' } },
+                { id: 'fast', body: { service_tier: 'priority' } }
+              ],
+              limit: { context: 400000 }
+            }
+          }
+        }
+      }
+    });
+
+    expect(models.get('openai/gpt-5.2')).toEqual({
+      variants: ['high', 'fast'],
+      contextWindow: 400000
+    });
+  });
 });

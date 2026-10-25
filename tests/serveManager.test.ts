@@ -18,7 +18,8 @@ vi.mock('node:child_process', () => ({
 }));
 
 type HealthScenario =
-  | { type: 'status'; statusCode: number }
+  | { type: 'status'; statusCode: number; body?: unknown }
+  | { type: 'v2'; version: string }
   | { type: 'error' }
   | { type: 'timeout' };
 
@@ -80,7 +81,12 @@ function configureHealthResponses(
 ): number[] {
   const calledPorts: number[] = [];
 
-  requestMock.mockImplementation((options: { port?: number }, callback: (res: { statusCode?: number; resume: () => void }) => void) => {
+  requestMock.mockImplementation((options: { port?: number; path?: string; headers?: Record<string, string> }, callback: (res: {
+    statusCode?: number
+    resume: () => void
+    on: (event: string, listener: (chunk?: Buffer) => void) => void
+    destroy: () => void
+  }) => void) => {
     const port = Number(options.port);
     calledPorts.push(port);
 
@@ -104,10 +110,32 @@ function configureHealthResponses(
           return;
         }
 
-        callback({
-          statusCode: scenario.statusCode,
-          resume: () => {}
-        });
+        const listeners = new Map<string, (chunk?: Buffer) => void>()
+        const isV2Info = scenario.type === 'v2' && options.path === '/api/info';
+        const response = {
+          statusCode:
+            scenario.type === 'v2'
+              ? isV2Info
+                ? 200
+                : 404
+              : scenario.statusCode,
+          resume: () => {},
+          destroy: () => {},
+          on: (event: string, listener: (chunk?: Buffer) => void) => {
+            listeners.set(event, listener)
+            if (event === 'data') {
+              listener(Buffer.from(JSON.stringify(
+                scenario.type === 'v2'
+                  ? { version: scenario.version }
+                  : scenario.body ?? { healthy: true, version: '1.18.21' }
+              )))
+            }
+            if (event === 'end') {
+              listener()
+            }
+          }
+        }
+        callback(response);
       })
     };
 
@@ -173,11 +201,23 @@ async function setup(lastPort: number | undefined) {
   execFileMock.mockReset();
 
   const setLastPort = vi.fn(async () => {});
+  const storedPasswords = new Map<number, string>();
+  const setPassword = vi.fn(
+    async (port: number, password: string | undefined) => {
+      if (password) {
+        storedPasswords.set(port, password);
+      } else {
+        storedPasswords.delete(port);
+      }
+    },
+  );
 
   const serveManager = await import('../src/bridge/serveManager');
   serveManager.configureServePortStorage({
     getLastPort: () => lastPort,
-    setLastPort
+    setLastPort,
+    getPassword: (port: number) => storedPasswords.get(port),
+    setPassword
   });
 
   return {
@@ -187,7 +227,9 @@ async function setup(lastPort: number | undefined) {
     spawnMock,
     execFileMock,
     opencodeEnv,
-    setLastPort
+    setLastPort,
+    setPassword,
+    storedPasswords
   };
 }
 
@@ -195,6 +237,8 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  delete process.env.OPENCODE_PASSWORD;
+  delete process.env.OPENCODE_SERVER_PASSWORD;
 });
 
 describe('ensureServeRunning 端口策略', () => {
@@ -242,6 +286,171 @@ describe('ensureServeRunning 端口策略', () => {
     expect(calledPorts).toEqual([5111]);
     expect(setLastPort).toHaveBeenCalledWith(5111);
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('识别 V2 健康端点，并携带 OPENCODE_PASSWORD 完成 Basic Auth 探测', async () => {
+    const { serveManager, requestMock, spawnMock } = await setup(5111);
+    process.env.OPENCODE_PASSWORD = 'secret';
+    const calledPaths: string[] = [];
+    requestMock.mockImplementation((options: { path?: string; headers?: Record<string, string> }, callback: (res: {
+      statusCode?: number
+      resume: () => void
+      on: (event: string, listener: (chunk?: Buffer) => void) => void
+      destroy: () => void
+    }) => void) => {
+      calledPaths.push(options.path ?? '');
+      const isInfo = options.path === '/api/info';
+      expect(options.headers?.authorization).toBe(
+        `Basic ${Buffer.from('opencode:secret').toString('base64')}`,
+      );
+      const response = {
+        statusCode: isInfo ? 200 : 404,
+        resume: () => {},
+        destroy: () => {},
+        on: (event: string, listener: (chunk?: Buffer) => void) => {
+          if (isInfo && event === 'data') {
+            listener(Buffer.from(JSON.stringify({ version: '2.1.2' })));
+          }
+          if (isInfo && event === 'end') {
+            listener();
+          }
+        },
+      };
+      callback(response);
+      return {
+        on: vi.fn(),
+        destroy: vi.fn(),
+        end: vi.fn(),
+      };
+    });
+
+    await expect(serveManager.ensureServeRunning('/workspace')).resolves.toMatchObject({
+      port: 5111,
+      apiVersion: 'v2',
+      version: '2.1.2',
+      password: 'secret',
+      startedByManager: false,
+    });
+    expect(calledPaths).toEqual(['/global/health', '/api/info']);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('复用候选 V2 runtime 时使用持久化密码', async () => {
+    const { serveManager, requestMock, spawnMock, storedPasswords } = await setup(5111);
+    storedPasswords.set(5111, 'stored-secret');
+    const calledPaths: string[] = [];
+    requestMock.mockImplementation((options: { path?: string; headers?: Record<string, string> }, callback: (res: {
+      statusCode?: number
+      resume: () => void
+      on: (event: string, listener: (chunk?: Buffer) => void) => void
+      destroy: () => void
+    }) => void) => {
+      calledPaths.push(options.path ?? '');
+      const isInfo = options.path === '/api/info';
+      expect(options.headers?.authorization).toBe(
+        `Basic ${Buffer.from('opencode:stored-secret').toString('base64')}`,
+      );
+      const response = {
+        statusCode: isInfo ? 200 : 404,
+        resume: () => {},
+        destroy: () => {},
+        on: (event: string, listener: (chunk?: Buffer) => void) => {
+          if (isInfo && event === 'data') {
+            listener(Buffer.from(JSON.stringify({ version: '2.1.4' })));
+          }
+          if (isInfo && event === 'end') {
+            listener();
+          }
+        },
+      };
+      callback(response);
+      return {
+        on: vi.fn(),
+        destroy: vi.fn(),
+        end: vi.fn(),
+      };
+    });
+
+    await expect(serveManager.ensureServeRunning('/workspace')).resolves.toMatchObject({
+      port: 5111,
+      apiVersion: 'v2',
+      version: '2.1.4',
+      password: 'stored-secret',
+      startedByManager: false,
+    });
+    expect(calledPaths).toEqual(['/global/health', '/api/info']);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('启动受管 V2 服务后持久化生成密码', async () => {
+    vi.useFakeTimers();
+    const { serveManager, requestMock, createServerMock, spawnMock, setPassword } =
+      await setup(undefined);
+    configureHealthResponses(requestMock, {
+      4096: { type: 'error' },
+      5522: { type: 'v2', version: '2.1.4' }
+    });
+    configureNetServers(createServerMock, [
+      { type: 'error' },
+      { type: 'listening', addressPort: 5522 }
+    ]);
+    const child = new FakeChildProcess();
+    spawnMock.mockReturnValue(child as never);
+
+    const runtimePromise = serveManager.ensureServeRunning();
+    await vi.advanceTimersByTimeAsync(350);
+    const runtime = await runtimePromise;
+
+    const env = spawnMock.mock.calls[0]?.[2]?.env as NodeJS.ProcessEnv;
+    expect(runtime).toMatchObject({
+      port: 5522,
+      apiVersion: 'v2',
+      startedByManager: true
+    });
+    expect(env.OPENCODE_PASSWORD).toBeTruthy();
+    expect(runtime.password).toBe(env.OPENCODE_PASSWORD);
+    expect(setPassword).toHaveBeenCalledWith(5522, env.OPENCODE_PASSWORD);
+  });
+
+  it('已知 V2 runtime 时优先只探测 /api/info', async () => {
+    const { serveManager, requestMock } = await setup(undefined);
+    const calledPaths: string[] = [];
+    requestMock.mockImplementation((options: { path?: string }, callback: (res: {
+      statusCode?: number
+      resume: () => void
+      on: (event: string, listener: (chunk?: Buffer) => void) => void
+      destroy: () => void
+    }) => void) => {
+      calledPaths.push(options.path ?? '');
+      const response = {
+        statusCode: options.path === '/api/info' ? 200 : 404,
+        resume: () => {},
+        destroy: () => {},
+        on: (event: string, listener: (chunk?: Buffer) => void) => {
+          if (options.path === '/api/info' && event === 'data') {
+            listener(Buffer.from(JSON.stringify({ version: '2.1.4' })));
+          }
+          if (options.path === '/api/info' && event === 'end') {
+            listener();
+          }
+        },
+      };
+      callback(response);
+      return {
+        on: vi.fn(),
+        destroy: vi.fn(),
+        end: vi.fn(),
+      };
+    });
+
+    await expect(
+      serveManager.probeServeRuntime(5111, 'secret', 'v2'),
+    ).resolves.toMatchObject({
+      apiVersion: 'v2',
+      version: '2.1.4',
+      password: 'secret'
+    });
+    expect(calledPaths).toEqual(['/api/info']);
   });
 
   it('Windows 路径根目录比较兼容斜杠与盘符大小写', async () => {
@@ -364,7 +573,7 @@ describe('ensureServeRunning 端口策略', () => {
       baseUrl: 'http://127.0.0.1:4096',
       startedByManager: false
     });
-    expect(calledPorts).toEqual([5111, 4096]);
+    expect([...new Set(calledPorts)]).toEqual([5111, 4096]);
     expect(setLastPort).toHaveBeenCalledWith(4096);
     expect(spawnMock).not.toHaveBeenCalled();
   });
@@ -433,7 +642,7 @@ describe('ensureServeRunning 端口策略', () => {
       baseUrl: 'http://127.0.0.1:5522',
       startedByManager: true
     });
-    expect(calledPorts).toEqual([5111, 4096, 5522]);
+    expect([...new Set(calledPorts)]).toEqual([5111, 4096, 5522]);
     expect(spawnMock).toHaveBeenCalledWith(
       'opencode',
       ['serve', '--hostname', '127.0.0.1', '--port', '5522'],
@@ -577,5 +786,58 @@ describe('ensureServeRunning 端口策略', () => {
     await runtimePromise;
 
     expect(spawnMock.mock.calls[0]?.[0]).toBe(expectedBinary);
+  });
+
+  it('切换 runtime 后清除旧端口的持久化密码', async () => {
+    vi.useFakeTimers();
+    const {
+      serveManager,
+      requestMock,
+      createServerMock,
+      spawnMock,
+      execFileMock,
+      setPassword,
+      storedPasswords
+    } = await setup(undefined);
+    configureHealthResponses(requestMock, {
+      4096: { type: 'error' },
+      5522: { type: 'v2', version: '2.1.4' },
+      6633: { type: 'v2', version: '2.1.4' }
+    });
+    configureNetServers(createServerMock, [
+      { type: 'error' },
+      { type: 'listening', addressPort: 5522 },
+      { type: 'listening', addressPort: 6633 }
+    ]);
+    const firstChild = new FakeChildProcess();
+    firstChild.pid = 4201;
+    const secondChild = new FakeChildProcess();
+    secondChild.pid = 4202;
+    spawnMock
+      .mockReturnValueOnce(firstChild as never)
+      .mockReturnValueOnce(secondChild as never);
+    execFileMock.mockImplementation(((_file, _args, _options, callback) => {
+      callback(null, '', '');
+      return firstChild as never;
+    }) as never);
+
+    const firstRuntime = serveManager.ensureServeRunning();
+    await vi.advanceTimersByTimeAsync(350);
+    await expect(firstRuntime).resolves.toMatchObject({
+      port: 5522,
+      apiVersion: 'v2'
+    });
+    expect(storedPasswords.get(5522)).toBeTruthy();
+
+    const restart = serveManager.restartServeForConfigChange();
+    await vi.advanceTimersByTimeAsync(350);
+    await expect(restart).resolves.toMatchObject({
+      port: 6633,
+      apiVersion: 'v2'
+    });
+
+    expect(setPassword).toHaveBeenCalledWith(5522, undefined);
+    expect(storedPasswords.has(5522)).toBe(false);
+    expect(storedPasswords.get(6633)).toBeTruthy();
   });
 });

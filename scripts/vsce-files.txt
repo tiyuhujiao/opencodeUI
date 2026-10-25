@@ -6,6 +6,7 @@ docs/**
 github-upload/**
 scripts/**
 .tmp/**
+.kilo/**
 .vscode-test/**
 .playwright-cli/**
 .vscode/**

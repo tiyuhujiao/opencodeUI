@@ -38,8 +38,8 @@ const assert = __importStar(require("node:assert"));
 const vscode = __importStar(require("vscode"));
 const node_fs_1 = require("node:fs");
 const path = __importStar(require("node:path"));
-const opencodeDirectory_1 = require("../../bridge/opencodeDirectory");
 const serveManager_1 = require("../../bridge/serveManager");
+const opencodeServeClient_1 = require("../../bridge/opencodeServeClient");
 const extension_1 = require("../../extension");
 const inlineDiff_1 = require("../../inlineDiff");
 function delay(ms) {
@@ -90,29 +90,26 @@ async function verifyServeWorkspaceDirectory() {
     assert.match(cwd, /\u4e2d\u6587/u, '扩展宿主必须在仓库外的中文路径中验证');
     const pathResponse = await (0, serveManager_1.requestServeJson)('/path', cwd);
     assert.equal(normalizeDirectory(pathResponse.directory), normalizeDirectory(cwd), '/path 应解析为当前 VS Code 工作区');
-    const runtime = await (0, serveManager_1.ensureServeRunning)(cwd);
-    const headers = {
-        'Content-Type': 'application/json',
-        'x-opencode-directory': (0, opencodeDirectory_1.encodeOpencodeDirectory)(cwd)
-    };
+    const serveClient = new opencodeServeClient_1.OpencodeServeClient({
+        ensureRuntime: (requestedCwd) => (0, serveManager_1.ensureServeRunning)(requestedCwd ?? cwd),
+        getDefaultCwd: () => cwd
+    });
     let sessionId;
     try {
-        const response = await fetch(`${runtime.baseUrl}/session`, {
+        const session = await serveClient.requestJson('/session', {
             method: 'POST',
-            headers,
-            body: JSON.stringify({ title: 'OpenCode UI workspace smoke test' })
+            cwd,
+            body: JSON.stringify({ title: 'OpenCode UI workspace smoke test' }),
         });
-        assert.equal(response.ok, true, `创建 workspace smoke session 失败（${String(response.status)}）`);
-        const session = (await response.json());
         sessionId = session.id;
         assert.ok(sessionId, 'OpenCode 应返回 workspace smoke session ID');
-        assert.equal(normalizeDirectory(session.directory), normalizeDirectory(cwd), '新 session 应绑定当前 VS Code 工作区');
+        assert.equal(normalizeDirectory(session.directory), normalizeDirectory(cwd), `新 session 应绑定当前 VS Code 工作区（session=${String(session.directory)}，workspace=${cwd}）`);
     }
     finally {
         if (sessionId) {
-            await fetch(`${runtime.baseUrl}/session/${encodeURIComponent(sessionId)}`, {
+            await serveClient.requestNoContent(`/session/${encodeURIComponent(sessionId)}`, {
                 method: 'DELETE',
-                headers
+                cwd,
             });
         }
     }

@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import * as http from 'node:http';
 import * as net from 'node:net';
 import { homedir } from 'node:os';
@@ -8,8 +9,10 @@ import { OpencodeServeClient } from './opencodeServeClient';
 
 const HOSTNAME = '127.0.0.1';
 const HEALTH_PATH = '/global/health';
+const V2_INFO_PATH = '/api/info';
 const ANSI_ESCAPE_PATTERN = new RegExp('\\x1b\\[[0-?]*[ -/]*[@-~]', 'g');
 const PATH_PATH = '/path';
+const V2_LOCATION_PATH = '/api/location';
 const PREFERRED_PORT = 4096;
 const HEALTH_CHECK_TIMEOUT_MS = 1_000;
 const PATH_CHECK_TIMEOUT_MS = 1_000;
@@ -20,12 +23,23 @@ export interface ServeRuntime {
   port: number;
   baseUrl: string;
   startedByManager: boolean;
+  apiVersion: 'v1' | 'v2';
+  version?: string;
+  password?: string;
 }
 
 export interface ServePortStorage {
   getLastPort(): number | undefined;
   setLastPort(port: number): Thenable<void> | Promise<void> | void;
+  getPassword?(port: number): Thenable<string | undefined> | Promise<string | undefined> | string | undefined;
+  setPassword?(port: number, password: string | undefined): Thenable<void> | Promise<void> | void;
 }
+
+type ProbedRuntime = {
+  apiVersion: 'v1' | 'v2';
+  version?: string;
+  password?: string;
+};
 
 let ensurePromise: Promise<ServeRuntime> | undefined;
 let ensurePromiseWorkspaceRoot: string | undefined;
@@ -33,6 +47,7 @@ let restartPromise: Promise<ServeRuntime> | undefined;
 let restartPromiseWorkspaceRoot: string | undefined;
 let currentPort: number | undefined;
 let currentRuntimeDirectory: string | undefined;
+let currentRuntime: ServeRuntime | undefined;
 let managedPort: number | undefined;
 let managedStartDirectory: string | undefined;
 let managedChild: ChildProcess | undefined;
@@ -59,9 +74,13 @@ export function disposeServeManager(): Promise<void> {
 	if (currentPort === port) {
 		currentPort = undefined;
 		currentRuntimeDirectory = undefined;
+		currentRuntime = undefined;
 	}
 	const pending = child ? stopManagedChild(child) : Promise.resolve();
-	const promise = pending.finally(() => {
+	const promise = pending.finally(async () => {
+		if (port) {
+			await persistStoredPassword(port, undefined);
+		}
 		if (disposePromise === promise) {
 			disposePromise = undefined;
 		}
@@ -130,20 +149,33 @@ export async function requestServeJson<T>(pathname: string, cwd?: string): Promi
 }
 
 async function ensureServeRunningInternal(cwd?: string): Promise<ServeRuntime> {
-	if (currentPort && (await probeHealth(currentPort))) {
+	if (currentPort) {
+		const password =
+			currentRuntime?.password ?? (await readStoredPassword(currentPort));
+		const probed = await probeServeRuntime(
+			currentPort,
+			password,
+			currentRuntime?.apiVersion,
+		);
+		if (probed) {
 		const compatibility = await inspectRuntimeCompatibility(
 			currentPort,
 			cwd,
 			currentRuntimeDirectory ?? getManagedStartDirectory(currentPort),
+			probed,
 		);
 		if (compatibility.compatible) {
 			currentRuntimeDirectory = compatibility.directory;
 			await persistLastPort(currentPort);
-			return buildRuntime(currentPort, isManagedPort(currentPort));
+			currentRuntime = buildRuntime(currentPort, isManagedPort(currentPort), probed);
+			return currentRuntime;
 		}
-	} else if (currentPort) {
-		currentPort = undefined;
-		currentRuntimeDirectory = undefined;
+		} else {
+			await warnUnauthorizedRuntime(currentPort);
+			currentPort = undefined;
+			currentRuntimeDirectory = undefined;
+			currentRuntime = undefined;
+		}
 	}
 
   const lastPort = readLastPort();
@@ -158,17 +190,22 @@ async function ensureServeRunningInternal(cwd?: string): Promise<ServeRuntime> {
   }
 
 	for (const candidatePort of candidatePorts) {
-		if (await probeHealth(candidatePort)) {
+		const password =
+			readEnvironmentPassword() ?? (await readStoredPassword(candidatePort));
+		const probed = await probeServeRuntime(candidatePort, password);
+		if (probed) {
 			const compatibility = await inspectRuntimeCompatibility(
 				candidatePort,
 				cwd,
 				getManagedStartDirectory(candidatePort),
+				probed,
 			);
 			if (compatibility.compatible) {
 				currentPort = candidatePort;
 				currentRuntimeDirectory = compatibility.directory;
 				await persistLastPort(candidatePort);
-				return buildRuntime(candidatePort, isManagedPort(candidatePort));
+				currentRuntime = buildRuntime(candidatePort, isManagedPort(candidatePort), probed);
+				return currentRuntime;
 			}
 		}
 	}
@@ -177,27 +214,30 @@ async function ensureServeRunningInternal(cwd?: string): Promise<ServeRuntime> {
   let targetPort = preferredUsable ? PREFERRED_PORT : await findFreePort();
 	const startDirectory = resolveServeStartupDirectory(cwd);
 	const previousChild = managedChild;
-	let child: ChildProcess;
+	const previousPort = managedPort;
+	let started: Awaited<ReturnType<typeof startServe>>;
 
   try {
-		child = await startServe(targetPort, startDirectory);
+		started = await startServe(targetPort, startDirectory);
 	} catch (error) {
 		if (targetPort !== PREFERRED_PORT) {
 			throw error;
 		}
 
 		targetPort = await findFreePort();
-		child = await startServe(targetPort, startDirectory);
+		started = await startServe(targetPort, startDirectory);
 	}
 
-	activateManagedRuntime(child, targetPort, startDirectory);
+	activateManagedRuntime(started.child, targetPort, startDirectory);
   currentPort = targetPort;
 	currentRuntimeDirectory = startDirectory;
+	currentRuntime = buildRuntime(targetPort, true, started.runtime);
   await persistLastPort(targetPort);
-	if (previousChild && previousChild !== child) {
+	if (previousChild && previousChild !== started.child) {
 		await stopManagedChild(previousChild);
+		await forgetStoredPassword(previousPort, targetPort);
 	}
-	return buildRuntime(targetPort, true);
+	return currentRuntime;
 }
 
 async function restartServeForConfigChangeInternal(cwd?: string): Promise<ServeRuntime> {
@@ -207,18 +247,21 @@ async function restartServeForConfigChangeInternal(cwd?: string): Promise<ServeR
 
 	const targetPort = await findFreePort();
 	const previousChild = managedChild;
+	const previousPort = managedPort;
 	const startDirectory = resolveServeStartupDirectory(cwd);
-	const child = await startServe(targetPort, startDirectory);
-	activateManagedRuntime(child, targetPort, startDirectory);
+	const started = await startServe(targetPort, startDirectory);
+	activateManagedRuntime(started.child, targetPort, startDirectory);
 	currentPort = targetPort;
 	currentRuntimeDirectory = startDirectory;
+	currentRuntime = buildRuntime(targetPort, true, started.runtime);
 	await persistLastPort(targetPort);
 
-	if (previousChild && previousChild !== child) {
+	if (previousChild && previousChild !== started.child) {
 		await stopManagedChild(previousChild);
+		await forgetStoredPassword(previousPort, targetPort);
 	}
 
-	return buildRuntime(targetPort, true);
+	return currentRuntime;
 }
 
 function rememberWorkspaceCwd(cwd: string | undefined): void {
@@ -291,25 +334,35 @@ async function inspectRuntimeCompatibility(
 	port: number,
 	cwd: string | undefined,
 	knownDirectory: string | undefined,
+	runtime: ProbedRuntime,
 ): Promise<{ compatible: boolean; directory: string | undefined }> {
+	if (runtime.apiVersion === 'v2') {
+		return { compatible: true, directory: knownDirectory };
+	}
 	if (!getWindowsDirectoryRootKey(cwd)) {
 		return { compatible: true, directory: knownDirectory };
 	}
 
-	const directory = knownDirectory ?? await probeServeDirectory(port);
+	const directory = knownDirectory ?? await probeServeDirectory(port, runtime);
 	return {
 		compatible: isServeDirectoryCompatible(directory, cwd),
 		directory,
 	};
 }
 
-async function probeServeDirectory(port: number): Promise<string | undefined> {
+async function probeServeDirectory(
+	port: number,
+	runtime: ProbedRuntime,
+): Promise<string | undefined> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), PATH_CHECK_TIMEOUT_MS);
 	try {
+		const headers = runtime.password
+			? { authorization: buildBasicAuthorization(runtime.password) }
+			: undefined;
 		const response = await globalThis.fetch(
-			`http://${HOSTNAME}:${String(port)}${PATH_PATH}`,
-			{ signal: controller.signal },
+			`http://${HOSTNAME}:${String(port)}${runtime.apiVersion === 'v2' ? V2_LOCATION_PATH : PATH_PATH}`,
+			{ headers, signal: controller.signal },
 		);
 		if (!response.ok) {
 			return undefined;
@@ -356,16 +409,30 @@ function isValidPort(port: number | undefined): port is number {
   return typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 
-function buildRuntime(port: number, startedByManager: boolean): ServeRuntime {
+function buildRuntime(
+	port: number,
+	startedByManager: boolean,
+	runtime: ProbedRuntime,
+): ServeRuntime {
   return {
     port,
     baseUrl: `http://${HOSTNAME}:${port}`,
-    startedByManager
+    startedByManager,
+    apiVersion: runtime.apiVersion,
+    version: runtime.version,
+    password: runtime.password,
   };
 }
 
-async function startServe(port: number, cwd: string): Promise<ChildProcess> {
+async function startServe(
+	port: number,
+	cwd: string,
+): Promise<{ child: ChildProcess; runtime: ProbedRuntime }> {
   const env = withOpencodeBinInPath();
+  const environmentPassword = readEnvironmentPassword();
+  const password = environmentPassword ?? createServePassword();
+  const generatedPassword = environmentPassword ? undefined : password;
+  env.OPENCODE_PASSWORD = password;
   const command = resolveOpencodeBinary(env);
   const child = spawn(
     command,
@@ -378,6 +445,10 @@ async function startServe(port: number, cwd: string): Promise<ChildProcess> {
       windowsHide: shouldHideOpencodeWindow()
     }
   );
+  child.stdout?.on('data', () => {
+    // Drain readiness and diagnostic output so a long-lived V2 server cannot
+    // block on a full stdout pipe. The environment password is never logged.
+  });
 
   const stderrBuffer: string[] = [];
   child.stderr?.on('data', (chunk: Buffer) => {
@@ -392,15 +463,22 @@ async function startServe(port: number, cwd: string): Promise<ChildProcess> {
 
 	try {
 		await waitForSpawnReady(child);
-		await waitForHealthAfterSpawn(child, port, stderrBuffer);
-		return child;
+		const runtime = await waitForHealthAfterSpawn(child, port, password, stderrBuffer);
+		if (generatedPassword && runtime.apiVersion === 'v2') {
+			await persistStoredPassword(port, generatedPassword);
+		}
+		return { child, runtime };
 	} catch (error) {
 		await stopManagedChild(child);
 		throw error;
 	}
 }
 
-function activateManagedRuntime(child: ChildProcess, port: number, startDirectory: string): void {
+function activateManagedRuntime(
+	child: ChildProcess,
+	port: number,
+	startDirectory: string,
+): void {
 	managedChild = child;
 	managedPort = port;
 	managedStartDirectory = startDirectory;
@@ -411,9 +489,11 @@ function activateManagedRuntime(child: ChildProcess, port: number, startDirector
 		managedChild = undefined;
 		managedPort = undefined;
 		managedStartDirectory = undefined;
+		void persistStoredPassword(port, undefined);
 		if (currentPort === port) {
 			currentPort = undefined;
 			currentRuntimeDirectory = undefined;
+			currentRuntime = undefined;
 		}
 	});
 }
@@ -481,13 +561,15 @@ function waitForSpawnReady(child: ChildProcess): Promise<void> {
 async function waitForHealthAfterSpawn(
   child: ChildProcess,
   port: number,
+  password: string,
   stderrBuffer: string[]
-): Promise<void> {
+): Promise<ProbedRuntime> {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < STARTUP_TIMEOUT_MS) {
-    if (await probeHealth(port)) {
-      return;
+    const runtime = await probeServeRuntime(port, password);
+    if (runtime) {
+      return runtime;
     }
 
     if (child.exitCode !== null) {
@@ -510,32 +592,202 @@ function stripAnsi(value: string): string {
 }
 
 export async function probeHealth(port: number): Promise<boolean> {
+  const password =
+    readEnvironmentPassword() ?? (await readStoredPassword(port));
+  return (await probeServeRuntime(port, password)) !== undefined;
+}
+
+export async function probeServeRuntime(
+  port: number,
+  password?: string,
+  preferredVersion?: 'v1' | 'v2',
+): Promise<ProbedRuntime | undefined> {
+  if (preferredVersion !== 'v2') {
+    const health = await requestServeProbeJson(port, HEALTH_PATH, password);
+    if (health && isRecord(health) && health.healthy === true) {
+      return {
+        apiVersion: 'v1',
+        ...(typeof health.version === 'string' ? { version: health.version } : {})
+      };
+    }
+  }
+
+  const info = await requestServeProbeJson(port, V2_INFO_PATH, password);
+  if (info && isRecord(info) && typeof info.version === 'string') {
+    return {
+      apiVersion: 'v2',
+      version: info.version,
+      ...(password ? { password } : {})
+    };
+  }
+
+  if (preferredVersion === 'v2') {
+    const health = await requestServeProbeJson(port, HEALTH_PATH, password);
+    if (health && isRecord(health) && health.healthy === true) {
+      return {
+        apiVersion: 'v1',
+        ...(typeof health.version === 'string' ? { version: health.version } : {})
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function readEnvironmentPassword(): string | undefined {
+  const value =
+    process.env.OPENCODE_PASSWORD?.trim() ||
+    process.env.OPENCODE_SERVER_PASSWORD?.trim();
+  return value || undefined;
+}
+
+async function readStoredPassword(port: number): Promise<string | undefined> {
+  try {
+    const value = await portStorage?.getPassword?.(port);
+    const normalized = typeof value === 'string' ? value.trim() : '';
+    return normalized || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function persistStoredPassword(
+  port: number,
+  password: string | undefined,
+): Promise<void> {
+  try {
+    await portStorage?.setPassword?.(port, password);
+  } catch {
+    // Password persistence is best effort; the current session still works.
+  }
+}
+
+async function forgetStoredPassword(
+  port: number | undefined,
+  keepPort: number,
+): Promise<void> {
+  if (port === undefined || port === keepPort) {
+    return;
+  }
+  await persistStoredPassword(port, undefined);
+}
+
+function createServePassword(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+function buildBasicAuthorization(password: string): string {
+  return `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`;
+}
+
+function requestServeProbeJson(
+  port: number,
+  pathname: string,
+  password?: string,
+): Promise<unknown | undefined> {
   return new Promise((resolve) => {
+    let settled = false;
+    const settle = (value: unknown | undefined): void => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
     const req = http.request(
       {
         host: HOSTNAME,
         port,
-        path: HEALTH_PATH,
+        path: pathname,
+        method: 'GET',
+        timeout: HEALTH_CHECK_TIMEOUT_MS,
+        headers: password
+          ? { authorization: buildBasicAuthorization(password) }
+          : undefined
+      },
+      (res) => {
+        if ((res.statusCode ?? 500) < 200 || (res.statusCode ?? 500) >= 300) {
+          res.resume();
+          settle(undefined);
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        res.on('data', (chunk: Buffer | string) => {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          bytes += buffer.length;
+          if (bytes <= 1_048_576) {
+            chunks.push(buffer);
+          } else {
+            settle(undefined);
+            res.destroy();
+          }
+        });
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8').trim();
+          if (!text) {
+            settle(undefined);
+            return;
+          }
+          try {
+            settle(JSON.parse(text) as unknown);
+          } catch {
+            settle(undefined);
+          }
+        });
+      }
+    );
+
+    req.on('error', () => settle(undefined));
+    req.on('timeout', () => {
+      req.destroy();
+      settle(undefined);
+    });
+    req.end();
+  });
+}
+
+/**
+ * A V2 server without a matching password answers 401, which the JSON probe
+ * cannot tell apart from "nothing is listening". Report it instead of quietly
+ * starting a second instance next to the running one.
+ */
+function probeServeInfoStatus(port: number): Promise<number | undefined> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (value: number | undefined): void => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const req = http.request(
+      {
+        host: HOSTNAME,
+        port,
+        path: V2_INFO_PATH,
         method: 'GET',
         timeout: HEALTH_CHECK_TIMEOUT_MS
       },
       (res) => {
         res.resume();
-        resolve((res.statusCode ?? 500) >= 200 && (res.statusCode ?? 500) < 300);
+        settle(res.statusCode);
       }
     );
-
-    req.on('error', () => {
-      resolve(false);
-    });
-
+    req.on('error', () => settle(undefined));
     req.on('timeout', () => {
       req.destroy();
-      resolve(false);
+      settle(undefined);
     });
-
     req.end();
   });
+}
+
+async function warnUnauthorizedRuntime(port: number): Promise<void> {
+  const status = await probeServeInfoStatus(port);
+  if (status !== 401) {
+    return;
+  }
+  console.warn(
+    `[opencode-ui] OpenCode V2 server on ${HOSTNAME}:${String(port)} requires a password this extension does not have; starting a separate instance instead of reusing it.`
+  );
 }
 
 async function isPortUsable(port: number): Promise<boolean> {
