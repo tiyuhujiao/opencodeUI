@@ -1,5 +1,8 @@
 import type { OpencodeServeRequestOptions } from './opencodeServeClient';
 import { encodeOpencodeDirectory } from './opencodeDirectory';
+import {
+  isV2FormAnswer, isV2FormFields, parseV2Form, v2LegacyAnswer, v2LegacyQuestions, validateV2FormAnswer
+} from '../shared/opencodeV2Form';
 
 export interface OpencodeV2Endpoint {
   baseUrl: string;
@@ -14,8 +17,18 @@ type FetchImplementation = (
 type JsonRecord = Record<string, unknown>;
 
 type OAuthAttempt = {
+  key: string;
+  scopeKey: string;
+  providerID: string;
+  methodIndex: number;
   integrationID: string;
   attemptID: string;
+  endpoint: OpencodeV2Endpoint;
+  cwd?: string;
+  controller: AbortController;
+  cancelled: boolean;
+  cleanup?: Promise<void>;
+  callback?: Promise<boolean>;
 };
 
 type ProviderSnapshot = {
@@ -25,6 +38,7 @@ type ProviderSnapshot = {
 };
 
 export interface OpencodeV2AdapterState {
+  disposed: boolean;
   oauthAttempts: Map<string, OAuthAttempt>;
   providerCache: Map<
     string,
@@ -37,8 +51,8 @@ export interface OpencodeV2AdapterState {
 }
 
 const OAUTH_POLL_INTERVAL_MS = 500;
-const OAUTH_AUTO_TIMEOUT_MS = 10 * 60_000;
-const OAUTH_CODE_TIMEOUT_MS = 120_000;
+const OAUTH_ADMISSION_TIMEOUT_MS = 30_000;
+const OAUTH_CANCEL_TIMEOUT_MS = 5_000;
 const EMPTY_PROVIDER_CACHE_TTL_MS = 1_000;
 const PROVIDER_CACHE_TTL_MS = 5_000;
 const PROVIDER_SETTLE_RETRY_DELAYS_MS = [150, 300, 600];
@@ -76,6 +90,7 @@ export function formatServeErrorBody(text: string, status: number): string {
 
 export function createOpencodeV2AdapterState(): OpencodeV2AdapterState {
   return {
+    disposed: false,
     oauthAttempts: new Map(),
     providerCache: new Map()
   };
@@ -89,6 +104,7 @@ export async function requestOpencodeV2Json(
   options: OpencodeServeRequestOptions | undefined,
   defaultCwd: string | undefined
 ): Promise<unknown> {
+  if (state.disposed) throw oauthAbortError();
   const method = (options?.method ?? 'GET').toUpperCase();
   const url = parseInternalPath(pathname);
   const path = url.pathname;
@@ -304,19 +320,10 @@ export async function requestOpencodeV2Json(
 
   if (path === '/question' && method === 'GET') {
     const payload = await request.json('/api/form');
-    const questions: JsonRecord[] = [];
-    for (const value of readArray(readNested(payload, 'data'))) {
+    return readArray(readNested(payload, 'data')).flatMap((value) => {
       const form = normalizeQuestionForm(value);
-      if (readArray(form.questions).length > 0) {
-        questions.push(form);
-        continue;
-      }
-      // V2 surfaces non-interactive forms too (external OAuth URLs, shell
-      // hand-offs). Nothing here can answer them, and leaving one pending
-      // blocks the tool that asked, so cancel it instead of hiding it.
-      await cancelUnanswerableForm(request, form);
-    }
-    return questions;
+      return form ? [form] : [];
+    });
   }
 
   const questionReplyMatch = /^\/question\/([^/]+)\/reply$/.exec(path);
@@ -331,13 +338,17 @@ export async function requestOpencodeV2Json(
     );
     const detail = readData(detailPayload);
     const body = parseBody(options?.body);
+    const form = parseV2Form(detail);
+    if (!form) throw new Error('OpenCode returned an invalid native form.');
+    if (body.answer !== undefined && !isV2FormAnswer(body.answer)) throw new Error('Invalid native form answer.');
+    const answer = isV2FormAnswer(body.answer) ? body.answer : v2LegacyAnswer(form, body.answers);
+    const invalid = Object.values(validateV2FormAnswer(form.fields, answer))[0];
+    if (invalid) throw new Error(invalid);
     return request.json(
       `/api/session/${encodeURIComponent(sessionID)}/form/${encodeURIComponent(formID)}/reply`,
       {
         method: 'POST',
-        body: JSON.stringify({
-          answer: answerQuestionForm(detail, body.answers)
-        })
+        body: JSON.stringify({ answer })
       }
     );
   }
@@ -461,102 +472,80 @@ export async function requestOpencodeV2Json(
   const oauthAuthorizeMatch = /^\/provider\/([^/]+)\/oauth\/authorize$/.exec(path);
   if (oauthAuthorizeMatch && method === 'POST') {
     const providerID = decodeURIComponent(oauthAuthorizeMatch[1]);
-    const snapshot = await loadProviderSnapshot(
-      state,
-      request,
-      options,
-      defaultCwd,
-      true
-    );
+    const snapshot = await loadProviderSnapshot(state, request, options, defaultCwd, true);
+    options?.signal?.throwIfAborted();
     const integration = findProviderIntegration(snapshot, providerID);
-    if (!integration) {
-      throw new Error(`OpenCode V2 integration ${providerID} was not found.`);
-    }
+    if (!integration) throw new Error(`OpenCode V2 integration ${providerID} was not found.`);
     const body = parseBody(options?.body);
     const methodIndex = typeof body.method === 'number' ? body.method : 0;
-    const method = readProviderAuthMethods(integration)[methodIndex];
-    if (!method || method.type !== 'oauth' || !isNonEmptyString(method.id)) {
+    const authMethod = readProviderAuthMethods(integration)[methodIndex];
+    if (!authMethod || authMethod.type !== 'oauth' || !isNonEmptyString(authMethod.id)) {
       throw new Error(`OpenCode V2 OAuth method ${String(methodIndex)} was not found.`);
     }
-    const payload = await request.json(
-      `/api/integration/${encodeURIComponent(readRequiredString(integration, 'id'))}/connect/oauth`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          methodID: method.id,
-          ...(isRecord(body.inputs) ? { answer: body.inputs } : {})
-        })
-      }
-    );
-    const attempt = readData(payload);
-    const attemptID = readRequiredString(attempt, 'attemptID');
-    state.oauthAttempts.set(oauthAttemptKey(providerID, methodIndex), {
-      integrationID: readRequiredString(integration, 'id'),
-      attemptID
-    });
-    return {
-      url: readRequiredString(attempt, 'url'),
-      instructions: readString(attempt, 'instructions'),
-      method: readString(attempt, 'mode') === 'code' ? 'code' : 'auto'
+    const answer = isV2FormAnswer(body.inputs) ? body.inputs : {};
+    if (isV2FormFields(authMethod.form)) {
+      const invalid = Object.values(validateV2FormAnswer(authMethod.form, answer))[0];
+      if (invalid) throw new Error(invalid);
+    }
+    const integrationID = readRequiredString(integration, 'id');
+    const cwd = options?.cwd ?? defaultCwd;
+    // Keep admission alive long enough to receive ownership of the native ID.
+    // A close during this POST is followed by DELETE as soon as its ID arrives.
+    const admission = new AbortController();
+    const timer = setTimeout(() => admission.abort(), OAUTH_ADMISSION_TIMEOUT_MS);
+    let payload: unknown;
+    try {
+      const admissionRequest = createRawRequest(fetcher, endpoint, { ...options, cwd, signal: admission.signal }, defaultCwd, true);
+      payload = await admissionRequest.json(`/api/integration/${encodeURIComponent(integrationID)}/connect/oauth`, {
+        method: 'POST', body: JSON.stringify({ methodID: authMethod.id, answer })
+      });
+    } finally { clearTimeout(timer); }
+    const native = readData(payload);
+    const attemptID = readRequiredString(native, 'attemptID');
+    const scopeKey = oauthScopeKey(endpoint, cwd, providerID, methodIndex);
+    const key = oauthAttemptKey(scopeKey, attemptID);
+    const attempt: OAuthAttempt = {
+      key, scopeKey, providerID, methodIndex, integrationID, attemptID, endpoint: { ...endpoint }, cwd,
+      controller: new AbortController(), cancelled: false
     };
+    state.oauthAttempts.set(key, attempt);
+    try {
+      if (options?.signal?.aborted || state.disposed) throw oauthAbortError();
+      const time = readOAuthTime(native);
+      const url = readRequiredString(native, 'url');
+      const mode = readString(native, 'mode');
+      if (mode !== 'code' && mode !== 'auto') throw new Error('OpenCode returned an invalid OAuth attempt mode.');
+      return { attemptID, time, url, instructions: readString(native, 'instructions'), method: mode };
+    } catch (error) {
+      await cancelOAuthAttempt(state, fetcher, attempt).catch((cleanupError) => {
+        console.warn('[opencode-ui] OAuth attempt cleanup failed:', cleanupError instanceof Error ? cleanupError.message : String(cleanupError));
+      });
+      throw error;
+    }
   }
 
-  const oauthCallbackMatch = /^\/provider\/([^/]+)\/oauth\/callback$/.exec(path);
-  if (oauthCallbackMatch && method === 'POST') {
-    const providerID = decodeURIComponent(oauthCallbackMatch[1]);
+  const oauthActionMatch = /^\/provider\/([^/]+)\/oauth\/(callback|cancel)$/.exec(path);
+  if (oauthActionMatch && method === 'POST') {
+    const providerID = decodeURIComponent(oauthActionMatch[1]);
     const body = parseBody(options?.body);
     const methodIndex = typeof body.method === 'number' ? body.method : 0;
-    const attempt = state.oauthAttempts.get(oauthAttemptKey(providerID, methodIndex));
-    if (!attempt) {
-      throw new Error('OpenCode V2 OAuth attempt was not found. Start authorization again.');
-    }
-    const basePath =
-      `/api/integration/${encodeURIComponent(attempt.integrationID)}` +
-      `/connect/oauth/${encodeURIComponent(attempt.attemptID)}`;
-    const code = isNonEmptyString(body.code) ? body.code : undefined;
-    if (code) {
-      await request.json(`${basePath}/complete`, {
-        method: 'POST',
-        body: JSON.stringify({ code })
-      });
-    }
-    const attemptKey = oauthAttemptKey(providerID, methodIndex);
-    const deadline =
-      Date.now() + (code ? OAUTH_CODE_TIMEOUT_MS : OAUTH_AUTO_TIMEOUT_MS);
-    let lastStatus = 'pending';
-    while (Date.now() < deadline) {
-      if (options?.signal?.aborted) {
-        await cancelOAuthAttempt(request, basePath);
-        state.oauthAttempts.delete(attemptKey);
-        throw new Error('OpenCode OAuth authorization was cancelled.');
-      }
-      const payload = await request.json(basePath);
-      const detail = readData(payload);
-      const status = readNestedString(detail, 'status');
-      if (status === 'complete') {
-        state.oauthAttempts.delete(attemptKey);
-        clearProviderSnapshot(state);
-        return true;
-      }
-      if (status === 'failed') {
-        state.oauthAttempts.delete(attemptKey);
-        throw new Error(
-          readNestedString(detail, 'message') ||
-            'OpenCode OAuth authorization failed.'
-        );
-      }
-      if (status === 'expired') {
-        state.oauthAttempts.delete(attemptKey);
-        throw new Error('OpenCode OAuth authorization expired. Start authorization again.');
-      }
-      lastStatus = status || lastStatus;
-      await delay(OAUTH_POLL_INTERVAL_MS);
-    }
-    await cancelOAuthAttempt(request, basePath);
-    state.oauthAttempts.delete(attemptKey);
-    throw new Error(
-      `OpenCode OAuth authorization timed out while ${lastStatus}.`
+    const scopeKey = oauthScopeKey(endpoint, options?.cwd ?? defaultCwd, providerID, methodIndex);
+    const matches = [...state.oauthAttempts.values()].filter((attempt) =>
+      attempt.scopeKey === scopeKey && (!isNonEmptyString(body.attemptID) || attempt.attemptID === body.attemptID)
     );
+    if (matches.length !== 1) {
+      if (oauthActionMatch[2] === 'cancel' && matches.length === 0) return true;
+      throw new Error('OpenCode V2 OAuth attempt was not found or is ambiguous. Start authorization again.');
+    }
+    const attempt = matches[0];
+    if (oauthActionMatch[2] === 'cancel') {
+      await cancelOAuthAttempt(state, fetcher, attempt);
+      return true;
+    }
+    if (attempt.callback) return attempt.callback;
+    const promise = completeOAuthAttempt(state, fetcher, attempt, options?.signal, isNonEmptyString(body.code) ? body.code : undefined);
+    attempt.callback = promise;
+    return promise;
   }
 
   if (path === '/model' && method === 'GET') {
@@ -647,6 +636,7 @@ export function normalizeSessionMessages(
 ): Array<{ info: JsonRecord; parts: JsonRecord[] }> {
   const result: Array<{ info: JsonRecord; parts: JsonRecord[] }> = [];
   let currentUserMessageID: string | undefined;
+  let turnAssistant: { info: JsonRecord; parts: JsonRecord[] } | undefined;
 
   for (const item of value) {
     const message = readRecord(item);
@@ -680,7 +670,7 @@ export function normalizeSessionMessages(
         assistantMessagePart(part, id, sessionID, index)
       );
       const errorMessage = structuredErrorMessage(message.error);
-      if (parts.length === 0 && errorMessage) {
+      if (errorMessage) {
         parts.push({
           id: `${id}-error`,
           type: 'text',
@@ -692,7 +682,7 @@ export function normalizeSessionMessages(
       if (parts.length === 0) {
         continue;
       }
-      result.push({
+      const normalized = {
         info: {
           id,
           sessionID,
@@ -711,7 +701,51 @@ export function normalizeSessionMessages(
           }
         },
         parts
+      };
+      result.push(normalized);
+      turnAssistant = normalized;
+      continue;
+    }
+    if (type === 'idle') {
+      const outcome = readString(message, 'outcome');
+      if (!['succeeded', 'failed', 'interrupted'].includes(outcome)) continue;
+      const errorMessage = structuredErrorMessage(message.error);
+      const terminalText = outcome === 'failed'
+        ? `\n\n运行错误：${errorMessage || '运行失败。'}`
+        : outcome === 'interrupted' ? '\n\n运行已停止。' : undefined;
+      if (!turnAssistant && terminalText) {
+        turnAssistant = {
+          info: {
+            id: `${id}-result`, sessionID, role: 'assistant',
+            ...(currentUserMessageID ? { parentID: currentUserMessageID } : {}), time
+          },
+          parts: []
+        };
+        result.push(turnAssistant);
+      }
+      if (turnAssistant) {
+        turnAssistant.info.turnOutcome = outcome;
+        turnAssistant.info.finish = outcome === 'succeeded'
+          ? turnAssistant.info.finish || 'stop' : outcome;
+        turnAssistant.info.time = {
+          ...readRecord(turnAssistant.info.time),
+          completed: readFinite(time.created)
+        };
+        if (isRecord(message.error)) turnAssistant.info.error = message.error;
+        if (terminalText && !turnAssistant.parts.some((part) => part.text === terminalText)) {
+          turnAssistant.parts.push({
+            id: `${id}-outcome`, type: 'text', text: terminalText,
+            sessionID, messageID: turnAssistant.info.id
+          });
+        }
+      }
+      // Keep the native marker in the data contract for recovery/export. The
+      // transcript renderer hides it after applying its outcome above.
+      result.push({
+        info: { ...message, sessionID, ...(currentUserMessageID ? { parentID: currentUserMessageID } : {}) },
+        parts: []
       });
+      turnAssistant = undefined;
       continue;
     }
     if (type === 'shell') {
@@ -762,6 +796,7 @@ function createRawRequest(
     pathname: string,
     init: { method?: string; body?: string; accept?: string } = {}
   ): Promise<Response> => {
+    signal?.throwIfAborted();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json'
     };
@@ -780,6 +815,7 @@ function createRawRequest(
       ...(init.body !== undefined ? { body: init.body } : {}),
       ...(signal ? { signal } : {})
     });
+    signal?.throwIfAborted();
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       throw new Error(formatServeErrorBody(text, response.status));
@@ -1091,142 +1127,12 @@ function normalizePermissionRequest(value: unknown): JsonRecord {
   };
 }
 
-function normalizeQuestionForm(value: unknown): JsonRecord {
-  const form = readRecord(value) ?? {};
-  const metadata = readNestedRecord(form, 'metadata');
-  const questions = readArray(form.fields).flatMap((value) => {
-    const field = readRecord(value);
-    if (
-      !field ||
-      field.type === 'external' ||
-      field.type === 'boolean' ||
-      field.hidden === true
-    ) {
-      return [];
-    }
-    const options = readArray(field.options).flatMap((value) => {
-      const option = readRecord(value);
-      const label = readString(option, 'label') || readString(option, 'value');
-      return label
-        ? [
-            {
-              label,
-              description: readString(option, 'description') || label
-            }
-          ]
-        : [];
-    });
-    return [
-      {
-        header: readString(field, 'title') || readString(field, 'key'),
-        question:
-          readString(field, 'description') ||
-          readString(field, 'title') ||
-          readString(field, 'key'),
-        options,
-        multiple: field.type === 'multiselect',
-        custom: field.custom !== false
-      }
-    ];
-  });
-  return {
-    id: readString(form, 'id'),
-    sessionID: readString(form, 'sessionID'),
-    title: readString(form, 'title'),
-    metadata: {
-      ...(metadata ?? {}),
-      kind: readString(metadata, 'kind') || 'question'
-    },
-    questions
-  };
-}
-
-async function cancelUnanswerableForm(
-  request: ReturnType<typeof createRawRequest>,
-  form: JsonRecord
-): Promise<void> {
-  const formID = readString(form, 'id');
-  const sessionID = readString(form, 'sessionID');
-  if (!formID || !sessionID) {
-    return;
-  }
-  const params = new URLSearchParams({
-    message: 'opencode-ui cannot answer this form, so it was cancelled.'
-  });
-  try {
-    await request.noContent(
-      `/api/session/${encodeURIComponent(sessionID)}/form/${encodeURIComponent(formID)}${queryString(params)}`,
-      { method: 'DELETE' }
-    );
-  } catch {
-    // The next blocker poll retries; a failed cancel must not break the run.
-  }
-}
-
-function answerQuestionForm(detail: unknown, answersValue: unknown): JsonRecord {
-  const form = readRecord(detail) ?? {};
-  const fields = readArray(form.fields).filter(isRecord);
-  const answers = readArray(answersValue);
-  const answer: JsonRecord = {};
-  let answerIndex = 0;
-  fields.forEach((field) => {
-    if (
-      field.type === 'external' ||
-      field.type === 'boolean' ||
-      field.hidden === true
-    ) {
-      return;
-    }
-    const key = readString(field, 'key');
-    const values = readArray(answers[answerIndex])
-      .filter((item): item is string => typeof item === 'string')
-      .map((value) => formOptionValue(field, value));
-    answerIndex += 1;
-    if (!key || !formFieldConditionsHold(field, answer)) return;
-    answer[key] = field.type === 'multiselect' ? values : values[0] ?? '';
-  });
-  return answer;
-}
-
-/**
- * The sidebar answers with the option label it rendered. V2 options carry a
- * separate `value` (for example websearch.provider uses "allow"/"disable" with
- * long labels), and the server matches on the value.
- */
-function formOptionValue(field: JsonRecord, value: string): string {
-  for (const option of readArray(field.options)) {
-    const record = readRecord(option);
-    if (!record || readString(record, 'label') !== value) {
-      continue;
-    }
-    const optionValue = readString(record, 'value');
-    if (optionValue) {
-      return optionValue;
-    }
-  }
-  return value;
-}
-
-function formFieldConditionsHold(
-  field: JsonRecord,
-  answers: JsonRecord
-): boolean {
-  return readArray(field.when).every((value) => {
-    const condition = readRecord(value);
-    const key = readString(condition, 'key');
-    const op = readString(condition, 'op');
-    if (!key || (op !== 'eq' && op !== 'neq') || !condition) {
-      return false;
-    }
-    const current = answers[key];
-    if (current === undefined) {
-      return false;
-    }
-    const matches = Array.isArray(current)
-      ? current.some((item) => item === condition.value)
-      : current === condition.value;
-    return op === 'eq' ? matches : !matches;
-  });
+function normalizeQuestionForm(value: unknown): JsonRecord | undefined {
+  const form = parseV2Form(value);
+  return form ? {
+    id: form.id, sessionID: form.sessionID, title: form.title,
+    metadata: form.metadata, questions: v2LegacyQuestions(form), form
+  } : undefined;
 }
 
 async function loadProviderSnapshot(
@@ -1341,7 +1247,8 @@ function providerAuthPayload(snapshot: ProviderSnapshot): JsonRecord {
             {
               type: 'api',
               label: readString(method, 'label') || 'API key',
-              prompts: authPrompts(method)
+              prompts: authPrompts(method),
+              fields: isV2FormFields(method.form) ? method.form : []
             }
           ];
         }
@@ -1350,7 +1257,8 @@ function providerAuthPayload(snapshot: ProviderSnapshot): JsonRecord {
             {
               type: 'oauth',
               label: readString(method, 'label') || 'OAuth',
-              prompts: authPrompts(method)
+              prompts: authPrompts(method),
+              fields: isV2FormFields(method.form) ? method.form : []
             }
           ];
         }
@@ -1542,8 +1450,12 @@ function authPrompts(method: JsonRecord): JsonRecord[] {
   });
 }
 
-function oauthAttemptKey(providerID: string, methodIndex: number): string {
-  return `${providerID}:${String(methodIndex)}`;
+function oauthScopeKey(endpoint: OpencodeV2Endpoint, cwd: string | undefined, providerID: string, methodIndex: number): string {
+  return JSON.stringify([endpoint.baseUrl, cwd ?? '', providerID, methodIndex]);
+}
+
+function oauthAttemptKey(scopeKey: string, attemptID: string): string {
+  return JSON.stringify([scopeKey, attemptID]);
 }
 
 function requiresProviderLocation(pathname: string): boolean {
@@ -1552,19 +1464,103 @@ function requiresProviderLocation(pathname: string): boolean {
     pathname === '/provider/auth' ||
     pathname === '/auth' ||
     /^\/auth\/[^/]+$/.test(pathname) ||
-    /^\/provider\/[^/]+\/oauth\/(?:authorize|callback)$/.test(pathname)
+    /^\/provider\/[^/]+\/oauth\/(?:authorize|callback|cancel)$/.test(pathname)
   );
 }
 
 async function cancelOAuthAttempt(
-  request: ReturnType<typeof createRawRequest>,
-  basePath: string
+  state: OpencodeV2AdapterState,
+  fetcher: FetchImplementation,
+  attempt: OAuthAttempt
 ): Promise<void> {
+  attempt.cancelled = true;
+  attempt.controller.abort();
+  if (attempt.cleanup) return attempt.cleanup;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OAUTH_CANCEL_TIMEOUT_MS);
+  const request = createRawRequest(fetcher, attempt.endpoint, { cwd: attempt.cwd, signal: controller.signal }, attempt.cwd, true);
+  const promise = request.noContent(oauthAttemptPath(attempt), { method: 'DELETE' }).then(() => {
+    forgetOAuthAttempt(state, attempt);
+  }).finally(() => { clearTimeout(timer); attempt.cleanup = undefined; });
+  attempt.cleanup = promise;
+  return promise;
+}
+
+function forgetOAuthAttempt(state: OpencodeV2AdapterState, attempt: OAuthAttempt): void {
+  if (state.oauthAttempts.get(attempt.key) === attempt) state.oauthAttempts.delete(attempt.key);
+}
+
+function oauthAttemptPath(attempt: OAuthAttempt): string {
+  return `/api/integration/${encodeURIComponent(attempt.integrationID)}/connect/oauth/${encodeURIComponent(attempt.attemptID)}`;
+}
+
+function readOAuthTime(value: unknown): { created: number; expires: number } {
+  const time = readNestedRecord(value, 'time');
+  const created = readFinite(time?.created);
+  const expires = readFinite(time?.expires);
+  if (created === undefined || expires === undefined) throw new Error('OpenCode returned invalid OAuth attempt timing.');
+  return { created, expires };
+}
+
+function oauthAbortError(): Error {
+  const error = new Error('OpenCode OAuth authorization was cancelled.');
+  error.name = 'AbortError';
+  return error;
+}
+
+async function completeOAuthAttempt(
+  state: OpencodeV2AdapterState,
+  fetcher: FetchImplementation,
+  attempt: OAuthAttempt,
+  callerSignal?: AbortSignal,
+  code?: string
+): Promise<boolean> {
+  const signal = callerSignal
+    ? AbortSignal.any([callerSignal, attempt.controller.signal]) : attempt.controller.signal;
+  const request = createRawRequest(fetcher, attempt.endpoint, { cwd: attempt.cwd, signal }, attempt.cwd, true);
+  const basePath = oauthAttemptPath(attempt);
+  let settled = false;
   try {
-    await request.noContent(basePath, { method: 'DELETE' });
-  } catch {
-    // The attempt expires server-side even when cancellation cannot be sent.
+    if (code) await request.noContent(`${basePath}/complete`, { method: 'POST', body: JSON.stringify({ code }) });
+    while (true) {
+      if (signal.aborted || attempt.cancelled || state.disposed) throw oauthAbortError();
+      const payload = await request.json(basePath);
+      if (signal.aborted || attempt.cancelled || state.disposed) throw oauthAbortError();
+      const detail = readData(payload);
+      const status = readNestedString(detail, 'status');
+      if (status === 'complete') {
+        settled = true;
+        clearProviderSnapshot(state);
+        return true;
+      }
+      if (status === 'failed' || status === 'expired') {
+        settled = true;
+        throw new Error(status === 'failed'
+          ? readNestedString(detail, 'message') || 'OpenCode OAuth authorization failed.'
+          : 'OpenCode OAuth authorization expired. Start authorization again.');
+      }
+      if (status !== 'pending') throw new Error('OpenCode returned an invalid OAuth attempt status.');
+      const time = readOAuthTime(detail);
+      if (Date.now() >= time.expires) throw new Error('OpenCode OAuth authorization expired. Start authorization again.');
+      await delay(Math.min(OAUTH_POLL_INTERVAL_MS, time.expires - Date.now()), signal);
+    }
+  } catch (error) {
+    const aborted = signal.aborted || attempt.cancelled || state.disposed;
+    if (!settled) {
+      await cancelOAuthAttempt(state, fetcher, attempt).catch((cleanupError) => {
+        console.warn('[opencode-ui] OAuth attempt cleanup failed:', cleanupError instanceof Error ? cleanupError.message : String(cleanupError));
+      });
+    }
+    throw aborted ? oauthAbortError() : error;
+  } finally {
+    if (settled) forgetOAuthAttempt(state, attempt);
   }
+}
+
+export async function disposeOpencodeV2Adapter(state: OpencodeV2AdapterState, fetcher: FetchImplementation): Promise<void> {
+  state.disposed = true;
+  await Promise.allSettled([...state.oauthAttempts.values()].map((attempt) => cancelOAuthAttempt(state, fetcher, attempt)));
+  clearProviderSnapshot(state);
 }
 
 function parseInternalPath(pathname: string): URL {
@@ -1700,6 +1696,11 @@ function structuredErrorMessage(value: unknown): string | undefined {
   return message.trim() || undefined;
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(oauthAbortError());
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(oauthAbortError()); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, ms);
+    signal?.addEventListener('abort', abort, { once: true });
+  });
 }

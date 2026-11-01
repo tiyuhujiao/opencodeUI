@@ -275,7 +275,7 @@ describe('OpenCode V2 run events', () => {
         patterns: ['npm test']
       })
     );
-    expect(pendingQuestion).toHaveBeenCalledWith({
+    expect(pendingQuestion).toHaveBeenCalledWith(expect.objectContaining({
       type: 'question',
       questionId: 'frm_1',
       sessionId: 'ses_1',
@@ -290,10 +290,10 @@ describe('OpenCode V2 run events', () => {
             }
           ],
           multiple: false,
-          custom: true
+          custom: false
         }
       ]
-    });
+    }));
     expect(state.pendingPermissionIds.has('per_1')).toBe(true);
     expect(state.pendingQuestionIds.has('frm_1')).toBe(true);
     expect(posted).toContainEqual({
@@ -369,6 +369,9 @@ describe('OpenCode V2 run events', () => {
     const { lifecycle, pendingPermission } = createLifecycle(posted);
     const state = createServeStreamState();
     armServeStreamTurn(state);
+    dispatchV2ServeEvent(lifecycle, 'request-1', 'ses_parent', envelope('session.created', {
+      sessionID: 'ses_child', parentID: 'ses_parent'
+    }), state);
 
     const permission = dispatchV2ServeEvent(
       lifecycle,

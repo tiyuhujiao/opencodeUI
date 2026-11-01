@@ -19,10 +19,13 @@ import type {
   ProviderSettingsCatalogEntry
 } from '../../../../src/shared/protocol'
 import { useI18n } from '../../i18n'
+import { buildV2FormAnswer, validateV2FormAnswer, type V2FormAnswer, type V2FormDraft } from '../../../../src/shared/opencodeV2Form'
+import { updateV2FormDraft, V2FormFields } from '../V2FormFields'
 
 export type ProviderAuthBusy = 'api' | 'authorize' | 'callback' | 'disconnect' | null
 
 export type ProviderAuthFlow = {
+  id: string
   entry: ProviderSettingsCatalogEntry
   methodIndex: number | null
   authorization: ProviderAuthAuthorization | null
@@ -35,8 +38,8 @@ type ProviderConnectDialogProps = {
   flow: ProviderAuthFlow
   onClose: () => void
   onSelectMethod: (methodIndex: number | null) => void
-  onApiConnect: (methodIndex: number, key: string, metadata: Record<string, string>) => void
-  onAuthorize: (methodIndex: number, inputs: Record<string, string>) => void
+  onApiConnect: (methodIndex: number, key: string, metadata: V2FormAnswer) => void
+  onAuthorize: (methodIndex: number, inputs: V2FormAnswer) => void
   onCallback: (code?: string) => void
   onOpenExternal: () => void
   onDisconnect: () => void
@@ -127,6 +130,7 @@ export function ProviderConnectDialog({
 
           {flow.authorization ? (
             <OAuthAuthorizationView
+              key={flow.authorization.attemptID ?? flow.id}
               authorization={flow.authorization}
               method={method}
               busy={flow.busy === 'callback'}
@@ -136,14 +140,14 @@ export function ProviderConnectDialog({
             />
           ) : method?.type === 'api' && flow.methodIndex !== null ? (
             <ApiKeyView
-              key={`${flow.entry.id}:${String(flow.methodIndex)}`}
+              key={`${flow.id}:${String(flow.methodIndex)}`}
               method={method}
               busy={flow.busy === 'api'}
               onSubmit={(key, metadata) => onApiConnect(flow.methodIndex!, key, metadata)}
             />
           ) : method?.type === 'oauth' && flow.methodIndex !== null ? (
             <OAuthStartView
-              key={`${flow.entry.id}:${String(flow.methodIndex)}`}
+              key={`${flow.id}:${String(flow.methodIndex)}`}
               method={method}
               busy={flow.busy === 'authorize'}
               onSubmit={(inputs) => onAuthorize(flow.methodIndex!, inputs)}
@@ -242,15 +246,18 @@ function ApiKeyView({
 }: {
   method: ProviderSettingsAuthMethod
   busy: boolean
-  onSubmit: (key: string, metadata: Record<string, string>) => void
+  onSubmit: (key: string, metadata: V2FormAnswer) => void
 }) {
   const { t } = useI18n()
   const [key, setKey] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [inputs, setInputs] = useState<Record<string, string>>({})
+  const [nativeDraft, setNativeDraft] = useState<V2FormDraft>({})
+  const nativeAnswer = useMemo(() => buildV2FormAnswer(method.fields ?? [], nativeDraft), [method.fields, nativeDraft])
   const keyInputRef = useRef<HTMLInputElement>(null)
   const visiblePrompts = useVisiblePrompts(method.prompts, inputs)
-  const ready = key.trim().length > 0 && promptsComplete(visiblePrompts, inputs)
+  const ready = key.trim().length > 0 && (method.fields
+    ? Object.keys(validateV2FormAnswer(method.fields, nativeAnswer)).length === 0 : promptsComplete(visiblePrompts, inputs))
 
   useEffect(() => {
     keyInputRef.current?.focus({ preventScroll: true })
@@ -259,17 +266,19 @@ function ApiKeyView({
   const submit = (event: FormEvent) => {
     event.preventDefault()
     if (ready && !busy) {
-      onSubmit(key.trim(), visibleInputValues(visiblePrompts, inputs))
+      onSubmit(key.trim(), method.fields ? nativeAnswer : visibleInputValues(visiblePrompts, inputs))
     }
   }
 
   return (
-    <form className="provider-connect__form" onSubmit={submit}>
+    <form className="provider-connect__form" onSubmit={submit} noValidate>
       <div className="provider-connect__form-copy">
         <strong>{method.label}</strong>
         <span>{t('The key is stored by OpenCode and is not written to opencode.json.')}</span>
       </div>
-      <AuthPromptFields prompts={visiblePrompts} values={inputs} onChange={setInputs} />
+      {method.fields ? <V2FormFields fields={method.fields} answer={nativeAnswer} disabled={busy}
+        onChange={(key, value) => setNativeDraft((current) => updateV2FormDraft(current, key, value))} />
+        : <AuthPromptFields prompts={visiblePrompts} values={inputs} onChange={setInputs} />}
       <label className="provider-connect__field">
         <span>API key</span>
         <span className="provider-connect__secret-input">
@@ -307,27 +316,31 @@ function OAuthStartView({
 }: {
   method: ProviderSettingsAuthMethod
   busy: boolean
-  onSubmit: (inputs: Record<string, string>) => void
+  onSubmit: (inputs: V2FormAnswer) => void
 }) {
   const { t } = useI18n()
   const [inputs, setInputs] = useState<Record<string, string>>({})
+  const [nativeDraft, setNativeDraft] = useState<V2FormDraft>({})
+  const nativeAnswer = useMemo(() => buildV2FormAnswer(method.fields ?? [], nativeDraft), [method.fields, nativeDraft])
   const visiblePrompts = useVisiblePrompts(method.prompts, inputs)
-  const ready = promptsComplete(visiblePrompts, inputs)
+  const ready = method.fields ? Object.keys(validateV2FormAnswer(method.fields, nativeAnswer)).length === 0 : promptsComplete(visiblePrompts, inputs)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
     if (ready && !busy) {
-      onSubmit(visibleInputValues(visiblePrompts, inputs))
+      onSubmit(method.fields ? nativeAnswer : visibleInputValues(visiblePrompts, inputs))
     }
   }
 
   return (
-    <form className="provider-connect__form" onSubmit={submit}>
+    <form className="provider-connect__form" onSubmit={submit} noValidate>
       <div className="provider-connect__form-copy">
         <strong>{method.label}</strong>
         <span>{t('OpenCode will open your browser and securely store the resulting login.')}</span>
       </div>
-      <AuthPromptFields prompts={visiblePrompts} values={inputs} onChange={setInputs} />
+      {method.fields ? <V2FormFields fields={method.fields} answer={nativeAnswer} disabled={busy}
+        onChange={(key, value) => setNativeDraft((current) => updateV2FormDraft(current, key, value))} />
+        : <AuthPromptFields prompts={visiblePrompts} values={inputs} onChange={setInputs} />}
       <button type="submit" className="provider-connect__primary" disabled={!ready || busy}>
         {busy ? <LoaderCircle className="is-spinning" size={15} /> : <ExternalLink size={15} />}
         {busy ? t('Opening browser') : t('Continue in browser')}

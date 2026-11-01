@@ -5,6 +5,7 @@ exports.isWhitelistedWebviewRequestType = isWhitelistedWebviewRequestType;
 exports.getRequestIdFromUnknown = getRequestIdFromUnknown;
 exports.isExtensionResponseMessage = isExtensionResponseMessage;
 exports.isWebviewRequestMessage = isWebviewRequestMessage;
+const opencodeV2Form_1 = require("./opencodeV2Form");
 exports.WEBVIEW_REQUEST_WHITELIST = [
     'webview.ready',
     'sessions.list',
@@ -38,6 +39,7 @@ exports.WEBVIEW_REQUEST_WHITELIST = [
     'provider.auth.api',
     'provider.auth.oauth.authorize',
     'provider.auth.oauth.callback',
+    'provider.auth.oauth.cancel',
     'provider.auth.disconnect',
     'provider.auth.openExternal',
     'agents.list',
@@ -83,6 +85,7 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set([
     'provider.auth.api.response',
     'provider.auth.oauth.authorize.response',
     'provider.auth.oauth.callback.response',
+    'provider.auth.oauth.cancel.response',
     'provider.auth.disconnect.response',
     'provider.auth.openExternal.response',
     'agents.list.response',
@@ -170,16 +173,18 @@ function isStringArray(value, maxItems = 500, maxItemLength = 2048) {
         && value.length <= maxItems
         && value.every((item) => isBoundedString(item, maxItemLength));
 }
-function isStringRecord(value, maxEntries = 50, maxKeyLength = 256, maxValueLength = 16384) {
-    return isObject(value)
-        && Object.entries(value).length <= maxEntries
-        && Object.entries(value).every(([key, entry]) => key.length <= maxKeyLength && isBoundedString(entry, maxValueLength));
-}
 function isProviderSettingsAuthPromptWhen(value) {
     return isObject(value)
         && isBoundedString(value.key, 256)
         && (value.op === 'eq' || value.op === 'neq')
         && isBoundedString(value.value, 2048);
+}
+function isProviderAuthAnswer(value) {
+    return (0, opencodeV2Form_1.isV2FormAnswer)(value) && Object.entries(value).length <= 50
+        && Object.entries(value).every(([key, entry]) => key.length <= 256
+            && (typeof entry === 'string' ? entry.length <= 16384
+                : Array.isArray(entry) ? entry.length <= 100 && entry.reduce((length, item) => length + item.length, 0) <= 16384
+                    : true));
 }
 function isProviderSettingsAuthPrompt(value) {
     if (!isObject(value)
@@ -337,7 +342,8 @@ function isProviderSettingsCatalogEntry(value) {
             && isBoundedString(method.label, 2048)
             && Array.isArray(method.prompts)
             && method.prompts.length <= 50
-            && method.prompts.every(isProviderSettingsAuthPrompt));
+            && method.prompts.every(isProviderSettingsAuthPrompt)
+            && (method.fields === undefined || (0, opencodeV2Form_1.isV2FormFields)(method.fields)));
 }
 function isProviderSettingsCatalogModel(value) {
     return isProviderSettingsModelDraft(value);
@@ -498,6 +504,7 @@ function isExtensionResponseMessage(message) {
     }
     if (message.type === 'provider.auth.api.response'
         || message.type === 'provider.auth.oauth.callback.response'
+        || message.type === 'provider.auth.oauth.cancel.response'
         || message.type === 'provider.auth.disconnect.response') {
         return message.ok === true
             && isObject(message.payload)
@@ -511,7 +518,11 @@ function isExtensionResponseMessage(message) {
             && isObject(message.payload.authorization)
             && isBoundedString(message.payload.authorization.url, 16384)
             && (message.payload.authorization.method === 'auto' || message.payload.authorization.method === 'code')
-            && isBoundedString(message.payload.authorization.instructions, 16384);
+            && isBoundedString(message.payload.authorization.instructions, 16384)
+            && (message.payload.authorization.attemptID === undefined || isNonEmptyString(message.payload.authorization.attemptID))
+            && (message.payload.authorization.time === undefined || (isObject(message.payload.authorization.time)
+                && typeof message.payload.authorization.time.created === 'number' && Number.isFinite(message.payload.authorization.time.created)
+                && typeof message.payload.authorization.time.expires === 'number' && Number.isFinite(message.payload.authorization.time.expires)));
     }
     if (message.type === 'provider.auth.openExternal.response') {
         return message.ok === true
@@ -605,10 +616,10 @@ function isWebviewRequestMessage(message) {
         if (typeof message.payload.questionId !== 'string' || message.payload.questionId.trim().length === 0) {
             return false;
         }
-        if (!Array.isArray(message.payload.answers)) {
-            return false;
-        }
-        if (!message.payload.answers.every((answer) => Array.isArray(answer) && answer.every((item) => typeof item === 'string'))) {
+        const typed = message.payload.answer !== undefined;
+        if (typed
+            ? message.payload.answers !== undefined || !(0, opencodeV2Form_1.isV2FormAnswer)(message.payload.answer)
+            : !Array.isArray(message.payload.answers) || !message.payload.answers.every((answer) => Array.isArray(answer) && answer.every((item) => typeof item === 'string'))) {
             return false;
         }
     }
@@ -740,7 +751,7 @@ function isWebviewRequestMessage(message) {
             || !isNonEmptyString(message.payload.providerId)
             || !isBoundedString(message.payload.key, 32768)
             || message.payload.key.trim().length === 0
-            || !isStringRecord(message.payload.metadata)) {
+            || !isProviderAuthAnswer(message.payload.metadata)) {
             return false;
         }
     }
@@ -749,7 +760,8 @@ function isWebviewRequestMessage(message) {
             || !isNonEmptyString(message.payload.providerId)
             || !isNonNegativeInteger(message.payload.method)
             || message.payload.method > 100
-            || !isStringRecord(message.payload.inputs)) {
+            || !isProviderAuthAnswer(message.payload.inputs)
+            || (message.payload.flowId !== undefined && !isNonEmptyString(message.payload.flowId))) {
             return false;
         }
     }
@@ -758,9 +770,18 @@ function isWebviewRequestMessage(message) {
             || !isNonEmptyString(message.payload.providerId)
             || !isNonNegativeInteger(message.payload.method)
             || message.payload.method > 100
-            || (message.payload.code !== undefined && !isBoundedString(message.payload.code, 16384))) {
+            || (message.payload.code !== undefined && !isBoundedString(message.payload.code, 16384))
+            || (message.payload.attemptID !== undefined && !isNonEmptyString(message.payload.attemptID))
+            || (message.payload.flowId !== undefined && !isNonEmptyString(message.payload.flowId))) {
             return false;
         }
+    }
+    if (message.type === 'provider.auth.oauth.cancel') {
+        if (!isObject(message.payload) || !isNonEmptyString(message.payload.providerId)
+            || !isNonNegativeInteger(message.payload.method) || message.payload.method > 100
+            || !isNonEmptyString(message.payload.flowId)
+            || (message.payload.attemptID !== undefined && !isNonEmptyString(message.payload.attemptID)))
+            return false;
     }
     if (message.type === 'provider.auth.disconnect') {
         if (!isObject(message.payload) || !isNonEmptyString(message.payload.providerId)) {

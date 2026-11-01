@@ -331,6 +331,7 @@ function normalizeAuthMethodList(value: unknown): ProviderSettingsAuthMethod[] {
 			type,
 			label: readString(method?.label ?? method?.name) || formatAuthType(type),
 			prompts: normalizeAuthPrompts(method?.prompts),
+			...(isV2FormFields(method?.fields) ? { fields: method.fields } : {}),
 		}];
 	});
 }
@@ -403,3 +404,4 @@ function asRecord(value: unknown): JsonRecord | undefined {
 		? (value as JsonRecord)
 		: undefined;
 }
+import { isV2FormFields } from "./shared/opencodeV2Form";

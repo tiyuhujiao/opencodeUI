@@ -278,6 +278,7 @@ function normalizeAuthMethodList(value) {
                 type,
                 label: readString(method?.label ?? method?.name) || formatAuthType(type),
                 prompts: normalizeAuthPrompts(method?.prompts),
+                ...((0, opencodeV2Form_1.isV2FormFields)(method?.fields) ? { fields: method.fields } : {}),
             }];
     });
 }
@@ -345,4 +346,5 @@ function asRecord(value) {
         ? value
         : undefined;
 }
+const opencodeV2Form_1 = require("./shared/opencodeV2Form");
 //# sourceMappingURL=providerCatalog.js.map

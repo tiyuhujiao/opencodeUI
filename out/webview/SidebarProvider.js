@@ -54,6 +54,7 @@ const parsers_1 = require("../bridge/parsers");
 const protocol_1 = require("../shared/protocol");
 const search_1 = require("../shared/search");
 const runTranscript_1 = require("../shared/runTranscript");
+const agentSummary_1 = require("../shared/agentSummary");
 const runLifecycle_1 = require("./runLifecycle");
 const promptQueue_1 = require("./promptQueue");
 const sessionMarkdown_1 = require("../sessionMarkdown");
@@ -73,13 +74,19 @@ const TEMPFILE_MAX_BYTES = 10 * 1024 * 1024;
 const TEMPFILE_MAX_BASE64_CHARS = Math.ceil(TEMPFILE_MAX_BYTES / 3) * 4 + 4;
 const TEMPFILE_TTL_MS = 30 * 60000;
 const MCP_TRANSITION_POLL_DELAYS_MS = [0, 250, 500, 750, 1000, 1500, 2000, 2500, 3000];
-const STREAM_NO_EVIDENCE_GRACE_MS = 90000;
+const STREAM_CONNECTION_TIMEOUT_MS = 10000;
 class EmittedRunError extends Error {
     constructor(message) {
         super(message);
         this.name = "EmittedRunError";
     }
 }
+/**
+ * `opencode agent list` on the legacy CLI prints the internal helper agents alongside the
+ * real ones; the CLI picker hides them, and so does the extension. V2 servers flag hidden
+ * agents themselves, so this list only applies to the v1 fallback path.
+ */
+const LEGACY_HIDDEN_AGENT_NAMES = new Set(["compaction", "summary", "title"]);
 class SidebarProvider {
     constructor(extensionUri, workspaceState, hostKind, remoteName, inlineDiff) {
         this.extensionUri = extensionUri;
@@ -92,6 +99,8 @@ class SidebarProvider {
         this.modelsCache = new Map();
         this.modelsInFlight = new Map();
         this.tempFiles = new Map();
+        this.providerOAuthFlows = new Map();
+        this.disposed = false;
         this.serveClient = new opencodeServeClient_1.OpencodeServeClient({
             ensureRuntime: (cwd) => (0, serveManager_1.ensureServeRunning)(cwd),
             getDefaultCwd: () => this.getDefaultCwd(),
@@ -100,6 +109,11 @@ class SidebarProvider {
         this.inlineDiffStateSubscription = this.inlineDiff.onDidChange((snapshot) => this.postInlineDiffState(snapshot));
     }
     dispose() {
+        this.disposed = true;
+        for (const flow of this.providerOAuthFlows.values())
+            flow.controller.abort();
+        this.providerOAuthFlows.clear();
+        this.serveClient.dispose();
         this.activeSessionSearchController?.abort();
         this.activeSessionSearchController = undefined;
         this.cancelHiddenViewExpiry();
@@ -355,7 +369,7 @@ class SidebarProvider {
                     void this.handlePermissionReplyRequest(webview, message.requestId, message.payload.permissionId, message.payload.reply, message.payload.message);
                     return;
                 case "question.reply":
-                    void this.handleQuestionReplyRequest(webview, message.requestId, message.payload.questionId, message.payload.answers);
+                    void this.handleQuestionReplyRequest(webview, message.requestId, message.payload.questionId, message.payload.answer ?? message.payload.answers);
                     return;
                 case "question.reject":
                     void this.handleQuestionRejectRequest(webview, message.requestId, message.payload.questionId);
@@ -406,10 +420,13 @@ class SidebarProvider {
                     void this.handleProviderAuthApiRequest(webview, message.requestId, message.payload.providerId, message.payload.key, message.payload.metadata);
                     return;
                 case "provider.auth.oauth.authorize":
-                    void this.handleProviderAuthOAuthAuthorizeRequest(webview, message.requestId, message.payload.providerId, message.payload.method, message.payload.inputs);
+                    void this.handleProviderAuthOAuthAuthorizeRequest(webview, message.requestId, message.payload.providerId, message.payload.method, message.payload.inputs, message.payload.flowId);
                     return;
                 case "provider.auth.oauth.callback":
-                    void this.handleProviderAuthOAuthCallbackRequest(webview, message.requestId, message.payload.providerId, message.payload.method, message.payload.code);
+                    void this.handleProviderAuthOAuthCallbackRequest(webview, message.requestId, message.payload.providerId, message.payload.method, message.payload.code, message.payload.flowId, message.payload.attemptID);
+                    return;
+                case "provider.auth.oauth.cancel":
+                    void this.handleProviderAuthOAuthCancelRequest(webview, message.requestId, message.payload.providerId, message.payload.method, message.payload.flowId, message.payload.attemptID);
                     return;
                 case "provider.auth.disconnect":
                     void this.handleProviderAuthDisconnectRequest(webview, message.requestId, message.payload.providerId);
@@ -1174,19 +1191,26 @@ class SidebarProvider {
     }
     async handlePermissionReplyRequest(webview, requestId, permissionId, reply, message) {
         try {
-            const pendingSessionId = this.currentRun?.pendingPermission?.permissionId === permissionId
-                ? this.currentRun.pendingPermission.sessionId
-                : undefined;
+            const run = this.currentRun;
+            if (!run || run.pendingPermission?.permissionId !== permissionId) {
+                throw new Error("权限请求已结束或不属于当前运行。");
+            }
+            const pendingSessionId = run.pendingPermission.sessionId;
             const sessionQuery = pendingSessionId && await this.isV2Runtime()
                 ? `?sessionID=${encodeURIComponent(pendingSessionId)}`
                 : "";
             await this.requestServeJson(`/permission/${encodeURIComponent(permissionId)}/reply${sessionQuery}`, {
                 method: "POST",
                 body: JSON.stringify({ reply, message }),
+                signal: run.controller.signal,
             });
-            if (this.currentRun?.pendingPermission?.permissionId === permissionId) {
-                this.currentRun.pendingPermission = undefined;
-                this.currentRun.revision += 1;
+            if (this.currentRun === run) {
+                if (run.streamState)
+                    (0, runLifecycle_1.settleServeBlocker)(this.createRunLifecycleAdapter(webview, run.requestId), "permission", permissionId, run.streamState);
+                else if (run.pendingPermission?.permissionId === permissionId) {
+                    run.pendingPermission = undefined;
+                    run.revision += 1;
+                }
             }
             this.respond(webview, {
                 type: "permission.reply.response",
@@ -1204,19 +1228,26 @@ class SidebarProvider {
     }
     async handleQuestionReplyRequest(webview, requestId, questionId, answers) {
         try {
-            const pendingSessionId = this.currentRun?.pendingQuestion?.questionId === questionId
-                ? this.currentRun.pendingQuestion.sessionId
-                : undefined;
+            const run = this.currentRun;
+            if (!run || run.pendingQuestion?.questionId !== questionId) {
+                throw new Error("问题已结束或不属于当前运行。");
+            }
+            const pendingSessionId = run.pendingQuestion.sessionId;
             const sessionQuery = pendingSessionId && await this.isV2Runtime()
                 ? `?sessionID=${encodeURIComponent(pendingSessionId)}`
                 : "";
             await this.requestServeJson(`/question/${encodeURIComponent(questionId)}/reply${sessionQuery}`, {
                 method: "POST",
-                body: JSON.stringify({ answers }),
+                body: JSON.stringify(Array.isArray(answers) ? { answers } : { answer: answers }),
+                signal: run.controller.signal,
             });
-            if (this.currentRun?.pendingQuestion?.questionId === questionId) {
-                this.currentRun.pendingQuestion = undefined;
-                this.currentRun.revision += 1;
+            if (this.currentRun === run) {
+                if (run.streamState)
+                    (0, runLifecycle_1.settleServeBlocker)(this.createRunLifecycleAdapter(webview, run.requestId), "question", questionId, run.streamState);
+                else if (run.pendingQuestion?.questionId === questionId) {
+                    run.pendingQuestion = undefined;
+                    run.revision += 1;
+                }
             }
             this.respond(webview, {
                 type: "question.reply.response",
@@ -1231,18 +1262,25 @@ class SidebarProvider {
     }
     async handleQuestionRejectRequest(webview, requestId, questionId) {
         try {
-            const pendingSessionId = this.currentRun?.pendingQuestion?.questionId === questionId
-                ? this.currentRun.pendingQuestion.sessionId
-                : undefined;
+            const run = this.currentRun;
+            if (!run || run.pendingQuestion?.questionId !== questionId) {
+                throw new Error("问题已结束或不属于当前运行。");
+            }
+            const pendingSessionId = run.pendingQuestion.sessionId;
             const sessionQuery = pendingSessionId && await this.isV2Runtime()
                 ? `?sessionID=${encodeURIComponent(pendingSessionId)}`
                 : "";
             await this.requestServeJson(`/question/${encodeURIComponent(questionId)}/reject${sessionQuery}`, {
                 method: "POST",
+                signal: run.controller.signal,
             });
-            if (this.currentRun?.pendingQuestion?.questionId === questionId) {
-                this.currentRun.pendingQuestion = undefined;
-                this.currentRun.revision += 1;
+            if (this.currentRun === run) {
+                if (run.streamState)
+                    (0, runLifecycle_1.settleServeBlocker)(this.createRunLifecycleAdapter(webview, run.requestId), "question", questionId, run.streamState);
+                else if (run.pendingQuestion?.questionId === questionId) {
+                    run.pendingQuestion = undefined;
+                    run.revision += 1;
+                }
             }
             this.respond(webview, {
                 type: "question.reject.response",
@@ -1457,43 +1495,134 @@ class SidebarProvider {
             this.respondError(webview, requestId, error, "保存 Provider API key 失败。");
         }
     }
-    async handleProviderAuthOAuthAuthorizeRequest(webview, requestId, providerId, method, inputs) {
+    async handleProviderAuthOAuthAuthorizeRequest(webview, requestId, providerId, method, inputs, flowId = requestId) {
+        if (this.disposed)
+            return;
+        const previous = this.providerOAuthFlows.get(flowId);
+        if (previous) {
+            void this.cancelProviderOAuthFlow(previous).catch((error) => (0, diagnostics_1.logWarn)(`取消旧 Provider OAuth 登录失败：${error instanceof Error ? error.message : String(error)}`));
+        }
+        const flow = {
+            flowId, providerId, method, webview,
+            controller: new AbortController(), cwd: this.getDefaultCwd() ?? "",
+        };
+        this.providerOAuthFlows.set(flowId, flow);
         try {
+            flow.endpoint = await (0, serveManager_1.ensureServeRunning)(flow.cwd || undefined);
+            if (!this.isCurrentProviderOAuthFlow(flow))
+                return;
             const authorization = await this.requestServeJson(`/provider/${encodeURIComponent(providerId)}/oauth/authorize`, {
                 method: "POST",
                 body: JSON.stringify({ method, inputs }),
+                cwd: flow.cwd,
+                endpoint: flow.endpoint,
+                signal: flow.controller.signal,
             });
             if (!authorization) {
                 throw new Error("OpenCode 未返回 OAuth 授权信息。");
             }
+            flow.authorization = authorization;
+            if (!this.isCurrentProviderOAuthFlow(flow)) {
+                await this.cancelProviderOAuthFlow(flow);
+                return;
+            }
             await this.openProviderAuthUrl(authorization.url);
+            if (!this.isCurrentProviderOAuthFlow(flow))
+                return;
             this.respond(webview, {
                 type: "provider.auth.oauth.authorize.response",
                 requestId,
                 ok: true,
-                payload: { providerId, method, authorization },
+                payload: { providerId, method, authorization, flowId },
             });
         }
         catch (error) {
+            const active = this.isCurrentProviderOAuthFlow(flow);
+            await this.cancelProviderOAuthFlow(flow).catch((cleanupError) => (0, diagnostics_1.logWarn)(`清理 Provider OAuth 登录失败：${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`));
+            if (!active)
+                return;
             this.respondError(webview, requestId, error, "启动 Provider OAuth 登录失败。");
         }
     }
-    async handleProviderAuthOAuthCallbackRequest(webview, requestId, providerId, method, code) {
+    async handleProviderAuthOAuthCallbackRequest(webview, requestId, providerId, method, code, flowId, attemptID) {
+        let flow;
         try {
+            flow = this.findProviderOAuthFlow(webview, providerId, method, flowId, attemptID);
+            if (!flow || !flow.authorization || !this.isCurrentProviderOAuthFlow(flow)) {
+                throw new Error("Provider OAuth 登录已结束，请重新启动授权。");
+            }
+            const authorization = flow.authorization;
             await this.requestServeJson(`/provider/${encodeURIComponent(providerId)}/oauth/callback`, {
                 method: "POST",
-                body: JSON.stringify({ method, ...(code ? { code } : {}) }),
+                body: JSON.stringify({ method, ...(code ? { code } : {}),
+                    ...(authorization.attemptID ? { attemptID: authorization.attemptID } : {}) }),
+                cwd: flow.cwd,
+                endpoint: flow.endpoint,
+                signal: flow.controller.signal,
             });
+            if (!this.isCurrentProviderOAuthFlow(flow))
+                return;
+            this.providerOAuthFlows.delete(flow.flowId);
             this.invalidateProviderCaches();
             this.respond(webview, {
                 type: "provider.auth.oauth.callback.response",
                 requestId,
                 ok: true,
-                payload: { providerId },
+                payload: { providerId, flowId: flow.flowId, attemptID: authorization.attemptID },
             });
         }
         catch (error) {
+            if (flow) {
+                const active = this.isCurrentProviderOAuthFlow(flow);
+                await this.cancelProviderOAuthFlow(flow).catch((cleanupError) => (0, diagnostics_1.logWarn)(`清理 Provider OAuth 登录失败：${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`));
+                if (!active)
+                    return;
+            }
+            if (this.disposed)
+                return;
             this.respondError(webview, requestId, error, "完成 Provider OAuth 登录失败。");
+        }
+    }
+    isCurrentProviderOAuthFlow(flow) {
+        return !this.disposed && !flow.controller.signal.aborted
+            && this.providerOAuthFlows.get(flow.flowId) === flow;
+    }
+    findProviderOAuthFlow(webview, providerId, method, flowId, attemptID) {
+        const flows = flowId ? [this.providerOAuthFlows.get(flowId)] : [...this.providerOAuthFlows.values()];
+        const matches = flows.filter((flow) => flow !== undefined
+            && flow.webview === webview && flow.providerId === providerId && flow.method === method
+            && (!attemptID || flow.authorization?.attemptID === attemptID));
+        return matches.length === 1 ? matches[0] : undefined;
+    }
+    async cancelProviderOAuthFlow(flow) {
+        flow.controller.abort();
+        if (this.providerOAuthFlows.get(flow.flowId) === flow)
+            this.providerOAuthFlows.delete(flow.flowId);
+        if (flow.endpoint?.apiVersion === "v2" && flow.authorization?.attemptID) {
+            await this.requestServeJson(`/provider/${encodeURIComponent(flow.providerId)}/oauth/cancel`, {
+                method: "POST", cwd: flow.cwd, endpoint: flow.endpoint,
+                signal: AbortSignal.timeout(6000),
+                body: JSON.stringify({ method: flow.method, attemptID: flow.authorization.attemptID }),
+            });
+        }
+    }
+    async handleProviderAuthOAuthCancelRequest(webview, requestId, providerId, method, flowId, attemptID) {
+        try {
+            const flow = this.findProviderOAuthFlow(webview, providerId, method, flowId, attemptID);
+            if (!flow && this.providerOAuthFlows.has(flowId)) {
+                throw new Error("Provider OAuth 登录标识不匹配。");
+            }
+            if (flow)
+                await this.cancelProviderOAuthFlow(flow);
+            if (this.disposed)
+                return;
+            this.respond(webview, {
+                type: "provider.auth.oauth.cancel.response", requestId, ok: true,
+                payload: { providerId, flowId },
+            });
+        }
+        catch (error) {
+            this.respondError(webview, requestId, error, "取消 Provider OAuth 登录失败。");
         }
     }
     async handleProviderAuthDisconnectRequest(webview, requestId, providerId) {
@@ -1744,20 +1873,7 @@ class SidebarProvider {
     async handleAgentsListRequest(webview, requestId) {
         try {
             if (await this.isV2Runtime()) {
-                const rawAgents = await this.requestServeJson("/agent");
-                const agents = Array.isArray(rawAgents)
-                    ? rawAgents.flatMap((entry) => {
-                        if (!isRecord(entry) || typeof entry.id !== "string") {
-                            return [];
-                        }
-                        return [
-                            {
-                                name: entry.id,
-                                isPrimary: entry.isPrimary !== false,
-                            },
-                        ];
-                    })
-                    : [];
+                const agents = await this.fetchV2AgentSummaries();
                 this.respond(webview, {
                     type: "agents.list.response",
                     requestId,
@@ -1776,12 +1892,31 @@ class SidebarProvider {
                     agents: entries.map((entry) => ({
                         name: entry.name,
                         isPrimary: entry.isPrimary,
+                        hidden: LEGACY_HIDDEN_AGENT_NAMES.has(entry.name.trim().toLowerCase()),
                     })),
                 },
             });
         }
         catch (error) {
             this.respondError(webview, requestId, error, "获取 agents 失败。");
+        }
+    }
+    /**
+     * Mirrors the CLI agent picker: every primary, non-hidden agent reported by the server.
+     * Custom agents (for example the presets an omo install adds, or anything dropped into
+     * ~/.config/opencode/agent) are part of that same list, so they show up here automatically.
+     */
+    async fetchV2AgentSummaries() {
+        // A freshly started `opencode serve` can answer the first `/agent` call with an empty
+        // list while the config and agent directories are still loading. Retry briefly here;
+        // the webview also re-asks a few times, so a slow warm-up still ends with the real list.
+        const retryDelaysMs = [150, 300, 600, 1200];
+        for (let attempt = 0;; attempt += 1) {
+            const agents = (0, agentSummary_1.mapAgentSummaries)(await this.requestServeJson("/agent"));
+            if (agents.length > 0 || attempt >= retryDelaysMs.length) {
+                return agents;
+            }
+            await new Promise((resolve) => setTimeout(resolve, retryDelaysMs[attempt]));
         }
     }
     async handleComposerResourcesListRequest(webview, requestId) {
@@ -2005,8 +2140,7 @@ class SidebarProvider {
             }),
             this.safeCount(async () => {
                 if (v2) {
-                    const payload = await this.requestServeJson("/agent");
-                    return Array.isArray(payload) ? payload.length : 0;
+                    return (0, agentSummary_1.mapAgentSummaries)(await this.requestServeJson("/agent")).length;
                 }
                 const result = await (0, opencodeCli_1.agentList)({ env, cwd });
                 const parsed = (0, parsers_1.parseAgentList)(result.stdout);
@@ -2223,6 +2357,9 @@ class SidebarProvider {
             if (this.currentRun?.requestId !== requestId) {
                 return;
             }
+            if (runtime.apiVersion === "v2" && !this.currentRun.messageBaselineIds) {
+                throw new Error("无法确认 OpenCode 会话历史，消息尚未发送，请重试。");
+            }
             inlineDiffRun = this.inlineDiff.beginRun({
                 runId: requestId,
                 sessionId,
@@ -2235,6 +2372,8 @@ class SidebarProvider {
             while (this.currentRun?.requestId === requestId) {
                 const turnStartedAt = Date.now();
                 const streamState = (0, runLifecycle_1.createServeStreamState)();
+                this.currentRun.streamState = streamState;
+                streamState.baselineMessageIds = this.currentRun.messageBaselineIds;
                 const eventAbort = new AbortController();
                 this.currentRun.eventAbort = eventAbort;
                 let markEventStreamReady;
@@ -2533,14 +2672,14 @@ class SidebarProvider {
         this.beginQueuedPromptTurn(webview, requestId, consumed);
         this.scheduleQueuedPromptDelivery(webview, requestId);
     }
-    async reconcileQueuedAssistantBoundary(webview, requestId, sessionId) {
+    async reconcileQueuedAssistantBoundary(webview, requestId, sessionId, providedMessages) {
         const queue = this.currentRun?.requestId === requestId
             ? this.currentRun.queue
             : [];
         if (!queue.some((item) => item.delivery !== "queued")) {
             return false;
         }
-        const rawMessages = await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}/message`);
+        const rawMessages = providedMessages ?? await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}/message`);
         if (!Array.isArray(rawMessages)) {
             return false;
         }
@@ -2554,7 +2693,7 @@ class SidebarProvider {
                 continue;
             }
             const info = rawInfo;
-            if (info.role !== "assistant" ||
+            if ((info.role !== "assistant" && info.type !== "idle") ||
                 typeof info.parentID !== "string" ||
                 typeof info.id !== "string") {
                 continue;
@@ -2703,6 +2842,8 @@ class SidebarProvider {
             if (!run || run.requestId !== requestId) {
                 return;
             }
+            run.messageBaselineIds = new Set(Array.isArray(rawMessages) ? rawMessages.flatMap((message) => isRecord(message) && isRecord(message.info) && typeof message.info.id === "string"
+                ? [message.info.id] : []) : []);
             const currentTurn = run.recoveryTranscript.slice(-2);
             run.recoveryTranscript = [...history, ...currentTurn];
             run.recoveryAssistantIndex = run.recoveryTranscript.length - 1;
@@ -2909,38 +3050,49 @@ class SidebarProvider {
     }
     async consumeServeEvents(webview, requestId, sessionId, runtime, signal, streamState, onReady) {
         const lifecycle = this.createRunLifecycleAdapter(webview, requestId);
+        const streamController = new AbortController();
+        const abortStream = () => streamController.abort();
+        signal.addEventListener("abort", abortStream, { once: true });
+        if (signal.aborted)
+            abortStream();
         let reader;
+        let connectionTimer;
+        let connectionTimedOut = false;
         try {
-            const stream = await this.serveClient.openEventStream(runtime, signal);
+            const connectionTimeout = new Promise((_resolve, reject) => {
+                connectionTimer = setTimeout(() => {
+                    connectionTimedOut = true;
+                    streamController.abort();
+                    reject(new Error("连接 OpenCode 事件流超时，消息尚未发送。"));
+                }, STREAM_CONNECTION_TIMEOUT_MS);
+            });
+            const stream = await Promise.race([
+                this.serveClient.openEventStream(runtime, streamController.signal),
+                connectionTimeout,
+            ]);
+            clearTimeout(connectionTimer);
             reader = stream.getReader();
             onReady?.();
             const decoder = new TextDecoder();
             let buffer = "";
             let pendingRead = reader.read();
             let streamEnded = false;
-            while (!signal.aborted && !streamEnded) {
-                const next = await Promise.race([
-                    pendingRead.then((result) => ({ type: "read", result }), (error) => ({ type: "readError", error })),
-                    (0, runLifecycle_1.delay)(250, signal).then(() => ({ type: "poll" })),
-                ]);
+            while (!signal.aborted) {
+                const next = streamEnded
+                    ? await (0, runLifecycle_1.delay)(250, signal).then(() => ({ type: "poll" }))
+                    : await Promise.race([
+                        pendingRead.then((result) => ({ type: "read", result }), (error) => ({ type: "readError", error })),
+                        (0, runLifecycle_1.delay)(250, signal).then(() => ({ type: "poll" })),
+                    ]);
                 if (next.type === "readError") {
-                    // V2 drops the stream when a slow consumer overflows, and the
-                    // execution keeps running server-side. Fall back to polling
-                    // instead of failing the whole turn.
-                    const message = next.error instanceof Error ? next.error.message : String(next.error);
-                    (0, diagnostics_1.logWarn)(`serve event stream interrupted, falling back to polling: ${message}`);
-                    console.warn("[opencode-ui] serve event stream interrupted, falling back to polling:", message);
+                    (0, diagnostics_1.logWarn)("serve event stream interrupted; recovering from native session state");
                     streamEnded = true;
                     continue;
                 }
                 if (next.type === "poll") {
-                    if (await this.isServeTurnIdle(sessionId, streamState)) {
-                        await (0, runLifecycle_1.pollServeBlockers)(lifecycle, requestId, sessionId, streamState);
-                        if ((0, runLifecycle_1.canCompleteServeStreamTurn)(streamState) &&
-                            (await this.isServeTurnIdle(sessionId, streamState))) {
-                            return "done";
-                        }
-                    }
+                    const completion = await this.recoverServeTurn(webview, requestId, sessionId, runtime, signal, streamState, lifecycle);
+                    if (completion !== undefined)
+                        return completion;
                     continue;
                 }
                 const { done, value } = next.result;
@@ -2955,14 +3107,11 @@ class SidebarProvider {
                     const chunk = buffer.slice(0, boundary);
                     buffer = buffer.slice(boundary + 2);
                     boundary = buffer.indexOf("\n\n");
-                    const data = chunk
-                        .split("\n")
+                    const data = chunk.split("\n")
                         .filter((line) => line.startsWith("data:"))
-                        .map((line) => line.slice(5).trim())
-                        .join("\n");
-                    if (!data) {
+                        .map((line) => line.slice(5).trim()).join("\n");
+                    if (!data)
                         continue;
-                    }
                     let event;
                     try {
                         event = JSON.parse(data);
@@ -2973,80 +3122,77 @@ class SidebarProvider {
                     const result = runtime.apiVersion === "v2"
                         ? (0, runLifecycle_1.dispatchV2ServeEvent)(lifecycle, requestId, sessionId, event, streamState)
                         : (0, runLifecycle_1.dispatchServeEvent)(lifecycle, requestId, sessionId, event, streamState);
-                    if (result.error) {
+                    if (result.error)
                         return new EmittedRunError(result.error);
-                    }
+                    if ("stopped" in result && result.stopped)
+                        return "stopped";
                     if (result.done) {
-                        await (0, runLifecycle_1.pollServeBlockers)(lifecycle, requestId, sessionId, streamState);
-                        if ((0, runLifecycle_1.canCompleteServeStreamTurn)(streamState) &&
-                            (await this.isServeTurnIdle(sessionId, streamState))) {
-                            return "done";
-                        }
+                        const completion = await this.recoverServeTurn(webview, requestId, sessionId, runtime, signal, streamState, lifecycle);
+                        if (completion !== undefined)
+                            return completion;
                     }
                 }
-            }
-            // The stream is gone. Poll until the session is idle; if no live
-            // event ever arrived, stop waiting after a bounded grace so a fast
-            // turn that finished before the stream opened cannot hang forever.
-            const noEvidenceDeadline = Date.now() + STREAM_NO_EVIDENCE_GRACE_MS;
-            while (!signal.aborted) {
-                await (0, runLifecycle_1.pollServeBlockers)(lifecycle, requestId, sessionId, streamState);
-                if ((0, runLifecycle_1.canCompleteServeStreamTurn)(streamState) &&
-                    (await this.isServeTurnIdle(sessionId, streamState))) {
-                    return "done";
-                }
-                if (Date.now() >= noEvidenceDeadline &&
-                    (await this.isServeSessionIdle(sessionId))) {
-                    (0, diagnostics_1.logWarn)("serve turn finished without live events; completing from session status");
-                    return "done";
-                }
-                await (0, runLifecycle_1.delay)(250, signal).catch(() => undefined);
             }
             return "stopped";
         }
         catch (error) {
+            if (signal.aborted)
+                return "stopped";
+            if (connectionTimedOut)
+                return new Error("连接 OpenCode 事件流超时，消息尚未发送。");
             return error instanceof Error ? error : new Error(String(error));
         }
         finally {
+            clearTimeout(connectionTimer);
+            signal.removeEventListener("abort", abortStream);
+            streamController.abort();
             await reader?.cancel().catch(() => undefined);
         }
     }
-    async isServeSessionIdle(sessionId) {
+    async recoverServeTurn(webview, requestId, sessionId, runtime, signal, streamState, lifecycle) {
+        if (!lifecycle.isCurrentRun(requestId) || signal.aborted)
+            return "stopped";
+        if (!streamState.turnArmed)
+            return undefined;
         try {
-            const statuses = await this.requestServeJson("/session/status");
-            return (0, runLifecycle_1.isSessionIdleStatus)(statuses, sessionId);
-        }
-        catch {
-            return false;
-        }
-    }
-    async isServeTurnIdle(sessionId, streamState) {
-        if (!(0, runLifecycle_1.canCompleteServeStreamTurn)(streamState)) {
-            return false;
-        }
-        try {
-            const statuses = await this.requestServeJson("/session/status");
-            const idle = (0, runLifecycle_1.isSessionIdleStatus)(statuses, sessionId);
-            const run = this.currentRun;
-            if (idle && run?.sessionId === sessionId && run.queue.length > 0) {
-                const webview = this.runEventWebview ?? this.view?.webview;
-                if (webview) {
-                    await this.reconcileQueuedAssistantBoundary(webview, run.requestId, sessionId);
-                    const current = this.currentRun;
-                    if (!current || current.sessionId !== sessionId) {
-                        return true;
-                    }
-                    if (current.queue.length === 0) {
-                        return true;
-                    }
-                    this.scheduleQueuedPromptDelivery(webview, run.requestId);
-                }
-                return false;
+            const statuses = await this.requestServeJson("/session/status", { signal });
+            if (!(0, runLifecycle_1.isSessionIdleStatus)(statuses, sessionId))
+                return undefined;
+            await (0, runLifecycle_1.pollServeBlockers)(lifecycle, requestId, sessionId, streamState);
+            if (!streamState.blockerPollHealthy || (0, runLifecycle_1.hasPendingServeBlockers)(streamState))
+                return undefined;
+            let messages;
+            if (runtime.apiVersion === "v2" || this.currentRun?.queue.length) {
+                messages = await this.requestServeJson(`/session/${encodeURIComponent(sessionId)}/message`, { signal });
+                await this.reconcileQueuedAssistantBoundary(webview, requestId, sessionId, messages);
             }
-            return idle;
+            const run = this.currentRun;
+            if (!run || run.requestId !== requestId || signal.aborted)
+                return "stopped";
+            if (run.queue.length > 0) {
+                this.scheduleQueuedPromptDelivery(webview, requestId);
+                return undefined;
+            }
+            if (runtime.apiVersion === "v2") {
+                const terminal = (0, runLifecycle_1.recoverV2TurnTerminal)(messages, streamState.baselineMessageIds);
+                if (!terminal)
+                    return undefined;
+                const transcript = (0, parsers_1.liveMessagesToTranscript)(messages);
+                run.recoveryTranscript = transcript;
+                let assistantIndex = transcript.length - 1;
+                while (assistantIndex >= 0 && transcript[assistantIndex].role !== "assistant")
+                    assistantIndex -= 1;
+                run.recoveryAssistantIndex = assistantIndex;
+                run.revision += 1;
+                this.postRunSnapshot(webview);
+                if (terminal.outcome === "failed")
+                    return new Error(terminal.error || "运行失败。");
+                return terminal.outcome === "interrupted" ? "stopped" : "done";
+            }
+            return (0, runLifecycle_1.canCompleteServeStreamTurn)(streamState) ? "done" : undefined;
         }
         catch {
-            return false;
+            return signal.aborted ? "stopped" : undefined;
         }
     }
     startBlockerPoll(webview, requestId, sessionId, streamState) {
@@ -3091,18 +3237,20 @@ class SidebarProvider {
             onAssistantMessage: (message) => {
                 this.observeQueuedAssistantMessage(webview, requestId, message);
             },
-            acceptBlockerSession: (candidateRequestId, sessionId, blockerSessionId) => {
-                if (!blockerSessionId) {
+            acceptBlockerSession: (candidateRequestId, sessionId, blockerSessionId, streamState) => {
+                if (!blockerSessionId || !streamState) {
                     return false;
                 }
-                return (blockerSessionId === sessionId ||
-                    this.currentRun?.requestId === candidateRequestId);
+                return (this.currentRun?.requestId === candidateRequestId &&
+                    this.currentRun.sessionId === sessionId &&
+                    (0, runLifecycle_1.isRunBlockerSession)(sessionId, blockerSessionId, streamState));
             },
             setPendingPermission: (event) => {
                 if (this.currentRun?.requestId === requestId) {
                     this.currentRun.pendingPermission = event;
                     this.currentRun.revision += 1;
                     if (!event) {
+                        this.postRunSnapshot(webview);
                         this.scheduleQueuedPromptDelivery(webview, requestId);
                     }
                 }
@@ -3112,6 +3260,7 @@ class SidebarProvider {
                     this.currentRun.pendingQuestion = event;
                     this.currentRun.revision += 1;
                     if (!event) {
+                        this.postRunSnapshot(webview);
                         this.scheduleQueuedPromptDelivery(webview, requestId);
                     }
                 }
@@ -3423,6 +3572,8 @@ class SidebarProvider {
     }
     async requestServeJson(pathname, init) {
         return this.serveClient.requestJson(pathname, {
+            endpoint: init?.endpoint,
+            cwd: init?.cwd,
             method: init?.method ?? "GET",
             body: init?.body,
             includeCwd: init?.includeCwd ?? true,
@@ -3464,6 +3615,8 @@ class SidebarProvider {
     }
     async requestServeNoContent(pathname, init) {
         return this.serveClient.requestNoContent(pathname, {
+            endpoint: init?.endpoint,
+            cwd: init?.cwd,
             method: init?.method ?? "POST",
             body: init?.body,
             includeCwd: init?.includeCwd ?? true,

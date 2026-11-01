@@ -1,0 +1,18 @@
+.v2-form-fields { display: grid; gap: 12px; min-width: 0; }
+.v2-form-field { border: 0; padding: 0; margin: 0; min-width: 0; }
+.v2-form-field legend { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-weight: 600; }
+.v2-form-field__optional, .v2-form-field__description { color: var(--ui-text-muted); font-size: 12px; font-weight: 400; }
+.v2-form-field__description { margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.v2-form-field input:not([type='radio']):not([type='checkbox']), .v2-form-field select {
+  box-sizing: border-box; width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid var(--ui-border);
+  border-radius: 6px; color: var(--ui-text); background: var(--ui-input-bg); font: inherit;
+}
+.v2-form-field__choices, .v2-form-field__external { display: grid; gap: 7px; }
+.v2-form-field__choice, .v2-form-field__external label { display: flex; align-items: flex-start; gap: 8px; }
+.v2-form-field__choice span { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.v2-form-field__choice strong { font-size: 13px; font-weight: 500; }
+.v2-form-field__choice small { color: var(--ui-text-muted); }
+.v2-form-field__custom { display: flex; align-items: center; gap: 6px; }
+.v2-form-field__skip { margin-top: 5px; font-size: 12px; }
+.v2-form-field__error { display: block; color: var(--ui-danger); font-size: 12px; margin: 5px 0 0; overflow-wrap: anywhere; }
+.question-banner--native .question-banner__body { max-height: min(38vh, 320px); overflow-y: auto; }

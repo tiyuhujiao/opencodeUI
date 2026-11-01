@@ -36,6 +36,8 @@ import { TimelineDialog } from './components/dialog/TimelineDialog'
 import { ResourceDialog, type ResourceDialogKind } from './components/dialog/ResourceDialog'
 import { ExportDialog, type SessionExportOptions } from './components/dialog/ExportDialog'
 import { ProviderSettingsPage } from './components/provider/ProviderSettingsPage'
+import { V2QuestionBanner } from './components/V2QuestionBanner'
+import type { V2FormAnswer, V2FormInfo } from '../../src/shared/opencodeV2Form'
 import { resolveSessionSelectionAfterList } from './sessionSelection'
 import {
   applyRunEventToTranscript,
@@ -78,6 +80,13 @@ import {
   type WorkspaceResourceSummary
 } from '../../src/shared/protocol'
 import { findTranscriptMatches, type TranscriptSearchMatch, type TranscriptSearchOptions } from '../../src/shared/search'
+import {
+  getAgentLabel,
+  getDefaultAgentName,
+  getSelectableAgents,
+  getVisibleAgentOptions,
+  isSelectableAgentSelection
+} from './agentOptions'
 import { summarizeEditedFiles, type EditedFileSummary } from './editedFiles'
 import {
   countCompletedTodos,
@@ -212,6 +221,7 @@ type PendingRunCompletion = {
 type PendingQuestionState = {
   questionId: string
   questions: QuestionInfo[]
+  form?: V2FormInfo
 }
 
 type SessionListRequestMeta = {
@@ -570,58 +580,11 @@ function TodoPanel({ todos }: { todos: TodoItem[] }) {
   )
 }
 
-const VISIBLE_BUILTIN_AGENT_NAMES = new Set(['build', 'plan'])
-const HIDDEN_BUILTIN_AGENT_NAMES = new Set(['compaction', 'explore', 'general', 'summary', 'title'])
+const AGENT_LIST_RETRY_DELAY_MS = 2000
+const AGENT_LIST_MAX_RETRIES = 6
 
 function normalizeAgentName(name: string) {
   return name.trim().toLowerCase()
-}
-
-function isVisibleAgentName(name: string) {
-  const normalized = normalizeAgentName(name)
-  return normalized.length > 0 && !HIDDEN_BUILTIN_AGENT_NAMES.has(normalized)
-}
-
-function getVisibleAgentOptions(agents: AgentSummary[], selectedAgent = '') {
-  const seen = new Set<string>()
-  const merged: AgentSummary[] = []
-
-  const add = (agent: AgentSummary) => {
-    const name = agent.name.trim()
-    const normalized = normalizeAgentName(name)
-    if (!name || !isVisibleAgentName(name) || seen.has(normalized)) {
-      return
-    }
-    seen.add(normalized)
-    merged.push({ ...agent, name })
-  }
-
-  if (selectedAgent) {
-    add({ name: selectedAgent, isPrimary: false })
-  }
-  for (const agent of agents) {
-    add(agent)
-  }
-
-  return merged
-}
-
-function isVisibleAgentSelection(agents: AgentSummary[], name: string) {
-  const normalized = normalizeAgentName(name)
-  if (!normalized || !isVisibleAgentName(name)) {
-    return false
-  }
-  return VISIBLE_BUILTIN_AGENT_NAMES.has(normalized) || agents.some((agent) => normalizeAgentName(agent.name) === normalized)
-}
-
-function getDefaultAgentName(agents: AgentSummary[]) {
-  const options = getVisibleAgentOptions(agents)
-  return (
-    options.find((agent) => normalizeAgentName(agent.name) === 'build')?.name ??
-    options.find((agent) => normalizeAgentName(agent.name) === 'plan')?.name ??
-    options[0]?.name ??
-    'build'
-  )
 }
 
 function AgentMenu({
@@ -640,12 +603,13 @@ function AgentMenu({
   const { t } = useI18n()
   const detailsRef = useRef<HTMLDetailsElement | null>(null)
   const options = useMemo(() => getVisibleAgentOptions(agents, selectedAgent), [agents, selectedAgent])
-  const selected = options.find((agent) => normalizeAgentName(agent.name) === normalizeAgentName(selectedAgent))?.name ?? options[0]?.name ?? ''
+  const selected = options.find((agent) => normalizeAgentName(agent.name) === normalizeAgentName(selectedAgent)) ?? options[0]
+  const selectedLabel = selected ? getAgentLabel(selected) : ''
 
   return (
     <details className="agent-menu" ref={detailsRef}>
-      <summary className="agent-menu__summary" aria-label={`agent mode ${selected || 'not selected'}`}>
-        <span className="agent-menu__value">{selected || (loading ? t('Loading') : t('Agent'))}</span>
+      <summary className="agent-menu__summary" aria-label={`agent mode ${selected?.name || 'not selected'}`}>
+        <span className="agent-menu__value">{selectedLabel || (loading ? t('Loading') : t('Agent'))}</span>
         <span className="agent-menu__chevron" aria-hidden="true" />
       </summary>
       <div className="agent-menu__panel" role="listbox" aria-label="agent mode">
@@ -653,7 +617,7 @@ function AgentMenu({
         {error ? <div className="agent-menu__error">{t(error)}</div> : null}
         {options.length === 0 ? <div className="agent-menu__hint">{t('No agents')}</div> : null}
         {options.map((agent) => {
-          const active = agent.name === selected
+          const active = agent.name === selected?.name
           return (
             <button
               key={agent.name}
@@ -661,6 +625,7 @@ function AgentMenu({
               role="option"
               aria-selected={active}
               className={`agent-menu__option${active ? ' is-active' : ''}`}
+              title={agent.description}
               onClick={() => {
                 onSelect(agent.name)
                 if (detailsRef.current) {
@@ -668,7 +633,7 @@ function AgentMenu({
                 }
               }}
             >
-              <span className="agent-menu__optionName">{agent.name}</span>
+              <span className="agent-menu__optionName">{getAgentLabel(agent)}</span>
             </button>
           )
         })}
@@ -1162,6 +1127,8 @@ export default function App() {
   const providersRequestIdsRef = useRef<Set<string>>(new Set())
   const modelsRequestIdsRef = useRef<Set<string>>(new Set())
   const agentsRequestIdsRef = useRef<Set<string>>(new Set())
+  const agentListRetryTimerRef = useRef<number | null>(null)
+  const agentListRetryCountRef = useRef(0)
   const composerResourcesRequestIdsRef = useRef<Set<string>>(new Set())
   const latestComposerResourcesRequestIdRef = useRef<string | null>(null)
   const mcpRequestIdsRef = useRef<Map<string, { name: string; enabled: boolean }>>(new Map())
@@ -1773,6 +1740,7 @@ export default function App() {
     setPendingQuestion(snapshot.pendingQuestion
       ? {
           questionId: snapshot.pendingQuestion.questionId,
+          form: snapshot.pendingQuestion.form,
           questions: snapshot.pendingQuestion.questions.map((question) => ({
             ...question,
             options: question.options.map((option) => ({ ...option }))
@@ -2065,7 +2033,7 @@ export default function App() {
   )
 
   const requestQuestionReply = useCallback(
-    (questionId: string, answers: string[][]) => {
+    (questionId: string, answers: string[][] | V2FormAnswer) => {
       const vscode = getVsCodeApi()
       if (!vscode) {
         setRunStatus('Not running in VS Code')
@@ -2085,7 +2053,7 @@ export default function App() {
         requestId,
         payload: {
           questionId,
-          answers
+          ...(Array.isArray(answers) ? { answers } : { answer: answers })
         }
       })
     },
@@ -2366,6 +2334,16 @@ export default function App() {
       requestId
     })
   }, [pushDebug, startSelfcheckTimer])
+
+  useEffect(
+    () => () => {
+      if (agentListRetryTimerRef.current !== null) {
+        window.clearTimeout(agentListRetryTimerRef.current)
+        agentListRetryTimerRef.current = null
+      }
+    },
+    []
+  )
 
   const requestComposerResources = useCallback(() => {
     const vscode = getVsCodeApi()
@@ -2730,11 +2708,12 @@ export default function App() {
             setResourceDialogKind('agents')
             return
           }
-          if (!agents.some((agent) => agent.name.toLowerCase() === next)) {
+          const match = getSelectableAgents(agents).find((agent) => normalizeAgentName(agent.name) === next)
+          if (!match) {
             setResourceDialogKind('agents')
             return
           }
-          setSelectedAgent(agents.find((agent) => agent.name.toLowerCase() === next)?.name ?? next)
+          setSelectedAgent(match.name)
         }
       },
       {
@@ -3602,22 +3581,42 @@ export default function App() {
         }
 
         agentsRequestIdsRef.current.delete(message.requestId)
-        setAgents(message.payload.agents)
-        setSelectedAgent((current) => {
-          if (isVisibleAgentSelection(message.payload.agents, current)) {
-            return current
-          }
-          if (!current) {
-            const persisted = pendingInitialSelectedAgentRef.current
-            pendingInitialSelectedAgentRef.current = null
-            if (persisted && isVisibleAgentSelection(message.payload.agents, persisted)) {
-              return persisted
-            }
-            return getDefaultAgentName(message.payload.agents)
-          }
-          return getDefaultAgentName(message.payload.agents)
-        })
         setAgentsError(null)
+        // `opencode serve` answers the first `/agent` call for a directory with an empty list
+        // while it loads its config and agent files, then reports the real agents seconds
+        // later. Ask again instead of settling for the fallback agent.
+        const incomingAgents = message.payload.agents
+        if (incomingAgents.length === 0) {
+          if (
+            agentListRetryCountRef.current < AGENT_LIST_MAX_RETRIES
+            && agentListRetryTimerRef.current === null
+          ) {
+            agentListRetryCountRef.current += 1
+            agentListRetryTimerRef.current = window.setTimeout(() => {
+              agentListRetryTimerRef.current = null
+              requestAgents()
+            }, AGENT_LIST_RETRY_DELAY_MS)
+          }
+        } else {
+          agentListRetryCountRef.current = 0
+        }
+        if (incomingAgents.length > 0) {
+          setAgents(incomingAgents)
+          setSelectedAgent((current) => {
+            if (isSelectableAgentSelection(incomingAgents, current)) {
+              return current
+            }
+            if (!current) {
+              const persisted = pendingInitialSelectedAgentRef.current
+              pendingInitialSelectedAgentRef.current = null
+              if (persisted && isSelectableAgentSelection(incomingAgents, persisted)) {
+                return persisted
+              }
+              return getDefaultAgentName(incomingAgents)
+            }
+            return getDefaultAgentName(incomingAgents)
+          })
+        }
         setLoadingAgents(agentsRequestIdsRef.current.size > 0)
         return
       }
@@ -3851,7 +3850,8 @@ export default function App() {
         if (message.payload.event.type === 'question') {
           setPendingQuestion({
             questionId: message.payload.event.questionId,
-            questions: message.payload.event.questions
+            questions: message.payload.event.questions,
+            form: message.payload.event.form
           })
           setRunStatus('Question needs input')
           return
@@ -4697,7 +4697,9 @@ export default function App() {
         ) : null}
         <div className={`chat${pendingQuestion ? ' chat--has-question' : ''}`}>
           {pendingQuestion ? (
-            <QuestionBanner pending={pendingQuestion} onReply={requestQuestionReply} onReject={requestQuestionReject} />
+            pendingQuestion.form ? (
+              <V2QuestionBanner key={pendingQuestion.questionId} form={pendingQuestion.form} onReply={requestQuestionReply} onReject={requestQuestionReject} />
+            ) : <QuestionBanner pending={pendingQuestion} onReply={requestQuestionReply} onReject={requestQuestionReject} />
           ) : null}
           {transcriptError ? <p className="error-panel">{t(transcriptError)}</p> : null}
           {!transcriptError && transcript.length > 0 ? (
@@ -5172,6 +5174,8 @@ export default function App() {
         mcpServers={composerMcpServers}
         skills={composerSkills}
         agents={agents}
+        agentsLoading={loadingAgents}
+        agentsError={agentsError}
         thinkingOptions={thinkingOptions}
         selectedAgent={selectedAgent}
         selectedThinking={selectedThinkingOption}
@@ -5192,7 +5196,13 @@ export default function App() {
           selectThinkingOption(value)
           setResourceDialogKind(null)
         }}
-        onRefresh={requestComposerResources}
+        onRefresh={() => {
+          if (resourceDialogKind === 'agents') {
+            requestAgents()
+            return
+          }
+          requestComposerResources()
+        }}
         onClose={() => setResourceDialogKind(null)}
       />
 

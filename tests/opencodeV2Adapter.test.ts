@@ -287,11 +287,11 @@ describe('OpenCode V2 adapter', () => {
           data: {
             id: 'frm_1',
             sessionID: 'ses_1',
+            title: 'Questions',
             fields: [
-              { key: 'authorization', type: 'external' },
               { key: 'q0', type: 'string' },
               { key: 'enabled', type: 'boolean' },
-              { key: 'q1', type: 'multiselect' }
+              { key: 'q1', type: 'multiselect', options: [], custom: true }
             ]
           }
         });
@@ -541,6 +541,12 @@ describe('OpenCode V2 adapter', () => {
             name: 'Hidden',
             mode: 'primary',
             hidden: true
+          },
+          {
+            id: 'omo-oracle',
+            name: 'OMo Oracle',
+            mode: 'primary',
+            description: 'Preset agent installed by omo.'
           }
         ]
       })
@@ -560,6 +566,13 @@ describe('OpenCode V2 adapter', () => {
         displayName: 'General',
         isPrimary: false,
         description: ''
+      },
+      {
+        id: 'omo-oracle',
+        name: 'omo-oracle',
+        displayName: 'OMo Oracle',
+        isPrimary: true,
+        description: 'Preset agent installed by omo.'
       }
     ]);
   });
@@ -683,7 +696,7 @@ describe('OpenCode V2 adapter', () => {
     expect(result[1]?.info.time.streamed).toBe(3);
   });
 
-  it('skips hidden question fields and defaults custom input to enabled', async () => {
+  it('keeps hidden fields in the native form and defaults declared options to closed', async () => {
     const fetchMock = vi.fn(async () =>
       json({
         data: [
@@ -711,6 +724,7 @@ describe('OpenCode V2 adapter', () => {
                 type: 'multiselect',
                 title: 'Multi',
                 description: 'Pick several',
+                options: [],
                 custom: false
               }
             ]
@@ -728,7 +742,7 @@ describe('OpenCode V2 adapter', () => {
         question: 'Which option?',
         options: [{ label: 'One', description: 'One' }],
         multiple: false,
-        custom: true
+        custom: false
       },
       {
         header: 'Multi',
@@ -773,13 +787,15 @@ describe('OpenCode V2 adapter', () => {
         }
         if (path === '/api/integration/openai/connect/oauth') {
           return json({
-            data: { attemptID: 'con_1', url: 'https://auth.test', mode: 'auto' }
+            data: { attemptID: 'con_1', url: 'https://auth.test', mode: 'auto',
+              instructions: '', time: { created: Date.now(), expires: Date.now() + 60_000 } }
           });
         }
         if (path === '/api/integration/openai/connect/oauth/con_1') {
           statusCalls += 1;
           return json({
-            data: { status: statusCalls < 3 ? 'pending' : 'complete' }
+            data: { status: statusCalls < 3 ? 'pending' : 'complete',
+              time: { created: Date.now(), expires: Date.now() + 60_000 } }
           });
         }
         throw new Error(`Unexpected path ${path}`);
@@ -886,7 +902,7 @@ describe('OpenCode V2 adapter', () => {
     }
   });
 
-  it('surfaces non-question interactive forms and cancels the ones it cannot answer', async () => {
+  it('surfaces native external forms without implicitly acknowledging or cancelling them', async () => {
     const requested: Array<{ path: string; method: string; search: string }> = [];
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));
@@ -949,14 +965,15 @@ describe('OpenCode V2 adapter', () => {
             ]
           })
         ]
+      }),
+      expect.objectContaining({
+        id: 'frm_external', questions: [],
+        form: expect.objectContaining({
+          fields: [{ key: 'url', type: 'external', url: 'https://example.com' }]
+        })
       })
     ]);
-    expect(requested).toContainEqual(
-      expect.objectContaining({
-        path: '/api/session/ses_1/form/frm_external',
-        method: 'DELETE'
-      })
-    );
+    expect(requested.every((request) => request.method === 'GET')).toBe(true);
   });
 
   it('submits option values instead of their rendered labels', async () => {

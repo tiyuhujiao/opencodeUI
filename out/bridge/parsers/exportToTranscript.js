@@ -4,7 +4,7 @@ exports.exportToTranscript = exportToTranscript;
 exports.liveMessagesToTranscript = liveMessagesToTranscript;
 const exportJson_1 = require("./exportJson");
 function exportToTranscript(payload) {
-    return payload.messages.map((message) => {
+    return payload.messages.filter((message) => !isRecord(message.info) || message.info.type !== 'idle').map((message) => {
         const id = resolveMessageId(message.info);
         const created = resolveCreated(message.info);
         const completed = resolveCompleted(message.info);

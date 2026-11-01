@@ -353,6 +353,9 @@ describe("run lifecycle serve event dispatch", () => {
 			currentRequestId: "request-1",
 		});
 		const streamState = createServeStreamState();
+		dispatchServeEvent(lifecycle, "request-1", "parent-session", {
+			type: "session.created", properties: { info: { id: "child-session", parentID: "parent-session" } },
+		}, streamState);
 		streamState.lastAssistantMessageId = "message-1";
 		armServeStreamTurn(streamState);
 		dispatchServeEvent(
@@ -452,7 +455,7 @@ describe("run lifecycle serve event dispatch", () => {
 		expect(childDoneResult).toEqual({ done: true });
 	});
 
-	it("polls pending blockers across child and orphan task sessions", async () => {
+	it("polls verified child blockers and excludes orphan task sessions", async () => {
 		const requestServeJson = vi.fn(async (pathname: string) => {
 			if (pathname === "/permission") {
 				return [
@@ -498,9 +501,9 @@ describe("run lifecycle serve event dispatch", () => {
 
 		await expect(
 			pollServeBlockers(lifecycle, "request-1", "parent-session", streamState),
-		).resolves.toBe(2);
+		).resolves.toBe(1);
 
-		expect(posted).toHaveLength(2);
+		expect(posted).toHaveLength(1);
 		expect(posted[0]).toMatchObject({
 			payload: {
 				event: {
@@ -511,17 +514,8 @@ describe("run lifecycle serve event dispatch", () => {
 				},
 			},
 		});
-		expect(posted[1]).toMatchObject({
-			payload: {
-				event: {
-					type: "question",
-					questionId: "question-orphan",
-					sessionId: "orphan-task-session",
-				},
-			},
-		});
 		expect(streamState.pendingPermissionIds.has("permission-child")).toBe(true);
-		expect(streamState.pendingQuestionIds.has("question-orphan")).toBe(true);
+		expect(streamState.pendingQuestionIds.has("question-orphan")).toBe(false);
 	});
 
 	it("skips the session tree when there are no pending blockers", async () => {

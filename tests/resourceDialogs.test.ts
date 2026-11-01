@@ -26,7 +26,7 @@ describe('management resource dialogs', () => {
     expect(source).toContain("? 'Connecting...'");
     expect(source).toContain("'Disconnecting...'");
     expect(source).toContain('className="resource-dialog__statusSpinner"');
-    expect(source).toContain('aria-busy={props.refreshing}');
+    expect(source).toContain('aria-busy={refreshing}');
     expect(provider).toContain('`/mcp/${encodedName}/${enabled ? "connect" : "disconnect"}`');
     expect(provider).toContain('waitForMcpServerTransition(name, enabled)');
     expect(styles).toContain('transform: translate(-50%, -50%);');

@@ -1,6 +1,7 @@
 import { encodeOpencodeDirectory } from './opencodeDirectory';
 import {
   createOpencodeV2AdapterState,
+  disposeOpencodeV2Adapter,
   formatServeErrorBody,
   requestOpencodeV2Json,
   requestOpencodeV2NoContent
@@ -14,6 +15,7 @@ export interface OpencodeServeEndpoint {
 }
 
 export interface OpencodeServeRequestOptions {
+  endpoint?: OpencodeServeEndpoint;
   method?: string;
   body?: string;
   includeCwd?: boolean;
@@ -43,7 +45,7 @@ export class OpencodeServeClient {
     options?: OpencodeServeRequestOptions
   ): Promise<T> {
     const cwd = this.resolveCwd(options);
-    const runtime = await this.options.ensureRuntime(cwd);
+    const runtime = options?.endpoint ?? await this.options.ensureRuntime(cwd);
     if (runtime.apiVersion === 'v2') {
       return (await requestOpencodeV2Json(
         this.v2AdapterState,
@@ -65,7 +67,7 @@ export class OpencodeServeClient {
     options?: OpencodeServeRequestOptions
   ): Promise<void> {
     const cwd = this.resolveCwd(options);
-    const runtime = await this.options.ensureRuntime(cwd);
+    const runtime = options?.endpoint ?? await this.options.ensureRuntime(cwd);
     if (runtime.apiVersion === 'v2') {
       await requestOpencodeV2NoContent(
         this.v2AdapterState,
@@ -123,6 +125,10 @@ export class OpencodeServeClient {
 
   public invalidateProviderCache(): void {
     this.v2AdapterState.providerCache.clear();
+  }
+
+  public dispose(): void {
+    void disposeOpencodeV2Adapter(this.v2AdapterState, this.fetch.bind(this));
   }
 
   private async requestWithRuntime(

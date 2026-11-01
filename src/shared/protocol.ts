@@ -1,3 +1,5 @@
+import { isV2FormAnswer, isV2FormFields, type V2FormAnswer, type V2FormField, type V2FormInfo } from './opencodeV2Form';
+
 export const WEBVIEW_REQUEST_WHITELIST = [
   'webview.ready',
   'sessions.list',
@@ -31,6 +33,7 @@ export const WEBVIEW_REQUEST_WHITELIST = [
   'provider.auth.api',
   'provider.auth.oauth.authorize',
   'provider.auth.oauth.callback',
+  'provider.auth.oauth.cancel',
   'provider.auth.disconnect',
   'provider.auth.openExternal',
   'agents.list',
@@ -245,7 +248,7 @@ export type ProviderAuthApiRequest = {
   payload: {
     providerId: string;
     key: string;
-    metadata: Record<string, string>;
+    metadata: V2FormAnswer;
   };
 };
 
@@ -255,7 +258,8 @@ export type ProviderAuthOAuthAuthorizeRequest = {
   payload: {
     providerId: string;
     method: number;
-    inputs: Record<string, string>;
+    inputs: V2FormAnswer;
+    flowId?: string;
   };
 };
 
@@ -266,7 +270,15 @@ export type ProviderAuthOAuthCallbackRequest = {
     providerId: string;
     method: number;
     code?: string;
+    attemptID?: string;
+    flowId?: string;
   };
+};
+
+export type ProviderAuthOAuthCancelRequest = {
+  type: 'provider.auth.oauth.cancel';
+  requestId: string;
+  payload: { providerId: string; method: number; flowId: string; attemptID?: string };
 };
 
 export type ProviderAuthDisconnectRequest = {
@@ -407,6 +419,7 @@ export type WebviewRequestMessage =
   | ProviderAuthApiRequest
   | ProviderAuthOAuthAuthorizeRequest
   | ProviderAuthOAuthCallbackRequest
+  | ProviderAuthOAuthCancelRequest
   | ProviderAuthDisconnectRequest
   | ProviderAuthOpenExternalRequest
   | AgentsListRequest
@@ -593,6 +606,7 @@ export type ActiveRunSnapshot = {
     questionId: string;
     sessionId: string;
     questions: QuestionInfo[];
+    form?: V2FormInfo;
   };
 };
 
@@ -841,6 +855,7 @@ export type ProviderSettingsAuthMethod = {
   type: 'oauth' | 'api';
   label: string;
   prompts: ProviderSettingsAuthPrompt[];
+  fields?: V2FormField[];
 };
 
 export type ProviderSettingsCatalogEntry = {
@@ -947,6 +962,8 @@ export type ProviderAuthAuthorization = {
   url: string;
   method: 'auto' | 'code';
   instructions: string;
+  attemptID?: string;
+  time?: { created: number; expires: number };
 };
 
 export type ProviderAuthApiResponseMessage = {
@@ -964,6 +981,7 @@ export type ProviderAuthOAuthAuthorizeResponseMessage = {
     providerId: string;
     method: number;
     authorization: ProviderAuthAuthorization;
+    flowId?: string;
   };
 };
 
@@ -971,7 +989,14 @@ export type ProviderAuthOAuthCallbackResponseMessage = {
   type: 'provider.auth.oauth.callback.response';
   requestId: string;
   ok: true;
-  payload: { providerId: string };
+  payload: { providerId: string; flowId?: string; attemptID?: string };
+};
+
+export type ProviderAuthOAuthCancelResponseMessage = {
+  type: 'provider.auth.oauth.cancel.response';
+  requestId: string;
+  ok: true;
+  payload: { providerId: string; flowId: string };
 };
 
 export type ProviderAuthDisconnectResponseMessage = {
@@ -991,6 +1016,11 @@ export type ProviderAuthOpenExternalResponseMessage = {
 export type AgentSummary = {
   name: string;
   isPrimary: boolean;
+  /** Human readable label reported by newer servers; falls back to `name`. */
+  displayName?: string;
+  description?: string;
+  /** Servers hide internal agents (title/summary/compaction) from pickers. */
+  hidden?: boolean;
 };
 
 export type ModelsListResponseMessage = {
@@ -1157,6 +1187,7 @@ export type RunStreamEvent =
       questionId: string;
       sessionId: string;
       questions: QuestionInfo[];
+      form?: V2FormInfo;
     }
   | {
       type: 'session';
@@ -1217,10 +1248,10 @@ export type QuestionInfo = {
 export type QuestionReplyRequest = {
   type: 'question.reply';
   requestId: string;
-  payload: {
-    questionId: string;
-    answers: string[][];
-  };
+  payload: { questionId: string } & (
+    | { answers: string[][]; answer?: never }
+    | { answer: V2FormAnswer; answers?: never }
+  );
 };
 
 export type QuestionRejectRequest = {
@@ -1409,6 +1440,7 @@ export type ExtensionResponseMessage =
   | ProviderAuthApiResponseMessage
   | ProviderAuthOAuthAuthorizeResponseMessage
   | ProviderAuthOAuthCallbackResponseMessage
+  | ProviderAuthOAuthCancelResponseMessage
   | ProviderAuthDisconnectResponseMessage
   | ProviderAuthOpenExternalResponseMessage
   | AgentsListResponseMessage
@@ -1460,6 +1492,7 @@ const EXTENSION_RESPONSE_TYPE_SET = new Set<string>([
   'provider.auth.api.response',
   'provider.auth.oauth.authorize.response',
   'provider.auth.oauth.callback.response',
+  'provider.auth.oauth.cancel.response',
   'provider.auth.disconnect.response',
   'provider.auth.openExternal.response',
   'agents.list.response',
@@ -1562,22 +1595,19 @@ function isStringArray(value: unknown, maxItems = 500, maxItemLength = 2048): va
     && value.every((item) => isBoundedString(item, maxItemLength));
 }
 
-function isStringRecord(
-  value: unknown,
-  maxEntries = 50,
-  maxKeyLength = 256,
-  maxValueLength = 16_384
-): value is Record<string, string> {
-  return isObject(value)
-    && Object.entries(value).length <= maxEntries
-    && Object.entries(value).every(([key, entry]) => key.length <= maxKeyLength && isBoundedString(entry, maxValueLength));
-}
-
 function isProviderSettingsAuthPromptWhen(value: unknown): value is ProviderSettingsAuthPromptWhen {
   return isObject(value)
     && isBoundedString(value.key, 256)
     && (value.op === 'eq' || value.op === 'neq')
     && isBoundedString(value.value, 2048);
+}
+
+function isProviderAuthAnswer(value: unknown): value is V2FormAnswer {
+  return isV2FormAnswer(value) && Object.entries(value).length <= 50
+    && Object.entries(value).every(([key, entry]) => key.length <= 256
+      && (typeof entry === 'string' ? entry.length <= 16_384
+        : Array.isArray(entry) ? entry.length <= 100 && entry.reduce((length, item) => length + item.length, 0) <= 16_384
+          : true));
 }
 
 function isProviderSettingsAuthPrompt(value: unknown): value is ProviderSettingsAuthPrompt {
@@ -1759,7 +1789,8 @@ function isProviderSettingsCatalogEntry(value: unknown): value is ProviderSettin
       && isBoundedString(method.label, 2048)
       && Array.isArray(method.prompts)
       && method.prompts.length <= 50
-      && method.prompts.every(isProviderSettingsAuthPrompt));
+      && method.prompts.every(isProviderSettingsAuthPrompt)
+      && (method.fields === undefined || isV2FormFields(method.fields)));
 }
 
 function isProviderSettingsCatalogModel(value: unknown): value is ProviderSettingsCatalogModel {
@@ -1952,6 +1983,7 @@ export function isExtensionResponseMessage(message: unknown): message is Extensi
   if (
     message.type === 'provider.auth.api.response'
     || message.type === 'provider.auth.oauth.callback.response'
+    || message.type === 'provider.auth.oauth.cancel.response'
     || message.type === 'provider.auth.disconnect.response'
   ) {
     return message.ok === true
@@ -1967,7 +1999,11 @@ export function isExtensionResponseMessage(message: unknown): message is Extensi
       && isObject(message.payload.authorization)
       && isBoundedString(message.payload.authorization.url, 16_384)
       && (message.payload.authorization.method === 'auto' || message.payload.authorization.method === 'code')
-      && isBoundedString(message.payload.authorization.instructions, 16_384);
+      && isBoundedString(message.payload.authorization.instructions, 16_384)
+      && (message.payload.authorization.attemptID === undefined || isNonEmptyString(message.payload.authorization.attemptID))
+      && (message.payload.authorization.time === undefined || (isObject(message.payload.authorization.time)
+        && typeof message.payload.authorization.time.created === 'number' && Number.isFinite(message.payload.authorization.time.created)
+        && typeof message.payload.authorization.time.expires === 'number' && Number.isFinite(message.payload.authorization.time.expires)));
   }
 
   if (message.type === 'provider.auth.openExternal.response') {
@@ -2088,11 +2124,12 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
       return false;
     }
 
-    if (!Array.isArray(message.payload.answers)) {
-      return false;
-    }
-
-    if (!message.payload.answers.every((answer) => Array.isArray(answer) && answer.every((item) => typeof item === 'string'))) {
+    const typed = message.payload.answer !== undefined;
+    if (typed
+      ? message.payload.answers !== undefined || !isV2FormAnswer(message.payload.answer)
+      : !Array.isArray(message.payload.answers) || !message.payload.answers.every((answer) =>
+          Array.isArray(answer) && answer.every((item) => typeof item === 'string'))
+    ) {
       return false;
     }
   }
@@ -2256,7 +2293,7 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
       || !isNonEmptyString(message.payload.providerId)
       || !isBoundedString(message.payload.key, 32_768)
       || message.payload.key.trim().length === 0
-      || !isStringRecord(message.payload.metadata)
+      || !isProviderAuthAnswer(message.payload.metadata)
     ) {
       return false;
     }
@@ -2268,7 +2305,8 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
       || !isNonEmptyString(message.payload.providerId)
       || !isNonNegativeInteger(message.payload.method)
       || message.payload.method > 100
-      || !isStringRecord(message.payload.inputs)
+      || !isProviderAuthAnswer(message.payload.inputs)
+      || (message.payload.flowId !== undefined && !isNonEmptyString(message.payload.flowId))
     ) {
       return false;
     }
@@ -2281,9 +2319,18 @@ export function isWebviewRequestMessage(message: unknown): message is WebviewReq
       || !isNonNegativeInteger(message.payload.method)
       || message.payload.method > 100
       || (message.payload.code !== undefined && !isBoundedString(message.payload.code, 16_384))
+      || (message.payload.attemptID !== undefined && !isNonEmptyString(message.payload.attemptID))
+      || (message.payload.flowId !== undefined && !isNonEmptyString(message.payload.flowId))
     ) {
       return false;
     }
+  }
+
+  if (message.type === 'provider.auth.oauth.cancel') {
+    if (!isObject(message.payload) || !isNonEmptyString(message.payload.providerId)
+      || !isNonNegativeInteger(message.payload.method) || message.payload.method > 100
+      || !isNonEmptyString(message.payload.flowId)
+      || (message.payload.attemptID !== undefined && !isNonEmptyString(message.payload.attemptID))) return false;
   }
 
   if (message.type === 'provider.auth.disconnect') {

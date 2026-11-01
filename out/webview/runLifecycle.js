@@ -8,9 +8,13 @@ exports.isSessionIdleStatus = isSessionIdleStatus;
 exports.dispatchServeEvent = dispatchServeEvent;
 exports.dispatchV2ServeEvent = dispatchV2ServeEvent;
 exports.pollServeBlockers = pollServeBlockers;
+exports.isRunBlockerSession = isRunBlockerSession;
 exports.hasPendingServeBlockers = hasPendingServeBlockers;
 exports.delay = delay;
+exports.settleServeBlocker = settleServeBlocker;
+exports.recoverV2TurnTerminal = recoverV2TurnTerminal;
 const parsers_1 = require("../bridge/parsers");
+const opencodeV2Form_1 = require("../shared/opencodeV2Form");
 exports.BLOCKER_POLL_INTERVAL_MS = 1500;
 function createServeStreamState() {
     return {
@@ -24,6 +28,11 @@ function createServeStreamState() {
         pendingDeltaByKey: new Map(),
         pendingPermissionIds: new Set(),
         pendingQuestionIds: new Set(),
+        pendingPermissions: new Map(),
+        pendingQuestions: new Map(),
+        sessionParents: new Map(),
+        blockerRevision: 0,
+        blockerPollHealthy: true,
         v2LastUserMessageId: null,
         v2Tools: new Map(),
     };
@@ -37,6 +46,7 @@ function armServeStreamTurn(streamState, options) {
 function canCompleteServeStreamTurn(streamState) {
     return (streamState.turnArmed &&
         streamState.turnLive &&
+        streamState.blockerPollHealthy &&
         !hasPendingServeBlockers(streamState));
 }
 function isSessionIdleStatus(value, sessionId) {
@@ -52,6 +62,8 @@ function isSessionIdleStatus(value, sessionId) {
         status.type === "idle");
 }
 function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
+    if (!adapter.isCurrentRun(requestId))
+        return { done: false };
     if (typeof event !== "object" || event === null) {
         return { done: false };
     }
@@ -60,11 +72,16 @@ function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
     const properties = typeof record.properties === "object" && record.properties !== null
         ? record.properties
         : {};
+    if (type === "session.created") {
+        const info = isRecord(properties.info) ? properties.info : properties;
+        recordSessionParent(streamState, info.id ?? info.sessionID, info.parentID);
+        return { done: false };
+    }
     markServeTurnLive(type, properties, sessionId, streamState);
     if (type === "permission.asked") {
         const permissionEvent = normalizePermissionRequest(properties);
         if (permissionEvent &&
-            adapter.acceptBlockerSession(requestId, sessionId, permissionEvent.sessionId)) {
+            acceptBlockerSession(adapter, requestId, sessionId, permissionEvent.sessionId, streamState)) {
             surfacePendingPermission(adapter, permissionEvent, streamState);
         }
         return { done: false };
@@ -72,28 +89,26 @@ function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
     if (type === "question.asked") {
         const questionEvent = normalizeQuestionRequest(properties);
         if (questionEvent &&
-            adapter.acceptBlockerSession(requestId, sessionId, questionEvent.sessionId)) {
+            acceptBlockerSession(adapter, requestId, sessionId, questionEvent.sessionId, streamState)) {
             surfacePendingQuestion(adapter, questionEvent, streamState);
         }
         return { done: false };
     }
     if (type === "permission.replied") {
-        if (adapter.acceptBlockerSession(requestId, sessionId, typeof properties.sessionID === "string"
+        if (acceptBlockerSession(adapter, requestId, sessionId, typeof properties.sessionID === "string"
             ? properties.sessionID
-            : undefined) &&
+            : undefined, streamState) &&
             typeof properties.requestID === "string") {
-            streamState.pendingPermissionIds.delete(properties.requestID);
-            adapter.setPendingPermission(undefined);
+            settlePendingPermission(adapter, properties.requestID, streamState);
         }
         return { done: false };
     }
     if (type === "question.replied" || type === "question.rejected") {
-        if (adapter.acceptBlockerSession(requestId, sessionId, typeof properties.sessionID === "string"
+        if (acceptBlockerSession(adapter, requestId, sessionId, typeof properties.sessionID === "string"
             ? properties.sessionID
-            : undefined) &&
+            : undefined, streamState) &&
             typeof properties.requestID === "string") {
-            streamState.pendingQuestionIds.delete(properties.requestID);
-            adapter.setPendingQuestion(undefined);
+            settlePendingQuestion(adapter, properties.requestID, streamState);
         }
         return { done: false };
     }
@@ -181,11 +196,17 @@ function dispatchServeEvent(adapter, requestId, sessionId, event, streamState) {
     return { done: false };
 }
 function dispatchV2ServeEvent(adapter, requestId, sessionId, event, streamState) {
+    if (!adapter.isCurrentRun(requestId))
+        return { done: false };
     if (!isRecord(event)) {
         return { done: false };
     }
     const type = typeof event.type === "string" ? event.type : "";
     const data = isRecord(event.data) ? event.data : {};
+    if (type === "session.created") {
+        recordSessionParent(streamState, data.sessionID, data.parentID);
+        return { done: false };
+    }
     const eventSessionID = typeof data.sessionID === "string" ? data.sessionID : undefined;
     const isBlockerLifecycleEvent = type === "permission.asked" ||
         type === "permission.replied" ||
@@ -234,7 +255,7 @@ function dispatchV2ServeEvent(adapter, requestId, sessionId, event, streamState)
             return { done: true, error: message };
         }
         streamState.turnLive = true;
-        return { done: true };
+        return { done: true, stopped: true };
     }
     if (type === "session.execution.failed") {
         const message = sessionErrorMessage(data.error) ?? "运行失败。";
@@ -398,34 +419,32 @@ function dispatchV2ServeEvent(adapter, requestId, sessionId, event, streamState)
             patterns: data.resources,
         });
         if (permission &&
-            adapter.acceptBlockerSession(requestId, sessionId, permission.sessionId)) {
+            acceptBlockerSession(adapter, requestId, sessionId, permission.sessionId, streamState)) {
             surfacePendingPermission(adapter, permission, streamState);
             streamState.turnLive = true;
         }
         return { done: false };
     }
     if (type === "permission.replied") {
-        if (adapter.acceptBlockerSession(requestId, sessionId, typeof data.sessionID === "string" ? data.sessionID : undefined) &&
+        if (acceptBlockerSession(adapter, requestId, sessionId, typeof data.sessionID === "string" ? data.sessionID : undefined, streamState) &&
             typeof data.requestID === "string") {
-            streamState.pendingPermissionIds.delete(data.requestID);
-            adapter.setPendingPermission(undefined);
+            settlePendingPermission(adapter, data.requestID, streamState);
         }
         return { done: false };
     }
     if (type === "form.created") {
         const question = v2FormQuestion(data.form);
         if (question &&
-            adapter.acceptBlockerSession(requestId, sessionId, question.sessionId)) {
+            acceptBlockerSession(adapter, requestId, sessionId, question.sessionId, streamState)) {
             surfacePendingQuestion(adapter, question, streamState);
             streamState.turnLive = true;
         }
         return { done: false };
     }
     if (type === "form.replied" || type === "form.cancelled") {
-        if (adapter.acceptBlockerSession(requestId, sessionId, typeof data.sessionID === "string" ? data.sessionID : undefined) &&
+        if (acceptBlockerSession(adapter, requestId, sessionId, typeof data.sessionID === "string" ? data.sessionID : undefined, streamState) &&
             typeof data.id === "string") {
-            streamState.pendingQuestionIds.delete(data.id);
-            adapter.setPendingQuestion(undefined);
+            settlePendingQuestion(adapter, data.id, streamState);
         }
         return { done: false };
     }
@@ -484,43 +503,103 @@ function toNonNegativeFiniteNumber(value) {
         ? value
         : undefined;
 }
-async function pollServeBlockers(adapter, requestId, sessionId, streamState) {
+function pollServeBlockers(adapter, requestId, sessionId, streamState) {
+    if (streamState.blockerPoll)
+        return streamState.blockerPoll;
+    const promise = pollServeBlockersInternal(adapter, requestId, sessionId, streamState)
+        .finally(() => {
+        if (streamState.blockerPoll === promise)
+            streamState.blockerPoll = undefined;
+    });
+    streamState.blockerPoll = promise;
+    return promise;
+}
+async function pollServeBlockersInternal(adapter, requestId, sessionId, streamState) {
     if (!adapter.isCurrentRun(requestId)) {
         return 0;
     }
+    const revision = streamState.blockerRevision;
+    streamState.blockerPollHealthy = false;
     const [permissionsResult, questionsResult] = await Promise.allSettled([
         adapter.requestServeJson("/permission"),
         adapter.requestServeJson("/question"),
     ]);
-    let surfaced = 0;
+    const permissionsOk = permissionsResult.status === "fulfilled" && Array.isArray(permissionsResult.value);
+    const questionsOk = questionsResult.status === "fulfilled" && Array.isArray(questionsResult.value);
     const permissions = permissionsResult.status === "fulfilled"
         ? normalizePermissionRequestList(permissionsResult.value)
         : [];
     const questions = questionsResult.status === "fulfilled"
         ? normalizeQuestionRequestList(questionsResult.value)
         : [];
-    let sessions = [];
+    let ancestryOk = true;
     if (permissions.length > 0 || questions.length > 0) {
         try {
-            sessions = normalizeSessionTree(await adapter.requestServeJson("/session"));
+            const sessions = normalizeSessionTree(await adapter.requestServeJson("/session"));
+            for (const session of sessions) {
+                recordSessionParent(streamState, session.id, session.parentId);
+            }
         }
         catch {
-            sessions = [];
+            // A paginated or unavailable list is not evidence of ownership.
+            // Resolve each unknown request through its native parent chain.
+        }
+        for (const event of [...permissions, ...questions]) {
+            try {
+                await resolveBlockerAncestry(adapter, sessionId, event.sessionId, streamState);
+            }
+            catch {
+                ancestryOk = false;
+            }
         }
     }
-    reconcilePendingPermissions(adapter, permissions, streamState);
-    reconcilePendingQuestions(adapter, questions, streamState);
-    const permission = pickCurrentRunBlocker(permissions, sessionId, sessions);
-    if (permission &&
-        surfacePendingPermission(adapter, permission, streamState)) {
-        surfaced += 1;
+    if (!adapter.isCurrentRun(requestId) || revision !== streamState.blockerRevision)
+        return 0;
+    streamState.blockerPollHealthy = permissionsOk && questionsOk && ancestryOk;
+    const belongs = (event) => acceptBlockerSession(adapter, requestId, sessionId, event.sessionId, streamState);
+    let surfaced = 0;
+    if (permissionsOk) {
+        surfaced += reconcilePendingPermissions(adapter, permissions.filter(belongs), streamState);
     }
-    const question = pickCurrentRunBlocker(questions, sessionId, sessions);
-    if (question &&
-        surfacePendingQuestion(adapter, question, streamState)) {
-        surfaced += 1;
+    if (questionsOk) {
+        surfaced += reconcilePendingQuestions(adapter, questions.filter(belongs), streamState);
     }
     return surfaced;
+}
+function recordSessionParent(state, id, parent) {
+    if (typeof id === "string" && id !== "global") {
+        state.sessionParents.set(id, typeof parent === "string" ? parent : undefined);
+    }
+}
+function isRunBlockerSession(sessionId, blockerSessionId, state) {
+    const visited = new Set();
+    let id = blockerSessionId;
+    while (id && id !== "global" && !visited.has(id)) {
+        if (id === sessionId)
+            return true;
+        visited.add(id);
+        id = state.sessionParents.get(id);
+    }
+    return false;
+}
+function acceptBlockerSession(adapter, requestId, sessionId, blockerSessionId, state) {
+    return adapter.isCurrentRun(requestId) &&
+        isRunBlockerSession(sessionId, blockerSessionId, state) &&
+        adapter.acceptBlockerSession(requestId, sessionId, blockerSessionId, state);
+}
+async function resolveBlockerAncestry(adapter, root, blocker, state) {
+    const visited = new Set();
+    let id = blocker;
+    while (id && id !== root && id !== "global" && !visited.has(id)) {
+        visited.add(id);
+        if (!state.sessionParents.has(id)) {
+            const info = await adapter.requestServeJson(`/session/${encodeURIComponent(id)}`);
+            if (!isRecord(info) || info.id !== id)
+                throw new Error("Session ancestry unavailable.");
+            recordSessionParent(state, info.id, info.parentID);
+        }
+        id = state.sessionParents.get(id);
+    }
 }
 function hasPendingServeBlockers(streamState) {
     return (streamState.pendingPermissionIds.size > 0 ||
@@ -545,42 +624,70 @@ function delay(ms, signal) {
     });
 }
 function reconcilePendingPermissions(adapter, permissions, streamState) {
-    const activeIds = new Set(permissions.map((item) => item.permissionId));
-    for (const id of [...streamState.pendingPermissionIds]) {
-        if (activeIds.has(id)) {
-            continue;
-        }
-        streamState.pendingPermissionIds.delete(id);
-        adapter.setPendingPermission(undefined);
-    }
+    streamState.pendingPermissions = new Map(permissions.map((event) => [event.permissionId, event]));
+    streamState.pendingPermissionIds = new Set(streamState.pendingPermissions.keys());
+    return presentPendingPermission(adapter, streamState) ? 1 : 0;
 }
 function reconcilePendingQuestions(adapter, questions, streamState) {
-    const activeIds = new Set(questions.map((item) => item.questionId));
-    for (const id of [...streamState.pendingQuestionIds]) {
-        if (activeIds.has(id)) {
-            continue;
-        }
-        streamState.pendingQuestionIds.delete(id);
-        adapter.setPendingQuestion(undefined);
-    }
+    streamState.pendingQuestions = new Map(questions.map((event) => [event.questionId, event]));
+    streamState.pendingQuestionIds = new Set(streamState.pendingQuestions.keys());
+    return presentPendingQuestion(adapter, streamState) ? 1 : 0;
 }
 function surfacePendingPermission(adapter, event, streamState) {
-    adapter.setPendingPermission(event);
-    if (streamState.pendingPermissionIds.has(event.permissionId)) {
+    if (streamState.pendingPermissionIds.has(event.permissionId))
         return false;
-    }
     streamState.pendingPermissionIds.add(event.permissionId);
-    adapter.emit(event);
-    return true;
+    streamState.pendingPermissions.set(event.permissionId, event);
+    streamState.blockerRevision += 1;
+    return presentPendingPermission(adapter, streamState);
 }
 function surfacePendingQuestion(adapter, event, streamState) {
-    adapter.setPendingQuestion(event);
-    if (streamState.pendingQuestionIds.has(event.questionId)) {
+    if (streamState.pendingQuestionIds.has(event.questionId))
         return false;
-    }
     streamState.pendingQuestionIds.add(event.questionId);
-    adapter.emit(event);
-    return true;
+    streamState.pendingQuestions.set(event.questionId, event);
+    streamState.blockerRevision += 1;
+    return presentPendingQuestion(adapter, streamState);
+}
+function presentPendingPermission(adapter, state) {
+    const event = (state.visiblePermissionId && state.pendingPermissions.get(state.visiblePermissionId)) ||
+        state.pendingPermissions.values().next().value;
+    if (event?.permissionId === state.visiblePermissionId)
+        return false;
+    state.visiblePermissionId = event?.permissionId;
+    adapter.setPendingPermission(event);
+    if (event)
+        adapter.emit(event);
+    return event !== undefined;
+}
+function presentPendingQuestion(adapter, state) {
+    const event = (state.visibleQuestionId && state.pendingQuestions.get(state.visibleQuestionId)) ||
+        state.pendingQuestions.values().next().value;
+    if (event?.questionId === state.visibleQuestionId)
+        return false;
+    state.visibleQuestionId = event?.questionId;
+    adapter.setPendingQuestion(event);
+    if (event)
+        adapter.emit(event);
+    return event !== undefined;
+}
+function settlePendingPermission(adapter, id, state) {
+    state.blockerRevision += 1;
+    state.pendingPermissionIds.delete(id);
+    state.pendingPermissions.delete(id);
+    presentPendingPermission(adapter, state);
+}
+function settlePendingQuestion(adapter, id, state) {
+    state.blockerRevision += 1;
+    state.pendingQuestionIds.delete(id);
+    state.pendingQuestions.delete(id);
+    presentPendingQuestion(adapter, state);
+}
+function settleServeBlocker(adapter, kind, id, state) {
+    if (kind === "permission")
+        settlePendingPermission(adapter, id, state);
+    else
+        settlePendingQuestion(adapter, id, state);
 }
 function v2ContentKey(data, kind) {
     const messageID = typeof data.assistantMessageID === "string"
@@ -626,6 +733,29 @@ function sessionErrorMessage(value) {
             ? value.type
             : undefined;
     return message?.trim() || null;
+}
+function recoverV2TurnTerminal(value, baseline) {
+    if (!baseline || !Array.isArray(value))
+        return undefined;
+    let currentTurn = false;
+    let terminal;
+    for (const message of value) {
+        if (!isRecord(message) || !isRecord(message.info))
+            continue;
+        const info = message.info;
+        if (typeof info.id !== "string" || baseline.has(info.id))
+            continue;
+        if (info.role === "user") {
+            currentTurn = true;
+            terminal = undefined;
+        }
+        if (currentTurn && info.type === "idle" &&
+            (info.outcome === "succeeded" || info.outcome === "failed" || info.outcome === "interrupted")) {
+            const error = sessionErrorMessage(info.error);
+            terminal = { outcome: info.outcome, ...(error ? { error } : {}) };
+        }
+    }
+    return terminal;
 }
 function v2ToolEvent(data, type, event, streamState) {
     const messageID = typeof data.assistantMessageID === "string"
@@ -734,70 +864,11 @@ function v2ContentText(value) {
     return text || undefined;
 }
 function v2FormQuestion(value) {
-    if (!isRecord(value)) {
-        return null;
-    }
-    const fields = Array.isArray(value.fields) ? value.fields : [];
-    const questions = fields.flatMap((value) => {
-        if (!isRecord(value) ||
-            value.type === "external" ||
-            value.type === "boolean" ||
-            value.hidden === true) {
-            return [];
-        }
-        const options = Array.isArray(value.options)
-            ? value.options.flatMap((value) => {
-                if (!isRecord(value))
-                    return [];
-                const label = typeof value.label === "string"
-                    ? value.label
-                    : typeof value.value === "string"
-                        ? value.value
-                        : "";
-                if (!label)
-                    return [];
-                return [
-                    {
-                        label,
-                        description: typeof value.description === "string"
-                            ? value.description
-                            : label,
-                    },
-                ];
-            })
-            : [];
-        const header = typeof value.title === "string" && value.title.length > 0
-            ? value.title
-            : typeof value.key === "string"
-                ? value.key
-                : "";
-        const question = typeof value.description === "string" && value.description.length > 0
-            ? value.description
-            : header;
-        if (!header || !question) {
-            return [];
-        }
-        return [
-            {
-                header,
-                question,
-                options,
-                multiple: value.type === "multiselect",
-                custom: value.custom !== false,
-            },
-        ];
-    });
-    if (typeof value.id !== "string" ||
-        typeof value.sessionID !== "string" ||
-        questions.length === 0) {
-        return null;
-    }
-    return {
-        type: "question",
-        questionId: value.id,
-        sessionId: value.sessionID,
-        questions,
-    };
+    const form = (0, opencodeV2Form_1.parseV2Form)(value);
+    return form ? {
+        type: "question", questionId: form.id, sessionId: form.sessionID,
+        questions: (0, opencodeV2Form_1.v2LegacyQuestions)(form), form,
+    } : null;
 }
 function normalizeQuestionInfoList(value) {
     if (!Array.isArray(value)) {
@@ -897,6 +968,8 @@ function normalizeQuestionRequest(value) {
         return null;
     }
     const record = value;
+    if (record.form !== undefined)
+        return v2FormQuestion(record.form);
     if (typeof record.id !== "string" || typeof record.sessionID !== "string") {
         return null;
     }
@@ -930,41 +1003,6 @@ function normalizeSessionTree(value) {
             },
         ];
     });
-}
-function pickCurrentRunBlocker(events, sessionId, sessions) {
-    if (events.length === 0) {
-        return undefined;
-    }
-    const sessionIds = getSessionTreeIds(sessionId, sessions);
-    return events.find((event) => sessionIds.has(event.sessionId)) ?? events[0];
-}
-function getSessionTreeIds(sessionId, sessions) {
-    const childrenByParent = new Map();
-    for (const session of sessions) {
-        if (!session.parentId) {
-            continue;
-        }
-        const children = childrenByParent.get(session.parentId);
-        if (children) {
-            children.push(session.id);
-        }
-        else {
-            childrenByParent.set(session.parentId, [session.id]);
-        }
-    }
-    const result = new Set([sessionId]);
-    const queue = [sessionId];
-    for (const current of queue) {
-        const children = childrenByParent.get(current) ?? [];
-        for (const child of children) {
-            if (result.has(child)) {
-                continue;
-            }
-            result.add(child);
-            queue.push(child);
-        }
-    }
-    return result;
 }
 function createAbortError() {
     const error = new Error("Aborted");

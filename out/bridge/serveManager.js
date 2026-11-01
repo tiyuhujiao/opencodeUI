@@ -72,6 +72,8 @@ let managedPort;
 let managedStartDirectory;
 let managedChild;
 let disposePromise;
+let lifecycleGeneration = 0;
+const startingChildren = new Set();
 let portStorage;
 let lastWorkspaceCwd;
 const serveClient = new opencodeServeClient_1.OpencodeServeClient({
@@ -86,15 +88,21 @@ function disposeServeManager() {
     }
     const child = managedChild;
     const port = managedPort;
+    const pendingOperations = [ensurePromise, restartPromise].filter((promise) => promise !== undefined);
+    lifecycleGeneration += 1;
     managedChild = undefined;
     managedPort = undefined;
     managedStartDirectory = undefined;
-    if (currentPort === port) {
-        currentPort = undefined;
-        currentRuntimeDirectory = undefined;
-        currentRuntime = undefined;
-    }
-    const pending = child ? stopManagedChild(child) : Promise.resolve();
+    currentPort = undefined;
+    currentRuntimeDirectory = undefined;
+    currentRuntime = undefined;
+    const children = new Set(startingChildren);
+    if (child)
+        children.add(child);
+    const pending = Promise.allSettled([
+        ...Array.from(children, stopManagedChild),
+        ...pendingOperations,
+    ]).then(() => undefined);
     const promise = pending.finally(async () => {
         if (port) {
             await persistStoredPassword(port, undefined);
@@ -111,16 +119,21 @@ async function ensureServeRunning(cwd) {
     if (disposePromise) {
         await disposePromise;
     }
+    const generation = lifecycleGeneration;
     if (restartPromise) {
         if (canSharePendingRuntime(cwd, restartPromiseWorkspaceRoot)) {
-            return restartPromise;
+            const runtime = await restartPromise;
+            assertLifecycle(generation);
+            return runtime;
         }
         await restartPromise;
         return ensureServeRunning(cwd);
     }
     if (ensurePromise) {
         if (canSharePendingRuntime(cwd, ensurePromiseWorkspaceRoot)) {
-            return ensurePromise;
+            const runtime = await ensurePromise;
+            assertLifecycle(generation);
+            return runtime;
         }
         await ensurePromise;
         return ensureServeRunning(cwd);
@@ -134,15 +147,20 @@ async function ensureServeRunning(cwd) {
     });
     ensurePromise = promise;
     ensurePromiseWorkspaceRoot = workspaceRoot;
-    return ensurePromise;
+    const runtime = await promise;
+    assertLifecycle(generation);
+    return runtime;
 }
 async function restartServeForConfigChange(cwd) {
     rememberWorkspaceCwd(cwd);
     if (disposePromise) {
         await disposePromise;
     }
+    const generation = lifecycleGeneration;
     if (restartPromise) {
-        return restartPromise;
+        const runtime = await restartPromise;
+        assertLifecycle(generation);
+        return runtime;
     }
     const effectiveCwd = cwd ?? lastWorkspaceCwd;
     const workspaceRoot = getWindowsDirectoryRootKey(effectiveCwd);
@@ -154,26 +172,38 @@ async function restartServeForConfigChange(cwd) {
     });
     restartPromise = promise;
     restartPromiseWorkspaceRoot = workspaceRoot;
-    return restartPromise;
+    const runtime = await promise;
+    assertLifecycle(generation);
+    return runtime;
 }
 async function requestServeJson(pathname, cwd) {
     return serveClient.requestJson(pathname, { cwd });
 }
 async function ensureServeRunningInternal(cwd) {
-    if (currentPort) {
-        const password = currentRuntime?.password ?? (await readStoredPassword(currentPort));
-        const probed = await probeServeRuntime(currentPort, password, currentRuntime?.apiVersion);
+    const generation = lifecycleGeneration;
+    const cachedPort = currentPort;
+    const cachedRuntime = currentRuntime;
+    const cachedDirectory = currentRuntimeDirectory;
+    if (cachedPort) {
+        const password = cachedRuntime?.password ?? (await readStoredPassword(cachedPort));
+        assertLifecycle(generation);
+        const probed = await probeServeRuntime(cachedPort, password, cachedRuntime?.apiVersion);
+        assertLifecycle(generation);
         if (probed) {
-            const compatibility = await inspectRuntimeCompatibility(currentPort, cwd, currentRuntimeDirectory ?? getManagedStartDirectory(currentPort), probed);
+            const compatibility = await inspectRuntimeCompatibility(cachedPort, cwd, cachedDirectory ?? getManagedStartDirectory(cachedPort), probed);
+            assertLifecycle(generation);
             if (compatibility.compatible) {
                 currentRuntimeDirectory = compatibility.directory;
-                await persistLastPort(currentPort);
-                currentRuntime = buildRuntime(currentPort, isManagedPort(currentPort), probed);
-                return currentRuntime;
+                const runtime = buildRuntime(cachedPort, isManagedPort(cachedPort), probed);
+                currentRuntime = runtime;
+                await persistLastPort(cachedPort);
+                assertLifecycle(generation);
+                return runtime;
             }
         }
         else {
-            await warnUnauthorizedRuntime(currentPort);
+            await warnUnauthorizedRuntime(cachedPort);
+            assertLifecycle(generation);
             currentPort = undefined;
             currentRuntimeDirectory = undefined;
             currentRuntime = undefined;
@@ -189,64 +219,90 @@ async function ensureServeRunningInternal(cwd) {
     }
     for (const candidatePort of candidatePorts) {
         const password = readEnvironmentPassword() ?? (await readStoredPassword(candidatePort));
+        assertLifecycle(generation);
         const probed = await probeServeRuntime(candidatePort, password);
+        assertLifecycle(generation);
         if (probed) {
             const compatibility = await inspectRuntimeCompatibility(candidatePort, cwd, getManagedStartDirectory(candidatePort), probed);
+            assertLifecycle(generation);
             if (compatibility.compatible) {
                 currentPort = candidatePort;
                 currentRuntimeDirectory = compatibility.directory;
+                const runtime = buildRuntime(candidatePort, isManagedPort(candidatePort), probed);
+                currentRuntime = runtime;
                 await persistLastPort(candidatePort);
-                currentRuntime = buildRuntime(candidatePort, isManagedPort(candidatePort), probed);
-                return currentRuntime;
+                assertLifecycle(generation);
+                return runtime;
             }
         }
     }
     const preferredUsable = await isPortUsable(PREFERRED_PORT);
     let targetPort = preferredUsable ? PREFERRED_PORT : await findFreePort();
+    assertLifecycle(generation);
     const startDirectory = resolveServeStartupDirectory(cwd);
     const previousChild = managedChild;
     const previousPort = managedPort;
     let started;
     try {
-        started = await startServe(targetPort, startDirectory);
+        started = await startServe(targetPort, startDirectory, generation);
     }
     catch (error) {
+        assertLifecycle(generation);
         if (targetPort !== PREFERRED_PORT) {
             throw error;
         }
         targetPort = await findFreePort();
-        started = await startServe(targetPort, startDirectory);
+        assertLifecycle(generation);
+        started = await startServe(targetPort, startDirectory, generation);
     }
+    assertLifecycle(generation);
     activateManagedRuntime(started.child, targetPort, startDirectory);
     currentPort = targetPort;
     currentRuntimeDirectory = startDirectory;
-    currentRuntime = buildRuntime(targetPort, true, started.runtime);
+    const runtime = buildRuntime(targetPort, true, started.runtime);
+    currentRuntime = runtime;
     await persistLastPort(targetPort);
+    assertLifecycle(generation);
     if (previousChild && previousChild !== started.child) {
         await stopManagedChild(previousChild);
         await forgetStoredPassword(previousPort, targetPort);
     }
-    return currentRuntime;
+    assertLifecycle(generation);
+    return runtime;
 }
 async function restartServeForConfigChangeInternal(cwd) {
+    const generation = lifecycleGeneration;
     if (ensurePromise) {
         await ensurePromise;
     }
+    assertLifecycle(generation);
     const targetPort = await findFreePort();
+    assertLifecycle(generation);
     const previousChild = managedChild;
     const previousPort = managedPort;
     const startDirectory = resolveServeStartupDirectory(cwd);
-    const started = await startServe(targetPort, startDirectory);
+    const started = await startServe(targetPort, startDirectory, generation);
+    assertLifecycle(generation);
     activateManagedRuntime(started.child, targetPort, startDirectory);
     currentPort = targetPort;
     currentRuntimeDirectory = startDirectory;
-    currentRuntime = buildRuntime(targetPort, true, started.runtime);
+    const runtime = buildRuntime(targetPort, true, started.runtime);
+    currentRuntime = runtime;
     await persistLastPort(targetPort);
+    assertLifecycle(generation);
     if (previousChild && previousChild !== started.child) {
         await stopManagedChild(previousChild);
         await forgetStoredPassword(previousPort, targetPort);
     }
-    return currentRuntime;
+    assertLifecycle(generation);
+    return runtime;
+}
+function assertLifecycle(generation) {
+    if (generation !== lifecycleGeneration) {
+        const error = new Error('OpenCode serve runtime changed during discovery.');
+        error.name = 'AbortError';
+        throw error;
+    }
 }
 function rememberWorkspaceCwd(cwd) {
     if (cwd?.trim()) {
@@ -354,6 +410,8 @@ function isValidPort(port) {
     return typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 function buildRuntime(port, startedByManager, runtime) {
+    if (!isValidPort(port))
+        throw new Error('Invalid OpenCode serve port.');
     return {
         port,
         baseUrl: `http://${HOSTNAME}:${port}`,
@@ -363,7 +421,7 @@ function buildRuntime(port, startedByManager, runtime) {
         password: runtime.password,
     };
 }
-async function startServe(port, cwd) {
+async function startServe(port, cwd, generation) {
     const env = (0, opencodeEnv_1.withOpencodeBinInPath)();
     const environmentPassword = readEnvironmentPassword();
     const password = environmentPassword ?? createServePassword();
@@ -377,6 +435,7 @@ async function startServe(port, cwd) {
         cwd,
         windowsHide: (0, opencodeEnv_1.shouldHideOpencodeWindow)()
     });
+    startingChildren.add(child);
     child.stdout?.on('data', () => {
         // Drain readiness and diagnostic output so a long-lived V2 server cannot
         // block on a full stdout pipe. The environment password is never logged.
@@ -393,18 +452,24 @@ async function startServe(port, cwd) {
     });
     try {
         await waitForSpawnReady(child);
+        assertLifecycle(generation);
         const runtime = await waitForHealthAfterSpawn(child, port, password, stderrBuffer);
+        assertLifecycle(generation);
         if (generatedPassword && runtime.apiVersion === 'v2') {
             await persistStoredPassword(port, generatedPassword);
         }
+        assertLifecycle(generation);
         return { child, runtime };
     }
     catch (error) {
         await stopManagedChild(child);
+        await persistStoredPassword(port, undefined);
+        startingChildren.delete(child);
         throw error;
     }
 }
 function activateManagedRuntime(child, port, startDirectory) {
+    startingChildren.delete(child);
     managedChild = child;
     managedPort = port;
     managedStartDirectory = startDirectory;
@@ -412,6 +477,7 @@ function activateManagedRuntime(child, port, startDirectory) {
         if (managedChild !== child) {
             return;
         }
+        lifecycleGeneration += 1;
         managedChild = undefined;
         managedPort = undefined;
         managedStartDirectory = undefined;

@@ -57,6 +57,7 @@ import {
 	isWebviewRequestMessage,
 	isWhitelistedWebviewRequestType,
 	type ExtensionResponseMessage,
+	type AgentSummary,
 	type HostKind,
 	type ComposerCommandSummary,
 	type ComposerMcpServerSummary,
@@ -81,6 +82,8 @@ import {
 	getSearchableMessageText,
 } from "../shared/search";
 import { applyRunEventToTranscript } from "../shared/runTranscript";
+import { mapAgentSummaries } from "../shared/agentSummary";
+import type { V2FormAnswer } from "../shared/opencodeV2Form";
 import {
 	BLOCKER_POLL_INTERVAL_MS,
 	armServeStreamTurn,
@@ -89,8 +92,12 @@ import {
 	delay,
 	dispatchServeEvent,
 	dispatchV2ServeEvent,
+	hasPendingServeBlockers,
+	isRunBlockerSession,
 	isSessionIdleStatus,
 	pollServeBlockers,
+	recoverV2TurnTerminal,
+	settleServeBlocker,
 	type PendingPermissionEvent,
 	type PendingQuestionEvent,
 	type RunLifecycleAdapter,
@@ -145,7 +152,18 @@ const TEMPFILE_MAX_BYTES = 10 * 1024 * 1024;
 const TEMPFILE_MAX_BASE64_CHARS = Math.ceil(TEMPFILE_MAX_BYTES / 3) * 4 + 4;
 const TEMPFILE_TTL_MS = 30 * 60_000;
 const MCP_TRANSITION_POLL_DELAYS_MS = [0, 250, 500, 750, 1_000, 1_500, 2_000, 2_500, 3_000] as const;
-const STREAM_NO_EVIDENCE_GRACE_MS = 90_000;
+const STREAM_CONNECTION_TIMEOUT_MS = 10_000;
+
+type ProviderOAuthFlow = {
+	flowId: string;
+	providerId: string;
+	method: number;
+	webview: vscode.Webview;
+	controller: AbortController;
+	cwd: string;
+	endpoint?: OpencodeServeEndpoint;
+	authorization?: ProviderAuthAuthorization;
+};
 
 class EmittedRunError extends Error {
 	public constructor(message: string) {
@@ -153,6 +171,13 @@ class EmittedRunError extends Error {
 		this.name = "EmittedRunError";
 	}
 }
+
+/**
+ * `opencode agent list` on the legacy CLI prints the internal helper agents alongside the
+ * real ones; the CLI picker hides them, and so does the extension. V2 servers flag hidden
+ * agents themselves, so this list only applies to the v1 fallback path.
+ */
+const LEGACY_HIDDEN_AGENT_NAMES = new Set(["compaction", "summary", "title"]);
 
 export class SidebarProvider
 	implements vscode.WebviewViewProvider, vscode.Disposable
@@ -185,6 +210,8 @@ export class SidebarProvider
 		inlineDiffRun?: InlineDiffRun;
 		queue: QueuedPromptEntry[];
 		initialPromptSubmitted: boolean;
+		messageBaselineIds?: Set<string>;
+		streamState?: ServeStreamState;
 	};
 	private readonly sessionExportCache = new Map<string, CachedSessionExport>();
 	private readonly sessionExportInFlight = new Map<
@@ -224,6 +251,8 @@ export class SidebarProvider
 	private readonly inlineDiff: InlineDiffController;
 	private readonly inlineDiffStateSubscription: vscode.Disposable;
 	private readonly serveClient: OpencodeServeClient;
+	private readonly providerOAuthFlows = new Map<string, ProviderOAuthFlow>();
+	private disposed = false;
 
 	public constructor(
 		private readonly extensionUri: vscode.Uri,
@@ -243,6 +272,10 @@ export class SidebarProvider
 	}
 
 	public dispose(): void {
+		this.disposed = true;
+		for (const flow of this.providerOAuthFlows.values()) flow.controller.abort();
+		this.providerOAuthFlows.clear();
+		this.serveClient.dispose();
 		this.activeSessionSearchController?.abort();
 		this.activeSessionSearchController = undefined;
 		this.cancelHiddenViewExpiry();
@@ -606,7 +639,7 @@ export class SidebarProvider
 						webview,
 						message.requestId,
 						message.payload.questionId,
-						message.payload.answers,
+						message.payload.answer ?? message.payload.answers,
 					);
 					return;
 				case "question.reject":
@@ -743,6 +776,7 @@ export class SidebarProvider
 						message.payload.providerId,
 						message.payload.method,
 						message.payload.inputs,
+						message.payload.flowId,
 					);
 					return;
 				case "provider.auth.oauth.callback":
@@ -752,6 +786,18 @@ export class SidebarProvider
 						message.payload.providerId,
 						message.payload.method,
 						message.payload.code,
+						message.payload.flowId,
+						message.payload.attemptID,
+					);
+					return;
+				case "provider.auth.oauth.cancel":
+					void this.handleProviderAuthOAuthCancelRequest(
+						webview,
+						message.requestId,
+						message.payload.providerId,
+						message.payload.method,
+						message.payload.flowId,
+						message.payload.attemptID,
 					);
 					return;
 				case "provider.auth.disconnect":
@@ -1771,10 +1817,11 @@ export class SidebarProvider
 		message?: string,
 	): Promise<void> {
 		try {
-			const pendingSessionId =
-				this.currentRun?.pendingPermission?.permissionId === permissionId
-					? this.currentRun.pendingPermission.sessionId
-					: undefined;
+			const run = this.currentRun;
+			if (!run || run.pendingPermission?.permissionId !== permissionId) {
+				throw new Error("权限请求已结束或不属于当前运行。");
+			}
+			const pendingSessionId = run.pendingPermission.sessionId;
 			const sessionQuery =
 				pendingSessionId && await this.isV2Runtime()
 					? `?sessionID=${encodeURIComponent(pendingSessionId)}`
@@ -1784,11 +1831,15 @@ export class SidebarProvider
 				{
 					method: "POST",
 					body: JSON.stringify({ reply, message }),
+					signal: run.controller.signal,
 				},
 			);
-			if (this.currentRun?.pendingPermission?.permissionId === permissionId) {
-				this.currentRun.pendingPermission = undefined;
-				this.currentRun.revision += 1;
+			if (this.currentRun === run) {
+				if (run.streamState) settleServeBlocker(this.createRunLifecycleAdapter(webview, run.requestId), "permission", permissionId, run.streamState);
+				else if (run.pendingPermission?.permissionId === permissionId) {
+					run.pendingPermission = undefined;
+					run.revision += 1;
+				}
 			}
 			this.respond(webview, {
 				type: "permission.reply.response",
@@ -1808,13 +1859,14 @@ export class SidebarProvider
 		webview: vscode.Webview,
 		requestId: string,
 		questionId: string,
-		answers: string[][],
+		answers: string[][] | V2FormAnswer,
 	): Promise<void> {
 		try {
-			const pendingSessionId =
-				this.currentRun?.pendingQuestion?.questionId === questionId
-					? this.currentRun.pendingQuestion.sessionId
-					: undefined;
+			const run = this.currentRun;
+			if (!run || run.pendingQuestion?.questionId !== questionId) {
+				throw new Error("问题已结束或不属于当前运行。");
+			}
+			const pendingSessionId = run.pendingQuestion.sessionId;
 			const sessionQuery =
 				pendingSessionId && await this.isV2Runtime()
 					? `?sessionID=${encodeURIComponent(pendingSessionId)}`
@@ -1823,12 +1875,16 @@ export class SidebarProvider
 				`/question/${encodeURIComponent(questionId)}/reply${sessionQuery}`,
 				{
 					method: "POST",
-					body: JSON.stringify({ answers }),
+					body: JSON.stringify(Array.isArray(answers) ? { answers } : { answer: answers }),
+					signal: run.controller.signal,
 				},
 			);
-			if (this.currentRun?.pendingQuestion?.questionId === questionId) {
-				this.currentRun.pendingQuestion = undefined;
-				this.currentRun.revision += 1;
+			if (this.currentRun === run) {
+				if (run.streamState) settleServeBlocker(this.createRunLifecycleAdapter(webview, run.requestId), "question", questionId, run.streamState);
+				else if (run.pendingQuestion?.questionId === questionId) {
+					run.pendingQuestion = undefined;
+					run.revision += 1;
+				}
 			}
 			this.respond(webview, {
 				type: "question.reply.response",
@@ -1847,10 +1903,11 @@ export class SidebarProvider
 		questionId: string,
 	): Promise<void> {
 		try {
-			const pendingSessionId =
-				this.currentRun?.pendingQuestion?.questionId === questionId
-					? this.currentRun.pendingQuestion.sessionId
-					: undefined;
+			const run = this.currentRun;
+			if (!run || run.pendingQuestion?.questionId !== questionId) {
+				throw new Error("问题已结束或不属于当前运行。");
+			}
+			const pendingSessionId = run.pendingQuestion.sessionId;
 			const sessionQuery =
 				pendingSessionId && await this.isV2Runtime()
 					? `?sessionID=${encodeURIComponent(pendingSessionId)}`
@@ -1859,11 +1916,15 @@ export class SidebarProvider
 				`/question/${encodeURIComponent(questionId)}/reject${sessionQuery}`,
 				{
 					method: "POST",
+					signal: run.controller.signal,
 				},
 			);
-			if (this.currentRun?.pendingQuestion?.questionId === questionId) {
-				this.currentRun.pendingQuestion = undefined;
-				this.currentRun.revision += 1;
+			if (this.currentRun === run) {
+				if (run.streamState) settleServeBlocker(this.createRunLifecycleAdapter(webview, run.requestId), "question", questionId, run.streamState);
+				else if (run.pendingQuestion?.questionId === questionId) {
+					run.pendingQuestion = undefined;
+					run.revision += 1;
+				}
 			}
 			this.respond(webview, {
 				type: "question.reject.response",
@@ -2136,7 +2197,7 @@ export class SidebarProvider
 		requestId: string,
 		providerId: string,
 		key: string,
-		metadata: Record<string, string>,
+		metadata: V2FormAnswer,
 	): Promise<void> {
 		try {
 			const body = {
@@ -2166,27 +2227,56 @@ export class SidebarProvider
 		requestId: string,
 		providerId: string,
 		method: number,
-		inputs: Record<string, string>,
+		inputs: V2FormAnswer,
+		flowId = requestId,
 	): Promise<void> {
+		if (this.disposed) return;
+		const previous = this.providerOAuthFlows.get(flowId);
+		if (previous) {
+			void this.cancelProviderOAuthFlow(previous).catch((error) =>
+				logWarn(`取消旧 Provider OAuth 登录失败：${error instanceof Error ? error.message : String(error)}`),
+			);
+		}
+		const flow: ProviderOAuthFlow = {
+			flowId, providerId, method, webview,
+			controller: new AbortController(), cwd: this.getDefaultCwd() ?? "",
+		};
+		this.providerOAuthFlows.set(flowId, flow);
 		try {
+			flow.endpoint = await ensureServeRunning(flow.cwd || undefined);
+			if (!this.isCurrentProviderOAuthFlow(flow)) return;
 			const authorization = await this.requestServeJson<ProviderAuthAuthorization | null>(
 				`/provider/${encodeURIComponent(providerId)}/oauth/authorize`,
 				{
 					method: "POST",
 					body: JSON.stringify({ method, inputs }),
+					cwd: flow.cwd,
+					endpoint: flow.endpoint,
+					signal: flow.controller.signal,
 				},
 			);
 			if (!authorization) {
 				throw new Error("OpenCode 未返回 OAuth 授权信息。");
 			}
+			flow.authorization = authorization;
+			if (!this.isCurrentProviderOAuthFlow(flow)) {
+				await this.cancelProviderOAuthFlow(flow);
+				return;
+			}
 			await this.openProviderAuthUrl(authorization.url);
+			if (!this.isCurrentProviderOAuthFlow(flow)) return;
 			this.respond(webview, {
 				type: "provider.auth.oauth.authorize.response",
 				requestId,
 				ok: true,
-				payload: { providerId, method, authorization },
+				payload: { providerId, method, authorization, flowId },
 			});
 		} catch (error) {
+			const active = this.isCurrentProviderOAuthFlow(flow);
+			await this.cancelProviderOAuthFlow(flow).catch((cleanupError) =>
+				logWarn(`清理 Provider OAuth 登录失败：${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`),
+			);
+			if (!active) return;
 			this.respondError(webview, requestId, error, "启动 Provider OAuth 登录失败。");
 		}
 	}
@@ -2197,24 +2287,94 @@ export class SidebarProvider
 		providerId: string,
 		method: number,
 		code?: string,
+		flowId?: string,
+		attemptID?: string,
 	): Promise<void> {
+		let flow: ProviderOAuthFlow | undefined;
 		try {
+			flow = this.findProviderOAuthFlow(webview, providerId, method, flowId, attemptID);
+			if (!flow || !flow.authorization || !this.isCurrentProviderOAuthFlow(flow)) {
+				throw new Error("Provider OAuth 登录已结束，请重新启动授权。");
+			}
+			const authorization = flow.authorization;
 			await this.requestServeJson<boolean>(
 				`/provider/${encodeURIComponent(providerId)}/oauth/callback`,
 				{
 					method: "POST",
-					body: JSON.stringify({ method, ...(code ? { code } : {}) }),
+					body: JSON.stringify({ method, ...(code ? { code } : {}),
+						...(authorization.attemptID ? { attemptID: authorization.attemptID } : {}) }),
+					cwd: flow.cwd,
+					endpoint: flow.endpoint,
+					signal: flow.controller.signal,
 				},
 			);
+			if (!this.isCurrentProviderOAuthFlow(flow)) return;
+			this.providerOAuthFlows.delete(flow.flowId);
 			this.invalidateProviderCaches();
 			this.respond(webview, {
 				type: "provider.auth.oauth.callback.response",
 				requestId,
 				ok: true,
-				payload: { providerId },
+				payload: { providerId, flowId: flow.flowId, attemptID: authorization.attemptID },
 			});
 		} catch (error) {
+			if (flow) {
+				const active = this.isCurrentProviderOAuthFlow(flow);
+				await this.cancelProviderOAuthFlow(flow).catch((cleanupError) =>
+					logWarn(`清理 Provider OAuth 登录失败：${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`),
+				);
+				if (!active) return;
+			}
+			if (this.disposed) return;
 			this.respondError(webview, requestId, error, "完成 Provider OAuth 登录失败。");
+		}
+	}
+
+	private isCurrentProviderOAuthFlow(flow: ProviderOAuthFlow): boolean {
+		return !this.disposed && !flow.controller.signal.aborted
+			&& this.providerOAuthFlows.get(flow.flowId) === flow;
+	}
+
+	private findProviderOAuthFlow(
+		webview: vscode.Webview, providerId: string, method: number,
+		flowId?: string, attemptID?: string,
+	): ProviderOAuthFlow | undefined {
+		const flows = flowId ? [this.providerOAuthFlows.get(flowId)] : [...this.providerOAuthFlows.values()];
+		const matches = flows.filter((flow): flow is ProviderOAuthFlow => flow !== undefined
+			&& flow.webview === webview && flow.providerId === providerId && flow.method === method
+			&& (!attemptID || flow.authorization?.attemptID === attemptID));
+		return matches.length === 1 ? matches[0] : undefined;
+	}
+
+	private async cancelProviderOAuthFlow(flow: ProviderOAuthFlow): Promise<void> {
+		flow.controller.abort();
+		if (this.providerOAuthFlows.get(flow.flowId) === flow) this.providerOAuthFlows.delete(flow.flowId);
+		if (flow.endpoint?.apiVersion === "v2" && flow.authorization?.attemptID) {
+			await this.requestServeJson<boolean>(`/provider/${encodeURIComponent(flow.providerId)}/oauth/cancel`, {
+				method: "POST", cwd: flow.cwd, endpoint: flow.endpoint,
+				signal: AbortSignal.timeout(6_000),
+				body: JSON.stringify({ method: flow.method, attemptID: flow.authorization.attemptID }),
+			});
+		}
+	}
+
+	private async handleProviderAuthOAuthCancelRequest(
+		webview: vscode.Webview, requestId: string, providerId: string, method: number,
+		flowId: string, attemptID?: string,
+	): Promise<void> {
+		try {
+			const flow = this.findProviderOAuthFlow(webview, providerId, method, flowId, attemptID);
+			if (!flow && this.providerOAuthFlows.has(flowId)) {
+				throw new Error("Provider OAuth 登录标识不匹配。");
+			}
+			if (flow) await this.cancelProviderOAuthFlow(flow);
+			if (this.disposed) return;
+			this.respond(webview, {
+				type: "provider.auth.oauth.cancel.response", requestId, ok: true,
+				payload: { providerId, flowId },
+			});
+		} catch (error) {
+			this.respondError(webview, requestId, error, "取消 Provider OAuth 登录失败。");
 		}
 	}
 
@@ -2516,20 +2676,7 @@ export class SidebarProvider
 	): Promise<void> {
 		try {
 			if (await this.isV2Runtime()) {
-				const rawAgents = await this.requestServeJson<unknown>("/agent");
-				const agents = Array.isArray(rawAgents)
-					? rawAgents.flatMap((entry) => {
-							if (!isRecord(entry) || typeof entry.id !== "string") {
-								return [];
-							}
-							return [
-								{
-									name: entry.id,
-									isPrimary: entry.isPrimary !== false,
-								},
-							];
-						})
-					: [];
+				const agents = await this.fetchV2AgentSummaries();
 				this.respond(webview, {
 					type: "agents.list.response",
 					requestId,
@@ -2548,11 +2695,31 @@ export class SidebarProvider
 					agents: entries.map((entry) => ({
 						name: entry.name,
 						isPrimary: entry.isPrimary,
+						hidden: LEGACY_HIDDEN_AGENT_NAMES.has(entry.name.trim().toLowerCase()),
 					})),
 				},
 			});
 		} catch (error) {
 			this.respondError(webview, requestId, error, "获取 agents 失败。");
+		}
+	}
+
+	/**
+	 * Mirrors the CLI agent picker: every primary, non-hidden agent reported by the server.
+	 * Custom agents (for example the presets an omo install adds, or anything dropped into
+	 * ~/.config/opencode/agent) are part of that same list, so they show up here automatically.
+	 */
+	private async fetchV2AgentSummaries(): Promise<AgentSummary[]> {
+		// A freshly started `opencode serve` can answer the first `/agent` call with an empty
+		// list while the config and agent directories are still loading. Retry briefly here;
+		// the webview also re-asks a few times, so a slow warm-up still ends with the real list.
+		const retryDelaysMs = [150, 300, 600, 1200];
+		for (let attempt = 0; ; attempt += 1) {
+			const agents = mapAgentSummaries(await this.requestServeJson<unknown>("/agent"));
+			if (agents.length > 0 || attempt >= retryDelaysMs.length) {
+				return agents;
+			}
+			await new Promise<void>((resolve) => setTimeout(resolve, retryDelaysMs[attempt]));
 		}
 	}
 
@@ -2834,8 +3001,7 @@ export class SidebarProvider
 			}),
 			this.safeCount(async () => {
 				if (v2) {
-					const payload = await this.requestServeJson<unknown>("/agent");
-					return Array.isArray(payload) ? payload.length : 0;
+					return mapAgentSummaries(await this.requestServeJson<unknown>("/agent")).length;
 				}
 				const result = await agentList({ env, cwd });
 				const parsed = parseAgentList(result.stdout);
@@ -3102,6 +3268,9 @@ export class SidebarProvider
 			if (this.currentRun?.requestId !== requestId) {
 				return;
 			}
+			if (runtime.apiVersion === "v2" && !this.currentRun.messageBaselineIds) {
+				throw new Error("无法确认 OpenCode 会话历史，消息尚未发送，请重试。");
+			}
 			inlineDiffRun = this.inlineDiff.beginRun({
 				runId: requestId,
 				sessionId,
@@ -3115,6 +3284,8 @@ export class SidebarProvider
 			while (this.currentRun?.requestId === requestId) {
 				const turnStartedAt = Date.now();
 				const streamState = createServeStreamState();
+				this.currentRun.streamState = streamState;
+				streamState.baselineMessageIds = this.currentRun.messageBaselineIds;
 				const eventAbort = new AbortController();
 				this.currentRun.eventAbort = eventAbort;
 				let markEventStreamReady!: () => void;
@@ -3508,6 +3679,7 @@ export class SidebarProvider
 		webview: vscode.Webview,
 		requestId: string,
 		sessionId: string,
+		providedMessages?: unknown,
 	): Promise<boolean> {
 		const queue = this.currentRun?.requestId === requestId
 			? this.currentRun.queue
@@ -3516,7 +3688,7 @@ export class SidebarProvider
 			return false;
 		}
 
-		const rawMessages = await this.requestServeJson<unknown>(
+		const rawMessages = providedMessages ?? await this.requestServeJson<unknown>(
 			`/session/${encodeURIComponent(sessionId)}/message`,
 		);
 		if (!Array.isArray(rawMessages)) {
@@ -3536,7 +3708,7 @@ export class SidebarProvider
 			}
 			const info = rawInfo as Record<string, unknown>;
 			if (
-				info.role !== "assistant" ||
+				(info.role !== "assistant" && info.type !== "idle") ||
 				typeof info.parentID !== "string" ||
 				typeof info.id !== "string"
 			) {
@@ -3718,6 +3890,12 @@ export class SidebarProvider
 			if (!run || run.requestId !== requestId) {
 				return;
 			}
+			run.messageBaselineIds = new Set(
+				Array.isArray(rawMessages) ? rawMessages.flatMap((message) =>
+					isRecord(message) && isRecord(message.info) && typeof message.info.id === "string"
+						? [message.info.id] : [],
+				) : [],
+			);
 			const currentTurn = run.recoveryTranscript.slice(-2);
 			run.recoveryTranscript = [...history, ...currentTurn];
 			run.recoveryAssistantIndex = run.recoveryTranscript.length - 1;
@@ -3980,58 +4158,54 @@ export class SidebarProvider
 		onReady?: () => void,
 	): Promise<"done" | "stopped" | Error> {
 		const lifecycle = this.createRunLifecycleAdapter(webview, requestId);
+		const streamController = new AbortController();
+		const abortStream = () => streamController.abort();
+		signal.addEventListener("abort", abortStream, { once: true });
+		if (signal.aborted) abortStream();
 		let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+		let connectionTimer: NodeJS.Timeout | undefined;
+		let connectionTimedOut = false;
 		try {
-			const stream = await this.serveClient.openEventStream(runtime, signal);
+			const connectionTimeout = new Promise<never>((_resolve, reject) => {
+				connectionTimer = setTimeout(() => {
+					connectionTimedOut = true;
+					streamController.abort();
+					reject(new Error("连接 OpenCode 事件流超时，消息尚未发送。"));
+				}, STREAM_CONNECTION_TIMEOUT_MS);
+			});
+			const stream = await Promise.race([
+				this.serveClient.openEventStream(runtime, streamController.signal),
+				connectionTimeout,
+			]);
+			clearTimeout(connectionTimer);
 			reader = stream.getReader();
 			onReady?.();
 			const decoder = new TextDecoder();
 			let buffer = "";
 			let pendingRead = reader.read();
 			let streamEnded = false;
-
-			while (!signal.aborted && !streamEnded) {
-				const next = await Promise.race([
-					pendingRead.then(
-						(result) => ({ type: "read" as const, result }),
-						(error: unknown) => ({ type: "readError" as const, error }),
-					),
-					delay(250, signal).then(() => ({ type: "poll" as const })),
-				]);
+			while (!signal.aborted) {
+				const next = streamEnded
+					? await delay(250, signal).then(() => ({ type: "poll" as const }))
+					: await Promise.race([
+						pendingRead.then(
+							(result) => ({ type: "read" as const, result }),
+							(error: unknown) => ({ type: "readError" as const, error }),
+						),
+						delay(250, signal).then(() => ({ type: "poll" as const })),
+					]);
 				if (next.type === "readError") {
-					// V2 drops the stream when a slow consumer overflows, and the
-					// execution keeps running server-side. Fall back to polling
-					// instead of failing the whole turn.
-					const message =
-						next.error instanceof Error ? next.error.message : String(next.error);
-					logWarn(`serve event stream interrupted, falling back to polling: ${message}`);
-					console.warn(
-						"[opencode-ui] serve event stream interrupted, falling back to polling:",
-						message,
-					);
+					logWarn("serve event stream interrupted; recovering from native session state");
 					streamEnded = true;
 					continue;
 				}
 				if (next.type === "poll") {
-					if (
-						await this.isServeTurnIdle(sessionId, streamState)
-					) {
-						await pollServeBlockers(
-							lifecycle,
-							requestId,
-							sessionId,
-							streamState,
-						);
-						if (
-							canCompleteServeStreamTurn(streamState) &&
-							(await this.isServeTurnIdle(sessionId, streamState))
-						) {
-							return "done";
-						}
-					}
+					const completion = await this.recoverServeTurn(
+						webview, requestId, sessionId, runtime, signal, streamState, lifecycle,
+					);
+					if (completion !== undefined) return completion;
 					continue;
 				}
-
 				const { done, value } = next.result;
 				if (done) {
 					streamEnded = true;
@@ -4044,129 +4218,83 @@ export class SidebarProvider
 					const chunk = buffer.slice(0, boundary);
 					buffer = buffer.slice(boundary + 2);
 					boundary = buffer.indexOf("\n\n");
-					const data = chunk
-						.split("\n")
+					const data = chunk.split("\n")
 						.filter((line) => line.startsWith("data:"))
-						.map((line) => line.slice(5).trim())
-						.join("\n");
-					if (!data) {
-						continue;
-					}
+						.map((line) => line.slice(5).trim()).join("\n");
+					if (!data) continue;
 					let event: unknown;
-					try {
-						event = JSON.parse(data);
-					} catch {
-						continue;
-					}
-					const result =
-						runtime.apiVersion === "v2"
-							? dispatchV2ServeEvent(
-									lifecycle,
-									requestId,
-									sessionId,
-									event,
-									streamState,
-								)
-							: dispatchServeEvent(
-									lifecycle,
-									requestId,
-									sessionId,
-									event,
-									streamState,
-								);
-					if (result.error) {
-						return new EmittedRunError(result.error);
-					}
+					try { event = JSON.parse(data); } catch { continue; }
+					const result = runtime.apiVersion === "v2"
+						? dispatchV2ServeEvent(lifecycle, requestId, sessionId, event, streamState)
+						: dispatchServeEvent(lifecycle, requestId, sessionId, event, streamState);
+					if (result.error) return new EmittedRunError(result.error);
+					if ("stopped" in result && result.stopped) return "stopped";
 					if (result.done) {
-						await pollServeBlockers(
-							lifecycle,
-							requestId,
-							sessionId,
-							streamState,
+						const completion = await this.recoverServeTurn(
+							webview, requestId, sessionId, runtime, signal, streamState, lifecycle,
 						);
-						if (
-							canCompleteServeStreamTurn(streamState) &&
-							(await this.isServeTurnIdle(sessionId, streamState))
-						) {
-							return "done";
-						}
+						if (completion !== undefined) return completion;
 					}
 				}
-			}
-
-			// The stream is gone. Poll until the session is idle; if no live
-			// event ever arrived, stop waiting after a bounded grace so a fast
-			// turn that finished before the stream opened cannot hang forever.
-			const noEvidenceDeadline = Date.now() + STREAM_NO_EVIDENCE_GRACE_MS;
-			while (!signal.aborted) {
-				await pollServeBlockers(lifecycle, requestId, sessionId, streamState);
-				if (
-					canCompleteServeStreamTurn(streamState) &&
-					(await this.isServeTurnIdle(sessionId, streamState))
-				) {
-					return "done";
-				}
-				if (
-					Date.now() >= noEvidenceDeadline &&
-					(await this.isServeSessionIdle(sessionId))
-				) {
-					logWarn(
-						"serve turn finished without live events; completing from session status",
-					);
-					return "done";
-				}
-				await delay(250, signal).catch(() => undefined);
 			}
 			return "stopped";
 		} catch (error) {
+			if (signal.aborted) return "stopped";
+			if (connectionTimedOut) return new Error("连接 OpenCode 事件流超时，消息尚未发送。");
 			return error instanceof Error ? error : new Error(String(error));
 		} finally {
+			clearTimeout(connectionTimer);
+			signal.removeEventListener("abort", abortStream);
+			streamController.abort();
 			await reader?.cancel().catch(() => undefined);
 		}
 	}
 
-	private async isServeSessionIdle(sessionId: string): Promise<boolean> {
-		try {
-			const statuses = await this.requestServeJson<unknown>("/session/status");
-			return isSessionIdleStatus(statuses, sessionId);
-		} catch {
-			return false;
-		}
-	}
-
-	private async isServeTurnIdle(
+	private async recoverServeTurn(
+		webview: vscode.Webview,
+		requestId: string,
 		sessionId: string,
+		runtime: OpencodeServeEndpoint,
+		signal: AbortSignal,
 		streamState: ServeStreamState,
-	): Promise<boolean> {
-		if (!canCompleteServeStreamTurn(streamState)) {
-			return false;
-		}
+		lifecycle: RunLifecycleAdapter,
+	): Promise<"done" | "stopped" | Error | undefined> {
+		if (!lifecycle.isCurrentRun(requestId) || signal.aborted) return "stopped";
+		if (!streamState.turnArmed) return undefined;
 		try {
-			const statuses = await this.requestServeJson<unknown>("/session/status");
-			const idle = isSessionIdleStatus(statuses, sessionId);
-			const run = this.currentRun;
-			if (idle && run?.sessionId === sessionId && run.queue.length > 0) {
-				const webview = this.runEventWebview ?? this.view?.webview;
-				if (webview) {
-					await this.reconcileQueuedAssistantBoundary(
-						webview,
-						run.requestId,
-						sessionId,
-					);
-					const current = this.currentRun;
-					if (!current || current.sessionId !== sessionId) {
-						return true;
-					}
-					if (current.queue.length === 0) {
-						return true;
-					}
-					this.scheduleQueuedPromptDelivery(webview, run.requestId);
-				}
-				return false;
+			const statuses = await this.requestServeJson<unknown>("/session/status", { signal });
+			if (!isSessionIdleStatus(statuses, sessionId)) return undefined;
+			await pollServeBlockers(lifecycle, requestId, sessionId, streamState);
+			if (!streamState.blockerPollHealthy || hasPendingServeBlockers(streamState)) return undefined;
+			let messages: unknown;
+			if (runtime.apiVersion === "v2" || this.currentRun?.queue.length) {
+				messages = await this.requestServeJson<unknown>(
+					`/session/${encodeURIComponent(sessionId)}/message`, { signal },
+				);
+				await this.reconcileQueuedAssistantBoundary(webview, requestId, sessionId, messages);
 			}
-			return idle;
+			const run = this.currentRun;
+			if (!run || run.requestId !== requestId || signal.aborted) return "stopped";
+			if (run.queue.length > 0) {
+				this.scheduleQueuedPromptDelivery(webview, requestId);
+				return undefined;
+			}
+			if (runtime.apiVersion === "v2") {
+				const terminal = recoverV2TurnTerminal(messages, streamState.baselineMessageIds);
+				if (!terminal) return undefined;
+				const transcript = liveMessagesToTranscript(messages);
+				run.recoveryTranscript = transcript;
+				let assistantIndex = transcript.length - 1;
+				while (assistantIndex >= 0 && transcript[assistantIndex].role !== "assistant") assistantIndex -= 1;
+				run.recoveryAssistantIndex = assistantIndex;
+				run.revision += 1;
+				this.postRunSnapshot(webview);
+				if (terminal.outcome === "failed") return new Error(terminal.error || "运行失败。");
+				return terminal.outcome === "interrupted" ? "stopped" : "done";
+			}
+			return canCompleteServeStreamTurn(streamState) ? "done" : undefined;
 		} catch {
-			return false;
+			return signal.aborted ? "stopped" : undefined;
 		}
 	}
 
@@ -4225,13 +4353,15 @@ export class SidebarProvider
 				candidateRequestId,
 				sessionId,
 				blockerSessionId,
+				streamState,
 			) => {
-				if (!blockerSessionId) {
+				if (!blockerSessionId || !streamState) {
 					return false;
 				}
 				return (
-					blockerSessionId === sessionId ||
-					this.currentRun?.requestId === candidateRequestId
+					this.currentRun?.requestId === candidateRequestId &&
+					this.currentRun.sessionId === sessionId &&
+					isRunBlockerSession(sessionId, blockerSessionId, streamState)
 				);
 			},
 			setPendingPermission: (event) => {
@@ -4239,6 +4369,7 @@ export class SidebarProvider
 					this.currentRun.pendingPermission = event;
 					this.currentRun.revision += 1;
 					if (!event) {
+						this.postRunSnapshot(webview);
 						this.scheduleQueuedPromptDelivery(webview, requestId);
 					}
 				}
@@ -4248,6 +4379,7 @@ export class SidebarProvider
 					this.currentRun.pendingQuestion = event;
 					this.currentRun.revision += 1;
 					if (!event) {
+						this.postRunSnapshot(webview);
 						this.scheduleQueuedPromptDelivery(webview, requestId);
 					}
 				}
@@ -4669,6 +4801,8 @@ export class SidebarProvider
 		init?: OpencodeServeRequestOptions,
 	): Promise<T> {
 		return this.serveClient.requestJson<T>(pathname, {
+			endpoint: init?.endpoint,
+			cwd: init?.cwd,
 			method: init?.method ?? "GET",
 			body: init?.body,
 			includeCwd: init?.includeCwd ?? true,
@@ -4716,6 +4850,8 @@ export class SidebarProvider
 		init?: OpencodeServeRequestOptions,
 	): Promise<void> {
 		return this.serveClient.requestNoContent(pathname, {
+			endpoint: init?.endpoint,
+			cwd: init?.cwd,
 			method: init?.method ?? "POST",
 			body: init?.body,
 			includeCwd: init?.includeCwd ?? true,

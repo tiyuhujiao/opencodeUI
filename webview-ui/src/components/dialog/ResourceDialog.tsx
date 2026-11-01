@@ -6,6 +6,7 @@ import type {
   ComposerSkillSummary
 } from '../../../../src/shared/protocol'
 import { useI18n } from '../../i18n'
+import { getAgentLabel, getSelectableAgents } from '../../agentOptions'
 
 export type ResourceDialogKind = 'mcp' | 'skills' | 'agents' | 'thinking'
 
@@ -14,6 +15,8 @@ type ResourceDialogProps = {
   mcpServers: ComposerMcpServerSummary[]
   skills: ComposerSkillSummary[]
   agents: AgentSummary[]
+  agentsLoading?: boolean
+  agentsError?: string | null
   thinkingOptions: string[]
   selectedAgent: string
   selectedThinking: string
@@ -51,6 +54,7 @@ function ResourceKindIcon({ kind }: { kind: ResourceDialogKind }) {
 export function ResourceDialog(props: ResourceDialogProps) {
   const { t } = useI18n()
   const { kind, onClose } = props
+  const refreshing = kind === 'agents' ? props.agentsLoading === true : props.refreshing
 
   useEffect(() => {
     if (!kind) {
@@ -82,15 +86,15 @@ export function ResourceDialog(props: ResourceDialogProps) {
             <div className="dialog__title">{t(titles[kind])}</div>
           </div>
           <div className="resource-dialog__headerActions">
-            {(kind === 'mcp' || kind === 'skills') ? (
+            {(kind === 'mcp' || kind === 'skills' || kind === 'agents') ? (
               <button
                 type="button"
-                className={`icon-button resource-dialog__refresh${props.refreshing ? ' is-loading' : ''}`}
+                className={`icon-button resource-dialog__refresh${refreshing ? ' is-loading' : ''}`}
                 onClick={props.onRefresh}
-                aria-label={props.refreshing ? t('Refreshing') : t('Refresh')}
-                aria-busy={props.refreshing}
-                title={props.refreshing ? t('Refreshing') : t('Refresh')}
-                disabled={props.refreshing}
+                aria-label={refreshing ? t('Refreshing') : t('Refresh')}
+                aria-busy={refreshing}
+                title={refreshing ? t('Refreshing') : t('Refresh')}
+                disabled={refreshing}
               >
                 <RefreshCw size={14} strokeWidth={1.8} />
               </button>
@@ -188,13 +192,22 @@ function SkillList(props: ResourceDialogProps) {
 }
 
 function AgentList(props: ResourceDialogProps) {
+  const { t } = useI18n()
+  const agents = getSelectableAgents(props.agents)
   return (
-    <div className="resource-dialog__list">
-      {props.agents.map((agent) => {
+    <div className="resource-dialog__list" aria-live="polite">
+      {props.agentsError ? <div className="dialog__error resource-dialog__error" role="alert">{t(props.agentsError)}</div> : null}
+      {agents.length === 0 ? (
+        <div className="dialog__empty">{props.agentsLoading ? t('Loading agents...') : t('No agents')}</div>
+      ) : null}
+      {agents.map((agent) => {
         const selected = agent.name === props.selectedAgent
         return (
           <button type="button" className={`resource-dialog__item${selected ? ' is-selected' : ''}`} key={agent.name} onClick={() => props.onSelectAgent(agent.name)}>
-            <span className="resource-dialog__name">{agent.name}</span>
+            <span className="resource-dialog__main">
+              <span className="resource-dialog__name">{getAgentLabel(agent)}</span>
+              {agent.description ? <span className="resource-dialog__status">{agent.description}</span> : null}
+            </span>
             {selected ? <Check size={14} strokeWidth={2} aria-hidden="true" /> : null}
           </button>
         )

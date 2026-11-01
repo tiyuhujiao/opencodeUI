@@ -77,7 +77,8 @@ class FakeChildProcess {
 
 function configureHealthResponses(
   requestMock: ReturnType<typeof vi.fn>,
-  byPort: Record<number, HealthScenario>
+  byPort: Record<number, HealthScenario>,
+  onResponse?: (path: string) => void
 ): number[] {
   const calledPorts: number[] = [];
 
@@ -136,6 +137,7 @@ function configureHealthResponses(
           }
         }
         callback(response);
+        onResponse?.(options.path ?? '');
       })
     };
 
@@ -242,6 +244,47 @@ afterEach(() => {
 });
 
 describe('ensureServeRunning 端口策略', () => {
+  it('disposal during a cached V2 health probe rejects the stale runtime and permits a fresh ensure', async () => {
+    const { serveManager, requestMock, spawnMock } = await setup(4096);
+    const health = { 4096: { type: 'v2', version: '2.1.4' } } as const;
+    configureHealthResponses(requestMock, health);
+    await serveManager.ensureServeRunning();
+    let disposal: Promise<void> | undefined;
+    configureHealthResponses(requestMock, health, (path) => {
+      if (path === '/api/info') disposal = serveManager.disposeServeManager();
+    });
+    await expect(serveManager.ensureServeRunning()).rejects.toMatchObject({ name: 'AbortError' });
+    await disposal;
+    configureHealthResponses(requestMock, health);
+    await expect(serveManager.ensureServeRunning()).resolves.toMatchObject({
+      port: 4096, baseUrl: 'http://127.0.0.1:4096', apiVersion: 'v2'
+    });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('a managed child exiting during its health probe cannot publish a cleared port', async () => {
+    vi.useFakeTimers();
+    const { serveManager, requestMock, createServerMock, spawnMock } = await setup(undefined);
+    const health = {
+      4096: { type: 'error' },
+      5522: { type: 'v2', version: '2.1.4' }
+    } as const;
+    configureHealthResponses(requestMock, health);
+    configureNetServers(createServerMock, [{ type: 'error' }, { type: 'listening', addressPort: 5522 }]);
+    const child = new FakeChildProcess();
+    spawnMock.mockReturnValue(child as never);
+    const first = serveManager.ensureServeRunning();
+    await vi.advanceTimersByTimeAsync(350);
+    await first;
+    configureHealthResponses(requestMock, health, (path) => {
+      if (path === '/api/info') {
+        child.exitCode = 1;
+        child.emit('exit', 1);
+      }
+    });
+    await expect(serveManager.ensureServeRunning()).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
   it('serve JSON 请求复用已发现端口并编码 workspace cwd', async () => {
     const { serveManager, requestMock } = await setup(5111);
     configureHealthResponses(requestMock, {

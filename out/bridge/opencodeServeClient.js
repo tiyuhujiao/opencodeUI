@@ -10,7 +10,7 @@ class OpencodeServeClient {
     }
     async requestJson(pathname, options) {
         const cwd = this.resolveCwd(options);
-        const runtime = await this.options.ensureRuntime(cwd);
+        const runtime = options?.endpoint ?? await this.options.ensureRuntime(cwd);
         if (runtime.apiVersion === 'v2') {
             return (await (0, opencodeV2Adapter_1.requestOpencodeV2Json)(this.v2AdapterState, this.fetch.bind(this), runtime, pathname, options, this.options.getDefaultCwd?.()));
         }
@@ -21,7 +21,7 @@ class OpencodeServeClient {
     }
     async requestNoContent(pathname, options) {
         const cwd = this.resolveCwd(options);
-        const runtime = await this.options.ensureRuntime(cwd);
+        const runtime = options?.endpoint ?? await this.options.ensureRuntime(cwd);
         if (runtime.apiVersion === 'v2') {
             await (0, opencodeV2Adapter_1.requestOpencodeV2NoContent)(this.v2AdapterState, this.fetch.bind(this), runtime, pathname, options, this.options.getDefaultCwd?.());
             return;
@@ -61,6 +61,9 @@ class OpencodeServeClient {
     }
     invalidateProviderCache() {
         this.v2AdapterState.providerCache.clear();
+    }
+    dispose() {
+        void (0, opencodeV2Adapter_1.disposeOpencodeV2Adapter)(this.v2AdapterState, this.fetch.bind(this));
     }
     async requestWithRuntime(runtime, pathname, options, headers) {
         const cwd = this.resolveCwd(options);

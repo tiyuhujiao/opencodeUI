@@ -83,6 +83,12 @@ describe('OpenCode workspace directory header', () => {
       dispose: () => void;
     };
     provider.getDefaultCwd = () => cwd;
+    (provider as unknown as { currentRun: unknown }).currentRun = {
+      requestId: 'request-1', sessionId: 'session-1', revision: 0,
+      controller: new AbortController(), startedAt: 1, promptText: 'prompt',
+      placeholderTitle: 'prompt', startedNewSession: false,
+      recoveryTranscript: [], recoveryAssistantIndex: -1, queue: [], initialPromptSubmitted: false
+    };
 
     try {
       await expect(provider.requestServeJson('/session')).resolves.toEqual({ ok: true });

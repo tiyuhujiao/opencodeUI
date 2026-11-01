@@ -8,7 +8,7 @@ English | [简体中文](./README.zh-CN.md)
 
 OpenCode is powerful, but using it should not mean constantly moving between the editor, terminal, and configuration files. We built `opencode-ui` to give OpenCode a clear visual home inside VS Code, so conversations, tools, model choices, and code changes stay close to the work they belong to.
 
-Version `1.0.22` supports both the OpenCode v1 server API and the OpenCode v2 API. The extension detects the API at runtime, so the same sidebar workflow continues to work when you upgrade from OpenCode v1 to v2. Compatibility has been verified against OpenCode `2.1.4`.
+Version `1.0.24` supports both the OpenCode v1 server API and the OpenCode v2 API. The extension detects the API at runtime, so the same sidebar workflow continues to work when you upgrade from OpenCode v1 to v2. Compatibility has been verified against OpenCode `2.1.4`.
 
 ## Preview
 

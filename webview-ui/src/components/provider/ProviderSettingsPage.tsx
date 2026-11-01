@@ -68,6 +68,7 @@ import {
 } from '../../providerSettings'
 import { createRequestId, getVsCodeApi } from '../../vscodeApi'
 import { useI18n } from '../../i18n'
+import type { V2FormAnswer } from '../../../../src/shared/opencodeV2Form'
 import {
   ProviderConnectDialog,
   type ProviderAuthFlow
@@ -88,11 +89,11 @@ type PendingRequest =
   | { kind: 'save'; providerId: string }
   | { kind: 'delete'; providerId: string }
   | { kind: 'open' }
-  | { kind: 'auth-api'; providerId: string }
-  | { kind: 'auth-authorize'; providerId: string; method: number }
-  | { kind: 'auth-callback'; providerId: string }
-  | { kind: 'auth-disconnect'; providerId: string }
-  | { kind: 'auth-open-external'; url: string }
+  | { kind: 'auth-api'; providerId: string; flowId: string }
+  | { kind: 'auth-authorize'; providerId: string; method: number; flowId: string }
+  | { kind: 'auth-callback'; providerId: string; flowId: string; attemptID?: string }
+  | { kind: 'auth-disconnect'; providerId: string; flowId: string }
+  | { kind: 'auth-open-external'; url: string; flowId: string }
 
 type ConfirmState = {
   title: string
@@ -149,7 +150,14 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
   }>(null)
   const [loadingUpstreamProvider, setLoadingUpstreamProvider] = useState<string | null>(null)
   const [upstreamError, setUpstreamError] = useState<string | null>(null)
-  const [authFlow, setAuthFlow] = useState<ProviderAuthFlow | null>(null)
+  const [authFlow, setAuthFlowState] = useState<ProviderAuthFlow | null>(null)
+  const authFlowRef = useRef<ProviderAuthFlow | null>(null)
+
+  const setAuthFlow = useCallback((next: ProviderAuthFlow | null | ((current: ProviderAuthFlow | null) => ProviderAuthFlow | null)) => {
+    const value = typeof next === 'function' ? next(authFlowRef.current) : next
+    authFlowRef.current = value
+    setAuthFlowState(value)
+  }, [])
 
   const pendingRequestsRef = useRef<Map<string, PendingRequest>>(new Map())
   const pendingActionRef = useRef<(() => void) | null>(null)
@@ -209,6 +217,32 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
     vscode.postMessage({ ...message, requestId })
   }, [])
 
+  const cancelAuthFlow = useCallback((flow: ProviderAuthFlow | null) => {
+    if (!flow) return
+    for (const [requestId, pending] of pendingRequestsRef.current) {
+      if ('flowId' in pending && pending.flowId === flow.id) pendingRequestsRef.current.delete(requestId)
+    }
+    if (flow.methodIndex !== null && (flow.authorization || flow.busy === 'authorize' || flow.busy === 'callback')) {
+      getVsCodeApi()?.postMessage({
+        type: 'provider.auth.oauth.cancel', requestId: createRequestId(),
+        payload: {
+          providerId: flow.entry.id, method: flow.methodIndex, flowId: flow.id,
+          ...(flow.authorization?.attemptID ? { attemptID: flow.authorization.attemptID } : {})
+        }
+      })
+    }
+  }, [])
+
+  const closeAuthFlow = useCallback(() => {
+    cancelAuthFlow(authFlowRef.current)
+    setAuthFlow(null)
+  }, [cancelAuthFlow, setAuthFlow])
+
+  useEffect(() => () => {
+    cancelAuthFlow(authFlowRef.current)
+    authFlowRef.current = null
+  }, [cancelAuthFlow])
+
   const requestSnapshot = useCallback(
     (targetScope: ProviderSettingsScope, forceRefresh = false, preferredId?: string) => {
       setError(null)
@@ -244,6 +278,7 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
         return
       }
       pendingRequestsRef.current.delete(message.requestId)
+      if ('flowId' in pending && pending.flowId !== authFlowRef.current?.id) return
 
       if (message.type === 'webview.error' && !message.ok) {
         if (
@@ -256,6 +291,7 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
           setAuthFlow((current) => current ? {
             ...current,
             busy: pending.kind === 'auth-open-external' ? current.busy : null,
+            authorization: pending.kind === 'auth-callback' ? null : current.authorization,
             openingUrl: false,
             error: message.error
           } : current)
@@ -321,8 +357,9 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
         return
       }
       if (pending.kind === 'auth-authorize' && message.type === 'provider.auth.oauth.authorize.response' && message.ok) {
+        if (message.payload.flowId !== undefined && message.payload.flowId !== pending.flowId) return
         const authorization = message.payload.authorization
-        setAuthFlow((current) => current && current.entry.id === pending.providerId ? {
+        setAuthFlow((current) => current && current.id === pending.flowId ? {
           ...current,
           methodIndex: pending.method,
           authorization,
@@ -333,9 +370,12 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
           postRequest(
             {
               type: 'provider.auth.oauth.callback',
-              payload: { providerId: pending.providerId, method: pending.method }
+              payload: {
+                providerId: pending.providerId, method: pending.method, flowId: pending.flowId,
+                ...(authorization.attemptID ? { attemptID: authorization.attemptID } : {})
+              }
             },
-            { kind: 'auth-callback', providerId: pending.providerId }
+            { kind: 'auth-callback', providerId: pending.providerId, flowId: pending.flowId, attemptID: authorization.attemptID }
           )
         }
         return
@@ -352,6 +392,8 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
         return
       }
       if (pending.kind === 'auth-callback' && message.type === 'provider.auth.oauth.callback.response' && message.ok) {
+        if ((message.payload.flowId !== undefined && message.payload.flowId !== pending.flowId)
+          || (pending.attemptID !== undefined && message.payload.attemptID !== pending.attemptID)) return
         setAuthFlow(null)
         requestSnapshot(scope, true)
         setNotice(`${message.payload.providerId} signed in`)
@@ -368,7 +410,7 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
 
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [applySnapshot, onCatalogChanged, postRequest, requestSnapshot, scope])
+  }, [applySnapshot, onCatalogChanged, postRequest, requestSnapshot, scope, setAuthFlow])
 
   const runAfterDiscard = useCallback((action: () => void) => {
     const current = draftRef.current
@@ -390,7 +432,9 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
       const catalog = snapshot?.catalog.find((provider) => provider.id === providerId)
       if (catalog?.builtIn) {
         const methods = catalog.authMethods.length > 0 ? catalog.authMethods : [{ type: 'api' as const }]
+        cancelAuthFlow(authFlowRef.current)
         setAuthFlow({
+          id: createRequestId(),
           entry: catalog,
           methodIndex: methods.length === 1 ? 0 : null,
           authorization: null,
@@ -409,7 +453,7 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
         setMobileListOnly(false)
       })
     },
-    [runAfterDiscard, setLoadedDraft, snapshot]
+    [cancelAuthFlow, runAfterDiscard, setAuthFlow, setLoadedDraft, snapshot]
   )
 
   const createCustomProvider = useCallback(() => {
@@ -514,91 +558,103 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
   )
 
   const selectAuthMethod = useCallback((methodIndex: number | null) => {
+    cancelAuthFlow(authFlowRef.current)
     setAuthFlow((current) => current ? {
       ...current,
+      id: createRequestId(),
       methodIndex,
       authorization: null,
       busy: null,
+      openingUrl: false,
       error: null
     } : current)
-  }, [])
+  }, [cancelAuthFlow, setAuthFlow])
 
-  const requestApiConnect = useCallback((method: number, key: string, metadata: Record<string, string>) => {
-    const providerId = authFlow?.entry.id
-    if (!providerId || authFlow.busy) {
+  const requestApiConnect = useCallback((method: number, key: string, metadata: V2FormAnswer) => {
+    const current = authFlowRef.current
+    const providerId = current?.entry.id
+    if (!current || !providerId || current.busy) {
       return
     }
     setAuthFlow((current) => current ? { ...current, methodIndex: method, busy: 'api', error: null } : current)
     postRequest(
       { type: 'provider.auth.api', payload: { providerId, key, metadata } },
-      { kind: 'auth-api', providerId }
+      { kind: 'auth-api', providerId, flowId: current.id }
     )
-  }, [authFlow, postRequest])
+  }, [postRequest, setAuthFlow])
 
-  const requestOAuthAuthorize = useCallback((method: number, inputs: Record<string, string>) => {
-    const providerId = authFlow?.entry.id
-    if (!providerId || authFlow.busy) {
+  const requestOAuthAuthorize = useCallback((method: number, inputs: V2FormAnswer) => {
+    const current = authFlowRef.current
+    const providerId = current?.entry.id
+    if (!current || !providerId || current.busy) {
       return
     }
+    cancelAuthFlow(current)
+    const flowId = createRequestId()
     setAuthFlow((current) => current ? {
       ...current,
+      id: flowId,
       methodIndex: method,
       authorization: null,
       busy: 'authorize',
       error: null
     } : current)
     postRequest(
-      { type: 'provider.auth.oauth.authorize', payload: { providerId, method, inputs } },
-      { kind: 'auth-authorize', providerId, method }
+      { type: 'provider.auth.oauth.authorize', payload: { providerId, method, inputs, flowId } },
+      { kind: 'auth-authorize', providerId, method, flowId }
     )
-  }, [authFlow, postRequest])
+  }, [cancelAuthFlow, postRequest, setAuthFlow])
 
   const requestOAuthCallback = useCallback((code?: string) => {
-    const providerId = authFlow?.entry.id
-    const method = authFlow?.methodIndex
-    if (!providerId || method === null || method === undefined || authFlow.busy) {
+    const current = authFlowRef.current
+    const providerId = current?.entry.id
+    const method = current?.methodIndex
+    if (!current?.authorization || !providerId || method === null || method === undefined || current.busy) {
       return
     }
     setAuthFlow((current) => current ? { ...current, busy: 'callback', error: null } : current)
     postRequest(
       {
         type: 'provider.auth.oauth.callback',
-        payload: { providerId, method, ...(code ? { code } : {}) }
+        payload: { providerId, method, flowId: current.id, ...(code ? { code } : {}),
+          ...(current.authorization.attemptID ? { attemptID: current.authorization.attemptID } : {}) }
       },
-      { kind: 'auth-callback', providerId }
+      { kind: 'auth-callback', providerId, flowId: current.id, attemptID: current.authorization.attemptID }
     )
-  }, [authFlow, postRequest])
+  }, [postRequest, setAuthFlow])
 
   const reopenAuthUrl = useCallback(() => {
-    const url = authFlow?.authorization?.url
-    if (!url || authFlow.openingUrl) {
+    const current = authFlowRef.current
+    const url = current?.authorization?.url
+    if (!current || !url || current.openingUrl) {
       return
     }
     setAuthFlow((current) => current ? { ...current, openingUrl: true, error: null } : current)
     postRequest(
       { type: 'provider.auth.openExternal', payload: { url } },
-      { kind: 'auth-open-external', url }
+      { kind: 'auth-open-external', url, flowId: current.id }
     )
-  }, [authFlow, postRequest])
+  }, [postRequest, setAuthFlow])
 
   const disconnectProvider = useCallback(() => {
-    const providerId = authFlow?.entry.id
-    if (!providerId || authFlow.busy) {
+    const current = authFlowRef.current
+    const providerId = current?.entry.id
+    if (!current || !providerId || current.busy) {
       return
     }
     setAuthFlow((current) => current ? { ...current, busy: 'disconnect', error: null } : current)
     postRequest(
       { type: 'provider.auth.disconnect', payload: { providerId } },
-      { kind: 'auth-disconnect', providerId }
+      { kind: 'auth-disconnect', providerId, flowId: current.id }
     )
-  }, [authFlow, postRequest])
+  }, [postRequest, setAuthFlow])
 
   const editProviderOverrides = useCallback(() => {
     const entry = authFlow?.entry
     if (!entry) {
       return
     }
-    setAuthFlow(null)
+    closeAuthFlow()
     runAfterDiscard(() => {
       const configured = snapshot?.configured.find((provider) => provider.id === entry.id)
       setLoadedDraft(configured ?? providerDraftFromCatalog(entry), entry.id)
@@ -607,7 +663,7 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
       setError(null)
       setNotice(null)
     })
-  }, [authFlow, runAfterDiscard, setLoadedDraft, snapshot])
+  }, [authFlow, closeAuthFlow, runAfterDiscard, setLoadedDraft, snapshot])
 
   const visibleProviders = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase()
@@ -864,7 +920,7 @@ export function ProviderSettingsPage({ onClose, onCatalogChanged }: ProviderSett
       {authFlow ? (
         <ProviderConnectDialog
           flow={authFlow}
-          onClose={() => setAuthFlow(null)}
+          onClose={closeAuthFlow}
           onSelectMethod={selectAuthMethod}
           onApiConnect={requestApiConnect}
           onAuthorize={requestOAuthAuthorize}
